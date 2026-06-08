@@ -1,11 +1,16 @@
 name: Sync upstream
 
 # Daily check for new commits on the upstream repository this fork tracks.
-# When upstream is ahead, a `chore/upstream-sync` branch is force-updated to
+# When upstream is ahead, the chore/upstream-sync branch is advanced to
 # upstream's tip and a PR is opened (or updated) to merge those changes into the
-# fork's default branch. The merge itself is performed by GitHub when the PR is
-# merged, so merge conflicts surface in the PR UI rather than failing this job;
-# a trial-merge probe additionally lists any conflicting files in the PR body.
+# fork's default branch. GitHub performs the actual merge when the PR is merged,
+# so conflicts surface in the PR UI; a trial-merge probe also lists conflicting
+# files in the PR body.
+#
+# The job is stateless and idempotent, so skipping merges for any number of days
+# is fine: each run recomputes the full delta and refreshes the same PR. It also
+# never discards manual commits on the sync branch (e.g. conflict resolutions you
+# started but haven't merged yet) — those are preserved across runs.
 
 on:
   schedule:
@@ -21,8 +26,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Override either by setting repository variables (Settings -> Secrets and
-  # variables -> Actions -> Variables) named UPSTREAM_REPO / UPSTREAM_BRANCH.
+  # Override via repository variables (Settings -> Secrets and variables ->
+  # Actions -> Variables) named UPSTREAM_REPO / UPSTREAM_BRANCH.
   UPSTREAM_REPO: ${{ vars.UPSTREAM_REPO || 'multica-ai/multica' }}
   UPSTREAM_BRANCH: ${{ vars.UPSTREAM_BRANCH || 'main' }}
   SYNC_BRANCH: chore/upstream-sync
@@ -53,62 +58,111 @@ jobs:
           git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
           git fetch --no-tags upstream "${UPSTREAM_BRANCH}"
 
-      - name: Check for new commits
-        id: check
+      - name: Prepare sync branch
+        id: prepare
         run: |
           set -euo pipefail
           DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
           echo "default_branch=${DEFAULT_BRANCH}" >> "$GITHUB_OUTPUT"
+          git fetch --no-tags origin "${DEFAULT_BRANCH}"
 
           AHEAD=$(git rev-list --count "origin/${DEFAULT_BRANCH}..upstream/${UPSTREAM_BRANCH}")
           echo "Upstream is ${AHEAD} commit(s) ahead of origin/${DEFAULT_BRANCH}."
           echo "ahead=${AHEAD}" >> "$GITHUB_OUTPUT"
           if [ "${AHEAD}" = "0" ]; then
-            echo "Already up to date; nothing to do."
+            echo "Already up to date; leaving any open sync PR untouched."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # Trial merge to detect conflicts up front. Done on a detached HEAD and
-          # immediately aborted — it never touches any branch or remote.
+          # Does the sync branch already exist on the fork (from a previous run
+          # whose PR hasn't been merged yet)?
+          BRANCH_EXISTS=false
+          if git ls-remote --exit-code --heads origin "${SYNC_BRANCH}" >/dev/null 2>&1; then
+            BRANCH_EXISTS=true
+            git fetch --no-tags origin "+refs/heads/${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}"
+          fi
+
+          MODE=""
+          if [ "${BRANCH_EXISTS}" = false ]; then
+            # First sync, or the branch was deleted after a previous merge:
+            # (re)create it at upstream's tip.
+            MODE="reset"
+          else
+            # The branch survived one or more skipped days. Only commits that
+            # also exist upstream are safe to discard; anything extra is human
+            # work (e.g. conflict resolution) that must be preserved.
+            EXTRA=$(git rev-list --count "upstream/${UPSTREAM_BRANCH}..origin/${SYNC_BRANCH}")
+            echo "Sync branch has ${EXTRA} commit(s) not present upstream."
+            if [ "${EXTRA}" = "0" ]; then
+              MODE="reset"
+            else
+              MODE="merge"
+            fi
+          fi
+
+          if [ "${MODE}" = "reset" ]; then
+            # Nothing on the branch worth keeping -> point it straight at the new
+            # upstream tip. Force is safe here: no human commits are lost.
+            git push --force origin \
+              "refs/remotes/upstream/${UPSTREAM_BRANCH}:refs/heads/${SYNC_BRANCH}"
+            SYNC_HEAD_SHA=$(git rev-parse "upstream/${UPSTREAM_BRANCH}")
+          else
+            # Preserve manual commits: merge the newer upstream INTO the existing
+            # branch rather than overwriting it.
+            git checkout -q -B "${SYNC_BRANCH}" "origin/${SYNC_BRANCH}"
+            if git merge --no-edit "upstream/${UPSTREAM_BRANCH}"; then
+              # Fast-forward / clean merge of remote branch -> regular push.
+              git push origin "${SYNC_BRANCH}"
+              SYNC_HEAD_SHA=$(git rev-parse HEAD)
+            else
+              # Can't auto-apply new upstream commits on top of the manual work.
+              # Leave the branch exactly as the human left it; the PR body will
+              # flag that newer upstream commits await manual integration.
+              git merge --abort 2>/dev/null || true
+              MODE="blocked"
+              SYNC_HEAD_SHA=$(git rev-parse "origin/${SYNC_BRANCH}")
+            fi
+          fi
+          echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
+
+          # Trial merge of the resulting sync head into the PR base, to report
+          # any conflicts in the PR body. Detached + aborted; touches nothing.
           CONFLICTS=""
           git checkout -q --detach "origin/${DEFAULT_BRANCH}"
-          if ! git merge --no-commit --no-ff "upstream/${UPSTREAM_BRANCH}" >/dev/null 2>&1; then
+          if ! git merge --no-commit --no-ff "${SYNC_HEAD_SHA}" >/dev/null 2>&1; then
             CONFLICTS=$(git diff --name-only --diff-filter=U | tr '\n' ' ')
           fi
           git merge --abort 2>/dev/null || true
-          git checkout -q "${DEFAULT_BRANCH}"
           echo "conflicts=${CONFLICTS}" >> "$GITHUB_OUTPUT"
 
-      - name: Update sync branch
-        if: steps.check.outputs.ahead != '0'
-        run: |
-          set -euo pipefail
-          # The sync branch tracks upstream's tip exactly. Opening a PR from it
-          # into the default branch lets GitHub compute the real merge commit
-          # (bringing upstream changes in while preserving fork commits) and
-          # report conflicts, without this job having to resolve them.
-          git push --force origin \
-            "refs/remotes/upstream/${UPSTREAM_BRANCH}:refs/heads/${SYNC_BRANCH}"
-
       - name: Create or update pull request
-        if: steps.check.outputs.ahead != '0'
+        if: steps.prepare.outputs.skip != 'true'
         run: |
           set -euo pipefail
-          DEFAULT_BRANCH="${{ steps.check.outputs.default_branch }}"
-          AHEAD="${{ steps.check.outputs.ahead }}"
-          CONFLICTS="${{ steps.check.outputs.conflicts }}"
+          DEFAULT_BRANCH="${{ steps.prepare.outputs.default_branch }}"
+          AHEAD="${{ steps.prepare.outputs.ahead }}"
+          CONFLICTS="${{ steps.prepare.outputs.conflicts }}"
+          MODE="${{ steps.prepare.outputs.mode }}"
 
           TITLE="chore: sync ${AHEAD} commit(s) from upstream ${UPSTREAM_REPO}"
 
-          # Plain text only (no backticks) to keep the shell from interpreting
-          # the body as command substitution.
+          # Plain text only (no backticks) so the shell does not treat the body
+          # as command substitution.
           nl=$'\n'
           BODY="Automated daily sync from upstream ${UPSTREAM_REPO}@${UPSTREAM_BRANCH}.${nl}${nl}"
           BODY="${BODY}- ${AHEAD} new upstream commit(s) since ${DEFAULT_BRANCH}.${nl}"
           BODY="${BODY}- Merging this PR brings upstream changes into ${DEFAULT_BRANCH} while preserving fork-specific commits.${nl}"
-          BODY="${BODY}- The sync branch (${SYNC_BRANCH}) is force-updated to upstream's tip on each run, so this PR refreshes automatically.${nl}"
+          case "${MODE}" in
+            reset)
+              BODY="${BODY}- The ${SYNC_BRANCH} branch was refreshed to upstream's tip. Safe to rerun daily; skipping merges just advances it.${nl}" ;;
+            merge)
+              BODY="${BODY}- New upstream commits were merged into the existing manual changes on ${SYNC_BRANCH} (your in-progress work was preserved).${nl}" ;;
+            blocked)
+              BODY="${BODY}- ACTION NEEDED: ${AHEAD} upstream commit(s) are available but could NOT be auto-merged into ${SYNC_BRANCH} because it has manual changes that conflict. The branch was left untouched — merge upstream/${UPSTREAM_BRANCH} into ${SYNC_BRANCH} manually to incorporate them.${nl}" ;;
+          esac
           if [ -n "${CONFLICTS}" ]; then
-            BODY="${BODY}${nl}WARNING: a trial merge found conflicts in: ${CONFLICTS}${nl}"
+            BODY="${BODY}${nl}WARNING: merging into ${DEFAULT_BRANCH} currently conflicts in: ${CONFLICTS}${nl}"
             BODY="${BODY}Resolve them on the ${SYNC_BRANCH} branch before merging.${nl}"
           fi
           BODY="${BODY}${nl}Generated by .github/workflows/sync-upstream.yml${nl}"
