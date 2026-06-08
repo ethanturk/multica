@@ -151,12 +151,18 @@ func handleToolCall(ctx context.Context, params json.RawMessage, reg *Registry, 
 	start := time.Now()
 	res := runHandler(cctx, tool, args, env)
 	if logger != nil {
+		// Audit record: tool, normalized outcome, duration, input size, and
+		// artifact paths. The raw argument payload is intentionally not logged
+		// (it may carry repo-specific or sensitive command strings); its byte
+		// size is recorded instead.
 		logger.Info("dettools invocation",
 			"tool", tool.Name,
 			"status", res.Status,
 			"error_code", res.ErrorCode,
 			"duration_ms", time.Since(start).Milliseconds(),
-			"artifacts", len(res.Artifacts),
+			"work_dir", env.WorkDir,
+			"arg_bytes", len(args),
+			"artifacts", artifactPaths(res.Artifacts),
 		)
 	}
 	return toolResultPayload(res)
@@ -189,6 +195,19 @@ func toolResultPayload(res Result) map[string]any {
 		"structuredContent": res,
 		"isError":           res.Status != StatusOK,
 	}
+}
+
+// artifactPaths returns the relative paths of the given artifacts for audit
+// logging.
+func artifactPaths(artifacts []Artifact) []string {
+	if len(artifacts) == 0 {
+		return nil
+	}
+	paths := make([]string, len(artifacts))
+	for i, a := range artifacts {
+		paths[i] = a.Path
+	}
+	return paths
 }
 
 func writeResult(enc *json.Encoder, id json.RawMessage, result any) {

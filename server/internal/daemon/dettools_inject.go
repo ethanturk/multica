@@ -15,12 +15,15 @@ import (
 const dettoolsServerName = "multica-tools"
 
 // dettoolsExecOptionsProviders lists the providers that receive the
-// deterministic tool server through ExecOptions.McpConfig (the --mcp-config /
-// config.toml injection path). Phase 1 ships claude only; codex follows in
-// Phase 2 (its backend already reads ExecOptions.McpConfig, so adding it here is
-// a one-line change once validated).
+// deterministic tool server through ExecOptions.McpConfig. Both consume the same
+// Claude-style {"mcpServers":{name:{command,args,env}}} shape:
+//   - claude writes it to a temp file passed via --mcp-config;
+//   - codex renders it into the daemon-managed [mcp_servers.*] block of the
+//     per-task CODEX_HOME/config.toml (command/args/env keys pass through
+//     verbatim, and "multica-tools" is a valid bare TOML key).
 var dettoolsExecOptionsProviders = map[string]bool{
 	"claude": true,
+	"codex":  true,
 }
 
 // injectDeterministicTools returns agentCfg with the daemon-managed deterministic

@@ -144,10 +144,12 @@ func TestInjectDeterministicTools_Gating(t *testing.T) {
 		t.Errorf("non-injecting provider: config changed: %s", got)
 	}
 
-	// Enabled + claude → injects the server.
-	got := dEnabled.injectDeterministicTools(orig, "claude", "/w", logger)
-	servers := parseServers(t, got)
-	if _, ok := servers[dettoolsServerName]; !ok {
-		t.Error("claude: deterministic server not injected")
+	// Enabled + claude/codex → injects the server.
+	for _, provider := range []string{"claude", "codex"} {
+		got := dEnabled.injectDeterministicTools(orig, provider, "/w", logger)
+		servers := parseServers(t, got)
+		if _, ok := servers[dettoolsServerName]; !ok {
+			t.Errorf("%s: deterministic server not injected", provider)
+		}
 	}
 }

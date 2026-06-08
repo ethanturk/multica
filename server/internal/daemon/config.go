@@ -62,8 +62,17 @@ const (
 )
 
 // DefaultDetToolsAllowed is the deterministic tool allowlist applied when
-// MULTICA_DETTOOLS_ALLOWED is unset. Kept to the read-only Phase 1 catalog.
-var DefaultDetToolsAllowed = []string{"repo_facts", "policy_check"}
+// MULTICA_DETTOOLS_ALLOWED is unset. Covers the full non-destructive catalog;
+// artifact_emit only writes under the task artifact dir, and build_probe /
+// test_gate run the repo's own toolchain rather than mutating sources.
+var DefaultDetToolsAllowed = []string{
+	"repo_facts",
+	"policy_check",
+	"build_probe",
+	"test_gate",
+	"diff_summarize",
+	"artifact_emit",
+}
 
 // DefaultGCArtifactPatterns lists basename matches that the GC loop treats as
 // regenerable build artifacts. Kept conservative: only directories that are

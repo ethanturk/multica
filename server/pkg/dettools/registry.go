@@ -35,6 +35,10 @@ func allTools() []Tool {
 	return []Tool{
 		repoFactsTool(),
 		policyCheckTool(),
+		buildProbeTool(),
+		testGateTool(),
+		diffSummarizeTool(),
+		artifactEmitTool(),
 	}
 }
 

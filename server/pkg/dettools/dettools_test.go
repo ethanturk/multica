@@ -15,9 +15,10 @@ import (
 
 func testEnv(workDir string) ToolEnv {
 	return ToolEnv{
-		WorkDir: workDir,
-		Timeout: 30 * time.Second,
-		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		WorkDir:     workDir,
+		Timeout:     30 * time.Second,
+		ArtifactDir: ".multica/artifacts",
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }
 
@@ -179,10 +180,10 @@ func TestServeRoundTrip(t *testing.T) {
 		t.Errorf("protocolVersion = %v", initResult["protocolVersion"])
 	}
 
-	// tools/list contains both tools.
+	// tools/list contains the full catalog.
 	toolsList := responses[1]["result"].(map[string]any)["tools"].([]any)
-	if len(toolsList) != 2 {
-		t.Errorf("tools/list returned %d tools, want 2", len(toolsList))
+	if len(toolsList) != len(allTools()) {
+		t.Errorf("tools/list returned %d tools, want %d", len(toolsList), len(allTools()))
 	}
 
 	// tools/call returns a non-error result with structured content.
