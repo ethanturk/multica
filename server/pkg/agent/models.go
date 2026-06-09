@@ -137,6 +137,10 @@ func ListModels(ctx context.Context, providerType, executablePath string) ([]Mod
 		return cachedDiscovery(providerType, func() ([]Model, error) {
 			return discoverPiModels(ctx, executablePath)
 		})
+	case "omp":
+		return cachedDiscovery(providerType, func() ([]Model, error) {
+			return discoverOmpModels(ctx, executablePath)
+		})
 	case "openclaw":
 		return cachedDiscovery(providerType, func() ([]Model, error) {
 			return discoverOpenclawAgents(ctx, executablePath)
@@ -1305,4 +1309,65 @@ func isOpenclawIdentifier(s string) bool {
 		}
 	}
 	return true
+}
+
+// discoverOmpModels runs `omp --list-models` and parses its tabular output.
+// The output format: `provider  model  context  max-out  ...` columns.
+// On any failure we fall back to an empty list.
+func discoverOmpModels(ctx context.Context, executablePath string) ([]Model, error) {
+	if executablePath == "" {
+		executablePath = "omp"
+	}
+	if _, err := exec.LookPath(executablePath); err != nil {
+		return []Model{}, nil
+	}
+	runCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(runCtx, executablePath, "--list-models")
+	hideAgentWindow(cmd)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	stdout, err := cmd.Output()
+	if err != nil {
+		return []Model{}, nil
+	}
+	text := string(stdout)
+	if strings.TrimSpace(text) == "" {
+		text = stderr.String()
+	}
+	return parseOmpModels(text), nil
+}
+
+// parseOmpModels parses `omp --list-models` output. omp prints two
+// sections (Canonical models, Provider models) each as a table with
+// `provider  model  context  max-out  ...` columns. We extract
+// provider/model from every data row and skip header rows.
+func parseOmpModels(output string) []Model {
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var models []Model
+	seen := map[string]bool{}
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		first := fields[0]
+		// Skip section headers ("Canonical", "Provider") and column headers
+		if strings.EqualFold(first, "provider") || strings.EqualFold(first, "canonical") {
+			continue
+		}
+		id := first + "/" + fields[1]
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		provider := first
+		models = append(models, Model{ID: id, Label: id, Provider: provider})
+	}
+	return models
 }
