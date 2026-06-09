@@ -2850,6 +2850,11 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			agentEnv[k] = v
 		}
 	}
+	// Pi reaches the deterministic tool plane through pi-mcp-adapter (opt-in,
+	// experimental). Writes a per-task adapter config and points Pi at it via
+	// env. No-op for every other provider and when the Pi adapter is disabled.
+	d.preparePiToolPlane(provider, env.RootDir, env.WorkDir, agentMcpConfig, agentRuntimeConfig, agentEnv, d.logger)
+
 	backend, err := agent.New(provider, agent.Config{
 		ExecutablePath: entry.Path,
 		Env:            agentEnv,

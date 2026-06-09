@@ -15,6 +15,7 @@ describe("providerSupportsMcpConfig", () => {
 
   it("is false for non-MCP providers and nullish input", () => {
     expect(providerSupportsMcpConfig("gemini")).toBe(false);
+    // pi is adapter-backed, not native, so the native mcp_config tab stays hidden.
     expect(providerSupportsMcpConfig("pi")).toBe(false);
     expect(providerSupportsMcpConfig(undefined)).toBe(false);
     expect(providerSupportsMcpConfig(null)).toBe(false);
@@ -32,15 +33,15 @@ describe("mcpSupportKind", () => {
     expect(mcpSupportKind(undefined)).toBe("none");
   });
 
-  it("pi is currently none (adapter integration not yet wired)", () => {
-    expect(mcpSupportKind("pi")).toBe("none");
+  it("classifies pi as adapter-backed", () => {
+    expect(mcpSupportKind("pi")).toBe("adapter");
   });
 });
 
 describe("toolPlaneSupported", () => {
-  it("tracks native support today", () => {
+  it("covers native and adapter-backed providers", () => {
     expect(toolPlaneSupported("codex")).toBe(true);
+    expect(toolPlaneSupported("pi")).toBe(true);
     expect(toolPlaneSupported("gemini")).toBe(false);
-    expect(toolPlaneSupported("pi")).toBe(false);
   });
 });

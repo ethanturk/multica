@@ -23,14 +23,14 @@ export function providerSupportsMcpConfig(provider: string | undefined | null): 
 
 // How a provider reaches MCP / the deterministic tool plane:
 // - "native"  — the runtime consumes mcp_config directly (the set above).
-// - "adapter" — the runtime needs a bridge (e.g. pi-mcp-adapter for Pi) to
-//   reach MCP servers. None are wired yet; the set is intentionally empty until
-//   the adapter integration lands, so we never report a capability we can't
-//   deliver. Pi will move here once the adapter path is implemented.
+// - "adapter" — the runtime needs a bridge to reach MCP servers. Pi has no
+//   native MCP and reaches the tool plane through pi-mcp-adapter; the daemon
+//   path is opt-in (MULTICA_DETTOOLS_PI_ADAPTER) and fail-open, so actual
+//   availability still depends on the adapter being installed at runtime.
 // - "none"    — no MCP support.
 export type McpSupportKind = "native" | "adapter" | "none";
 
-const ADAPTER_MCP_PROVIDERS = new Set<string>([]);
+const ADAPTER_MCP_PROVIDERS = new Set<string>(["pi"]);
 
 export function mcpSupportKind(provider: string | undefined | null): McpSupportKind {
   if (!provider) return "none";
