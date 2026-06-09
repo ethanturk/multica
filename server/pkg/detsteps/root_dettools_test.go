@@ -66,6 +66,33 @@ func TestRootDettoolSourcesRun(t *testing.T) {
 				"now":             "2026-06-09T10:06:00Z",
 			},
 		},
+		{
+			name: "coding_comment_extract.go",
+			input: map[string]any{
+				"comments": []any{
+					map[string]any{"content": "## Implementation Plan\n```json coding-team-artifact\n{\"artifact_type\":\"implementation_plan\",\"artifact_version\":1,\"task_issue_id\":\"T-1\",\"master_issue_id\":\"M-1\",\"language\":\"csharp\",\"owning_project\":\"src/App\",\"owning_project_justification\":\"Existing owner\",\"files_to_create\":[],\"files_to_modify\":[\"src/App/Foo.cs\"],\"acceptance_criteria_coverage\":[{\"criterion\":\"Works\",\"planned_coverage\":\"Unit test\"}],\"key_decisions\":[\"Use existing service\"]}\n```"},
+				},
+			},
+		},
+		{
+			name: "coding_plan_validate.go",
+			input: map[string]any{
+				"acceptance_criteria": []any{"Works"},
+				"plan": map[string]any{
+					"artifact_type":                "implementation_plan",
+					"artifact_version":             float64(1),
+					"task_issue_id":                "T-1",
+					"master_issue_id":              "M-1",
+					"language":                     "csharp",
+					"owning_project":               "src/App",
+					"owning_project_justification": "Existing owner",
+					"files_to_create":              []any{},
+					"files_to_modify":              []any{"src/App/Foo.cs"},
+					"acceptance_criteria_coverage": []any{map[string]any{"criterion": "Works", "planned_coverage": "Unit test"}},
+					"key_decisions":                []any{"Use existing service"},
+				},
+			},
+		},
 	}
 
 	for _, tc := range cases {

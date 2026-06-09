@@ -19,6 +19,30 @@ Import `dettools/review_scope_partition.go` as the `review_scope_partition`
 deterministic tool and enable it for the Reviewer Orchestrator. The orchestrator
 can still apply the scope rules manually when the tool is unavailable.
 
+From the repo root, import or refresh it with:
+
+```bash
+multica dettool import-file dettools/review_scope_partition.go --output table
+```
+
+`multica dettool import-file` creates the tool on the first run and updates the
+existing tool with the same name after source edits.
+
+The daemon must also have the deterministic tool plane enabled, otherwise agent
+backend logs will show `mcp_config=false` and the tool will never appear in the
+orchestrator's MCP tool list:
+
+```bash
+export MULTICA_DETTOOLS_ENABLED=true
+multica daemon restart
+```
+
+The daemon binary must include `multica mcp-tools serve`. Verify with:
+
+```bash
+multica mcp-tools --help
+```
+
 ## Create the 4 agents
 
 Create each agent in the Multica UI. Suggested names:

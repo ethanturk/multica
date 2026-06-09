@@ -63,17 +63,19 @@ Extract the JSON block from the task issue description. This gives you:
 - `title`, `description`, `acceptance_criteria`, `estimated_language`
 - `ado_id` (may be null/empty for Multica-only runs)
 
-Read the full comment list to find the Planner's implementation plan:
+Read the full comment list and pass it to the `coding_comment_extract` deterministic tool:
 ```bash
 COMMENTS=$(multica issue comment list "$MULTICA_ISSUE_ID" --output json)
 ```
 
-The most recent comment containing "## Implementation Plan" is the plan. Extract from it:
-- `approach`
+Use `machine_data.artifacts.implementation_plan` from `coding_comment_extract` as the authoritative plan. Do not regex-scan markdown when the artifact is present. Extract from it:
 - `files_to_create` (list)
 - `files_to_modify` (list)
 - `key_decisions` (list)
 - `language`
+- `acceptance_criteria_coverage`
+
+If the artifact is missing or malformed, tag the Planner and stop; do not infer a plan from prose unless the deterministic tool is unavailable.
 
 ---
 
@@ -210,6 +212,16 @@ dotnet test \
 ```
 The `Threshold=99` + `ThresholdType=line` flags make `dotnet test` fail if line coverage is below 99% on the included assembly. Adjust `Include` to match the assembly that contains your changes.
 
+When the `dotnet_test_gate` deterministic tool is available, use it for the C#
+coverage gate instead of invoking `dotnet test` directly. Pass the target test
+project or solution in `targets`, set `collect_coverage: true`, set
+`coverage_threshold: 99`, and include any needed `/p:Include` value in
+`msbuild_properties`. You may proceed past this step only when the tool returns
+`status: "ok"` and `machine_data.all_passed == true`. If it returns
+`MISSING_DEPENDENCY`, this is a daemon host prerequisite failure; post a blocking
+runtime-prerequisite comment and do not commit or hand off. If it returns
+`POLICY_FAILURE`, fix the code/tests and rerun until it passes.
+
 **If coverage is below 99%:**
 1. Read the term-missing output (Python) or the cobertura XML (C#) to find the uncovered lines.
 2. For each uncovered line, decide: is it (a) a branch that needs a test, (b) a defensive guard that's unreachable in practice, or (c) dead code?
@@ -316,8 +328,26 @@ Execute in order:
    **Unit tests added:**
    {- relative/path/to/test/file}
 
-   **Line coverage on changed files:** {NN.N}% ({tool used: pytest --cov / dotnet test + coverlet})
+   **Line coverage on changed files:** {NN.N}% ({tool used: pytest --cov / dotnet test + coverlet / dotnet_test_gate})
    {If any blocks excluded, list them with one-line justifications.}
+
+   ```json coding-team-artifact
+   {
+     "artifact_type": "implementation_summary",
+     "artifact_version": 1,
+     "task_issue_id": "${MULTICA_ISSUE_ID}",
+     "master_issue_id": "${MASTER_ISSUE_ID}",
+     "commit_sha": "{HEAD sha pushed to origin/$BRANCH}",
+     "files_created": [{json strings}],
+     "files_modified": [{json strings}],
+     "unit_tests_added": [{json strings}],
+     "plan_deviations": [{json strings, empty when none}],
+     "test_commands": [
+       {"command": "{exact command or deterministic tool name/input summary}", "status": "passed", "tool": "pytest|dotnet_test_gate|test_gate", "coverage_percent": 99.0}
+     ],
+     "coverage": {"threshold": 99, "passed": true, "details": [{json objects or strings}]}
+   }
+   ```
    COMMENT
    ```
 

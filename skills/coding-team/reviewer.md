@@ -57,15 +57,17 @@ TASK_JSON=$(multica issue get "$MULTICA_ISSUE_ID" --output json)
 
 Extract from the task issue description: `master_issue_id`, optional `code_org`, `code_project`, `repo_name`, `repo_url`, `branch`, `base_branch`, `ado_id` (may be null/empty for Multica-only runs), `title`, `acceptance_criteria`, `estimated_language`.
 
-Read the full comment list to reconstruct context:
+Read the full comment list and pass it to the `coding_comment_extract` deterministic tool:
 ```bash
 COMMENTS=$(multica issue comment list "$MULTICA_ISSUE_ID" --output json)
 ```
 
-From the comments extract:
-- **Plan** (Planner): `files_to_create`, `files_to_modify`, `language`
-- **Implementation summary** (Implementer): exact files written
-- **Test summary** (Test Writer): exact test files written
+Use extracted artifacts as the authoritative review inputs:
+- **Plan**: `machine_data.artifacts.implementation_plan`
+- **Implementation summary**: `machine_data.artifacts.implementation_summary`
+- **Test summary**: `machine_data.artifacts.test_summary`
+
+If any required artifact is missing or malformed, this is a blocking review finding. Do not reconstruct exact file lists from markdown unless the deterministic tool is unavailable.
 
 ---
 
@@ -134,6 +136,14 @@ dotnet test \
   /p:Include="[<assembly>]*"
 ```
 
+For C# tasks, when the `dotnet_test_gate` deterministic tool is available, use it
+for this coverage gate instead of invoking `dotnet test` directly. Pass the
+target test project or solution in `targets`, set `collect_coverage: true`, set
+`coverage_threshold: 99`, and include any needed `/p:Include` value in
+`msbuild_properties`. A non-`ok` result is a blocking review finding:
+`POLICY_FAILURE` means the tests or coverage gate failed, and
+`MISSING_DEPENDENCY` means the daemon host is missing the required .NET SDK/PATH.
+
 If the coverage command exits non-zero, the verdict is **FAIL**. List the uncovered lines (from term-missing or the cobertura report) in the issues array. Do not accept `[ExcludeFromCodeCoverage]` or `# pragma: no cover` annotations unless the Implementer's summary explicitly justified each one with a one-line reason; treat unjustified exclusions as defects.
 
 ---
@@ -160,6 +170,18 @@ Execute these steps in order. Do not stop early.
    ## Review: PASS
 
    All acceptance criteria are met and covered by tests. Implementation follows codebase conventions. No blocking issues found.
+
+   ```json coding-team-artifact
+   {
+     "artifact_type": "review_verdict",
+     "artifact_version": 1,
+     "task_issue_id": "${MULTICA_ISSUE_ID}",
+     "master_issue_id": "${MASTER_ISSUE_ID}",
+     "verdict": "pass",
+     "deterministic_gates": [{json objects for policy_check/test_gate/dotnet_test_gate results}],
+     "issues": []
+   }
+   ```
    COMMENT
    ```
 
@@ -210,6 +232,20 @@ Execute these steps in order:
 
    {for each issue, numbered:}
    1. {issue description — be specific: file, line range, and what needs to change}
+
+   ```json coding-team-artifact
+   {
+     "artifact_type": "review_verdict",
+     "artifact_version": 1,
+     "task_issue_id": "${MULTICA_ISSUE_ID}",
+     "master_issue_id": "${MASTER_ISSUE_ID}",
+     "verdict": "fail",
+     "deterministic_gates": [{json objects for policy_check/test_gate/dotnet_test_gate results}],
+     "issues": [
+       {"severity": "blocking", "file": "relative/path", "line": 123, "message": "specific issue"}
+     ]
+   }
+   ```
    COMMENT
    ```
 

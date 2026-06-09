@@ -60,14 +60,16 @@ TASK_JSON=$(multica issue get "$MULTICA_ISSUE_ID" --output json)
 
 Extract the JSON block from the task issue description for: `master_issue_id`, optional `code_org`, `code_project`, `repo_name`, `repo_url`, `branch`, `base_branch`, `title`, `description`, `acceptance_criteria`, `estimated_language`, `ado_id` (may be null/empty for Multica-only runs).
 
-Read the full comment list:
+Read the full comment list and pass it to the `coding_comment_extract` deterministic tool:
 ```bash
 COMMENTS=$(multica issue comment list "$MULTICA_ISSUE_ID" --output json)
 ```
 
-From the comments extract:
-- **Plan** (from Planner): `files_to_create`, `files_to_modify`, `language`
-- **Implementation summary** (from Implementer): exact list of files created and modified
+Use extracted artifacts as the authoritative inputs:
+- **Plan**: `machine_data.artifacts.implementation_plan` — `files_to_create`, `files_to_modify`, `language`, `acceptance_criteria_coverage`
+- **Implementation summary**: `machine_data.artifacts.implementation_summary` — exact `files_created`, `files_modified`, `unit_tests_added`, `commit_sha`, `coverage`
+
+If either artifact is missing or malformed, tag the responsible prior role and stop; do not infer exact files from prose unless the deterministic tool is unavailable.
 
 ---
 
@@ -120,6 +122,16 @@ Your tests must add:
 - **Integration tests** — interactions between the new code and adjacent components, using real (in-memory) collaborators where the Implementer used mocks
 
 **Do not lower line coverage.** Re-run the same coverage tooling the Implementer used (`pytest --cov ... --cov-fail-under=99` or `dotnet test /p:Threshold=99 ...`) after your tests are added. If your tests somehow drop coverage below 99% (e.g. by accidentally shadowing the Implementer's test files), fix it before commit.
+
+For C# tasks, when the `dotnet_test_gate` deterministic tool is available, use it
+for this gate instead of invoking `dotnet test` directly. Pass the target test
+project or solution in `targets`, set `collect_coverage: true`, set
+`coverage_threshold: 99`, and include any needed `/p:Include` value in
+`msbuild_properties`. You may commit and hand off only when the tool returns
+`status: "ok"` and `machine_data.all_passed == true`. If it returns
+`MISSING_DEPENDENCY`, post a blocking runtime-prerequisite comment and do not
+hand off. If it returns `POLICY_FAILURE`, fix the tests/code and rerun until it
+passes.
 
 **C# conventions:**
 - Test class named `{ClassName}Tests` in the existing test project (`*.Tests.csproj`) — extend the Implementer's class if it exists, do not create a duplicate
@@ -234,6 +246,23 @@ Execute in order:
    **Coverage:**
    {- criterion one → test_given_X_when_Y_should_Z}
    {- criterion two → Given_X_When_Y_Should_Z}
+
+   ```json coding-team-artifact
+   {
+     "artifact_type": "test_summary",
+     "artifact_version": 1,
+     "task_issue_id": "${MULTICA_ISSUE_ID}",
+     "master_issue_id": "${MASTER_ISSUE_ID}",
+     "commit_sha": "{HEAD sha pushed to origin/$BRANCH}",
+     "test_files_created": [{json strings}],
+     "test_files_modified": [{json strings}],
+     "acceptance_criteria_coverage": [
+       {"criterion": "{verbatim criterion}", "tests": [{json strings}]}
+     ],
+     "edge_cases_added": [{json strings}],
+     "coverage": {"threshold": 99, "passed": true, "details": [{json objects or strings}]}
+   }
+   ```
    COMMENT
    ```
 

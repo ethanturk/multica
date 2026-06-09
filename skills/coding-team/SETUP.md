@@ -42,6 +42,40 @@ parsing and analysis snippets with typed deterministic outputs.
 | `dettools/pipeline_state_parse.go` | `pipeline_state_parse` | All coding-team agents, including Watchdog |
 | `dettools/ado_payload_normalize.go` | `ado_payload_normalize` | Orchestrator, Planner, PR Writer, and any coding-team agent that fetches ADO payloads |
 | `dettools/coding_watchdog_analyze.go` | `coding_watchdog_analyze` | Coding Team Watchdog |
+| `dettools/coding_comment_extract.go` | `coding_comment_extract` | Planner, Implementer, Test Writer, Reviewer |
+| `dettools/coding_plan_validate.go` | `coding_plan_validate` | Planner and Implementer |
+
+From the repo root, import or refresh the workspace-authored tools with:
+
+```bash
+for f in dettools/*.go; do
+  multica dettool import-file "$f" --output table
+done
+```
+
+`multica dettool import-file` creates the tool on the first run and updates the
+existing tool with the same name after source edits.
+
+`dotnet_test_gate` is a built-in deterministic tool compiled into the daemon, not
+a root `dettools/` source to import. Keep it enabled in
+`MULTICA_DETTOOLS_ALLOWED` for Coding Team Implementer, Test Writer, and
+Reviewer so C# tasks cannot progress past Test or Review without a passing
+`dotnet test` result.
+
+The daemon must also have the deterministic tool plane enabled, otherwise agent
+backend logs will show `mcp_config=false` and the tools will never appear in the
+agent's MCP tool list:
+
+```bash
+export MULTICA_DETTOOLS_ENABLED=true
+multica daemon restart
+```
+
+The daemon binary must include `multica mcp-tools serve`. Verify with:
+
+```bash
+multica mcp-tools --help
+```
 
 ---
 

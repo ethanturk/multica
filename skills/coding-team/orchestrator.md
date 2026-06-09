@@ -266,6 +266,16 @@ Acceptance criteria:
 ---
 
 Reply **approve** to proceed, or provide feedback to revise the breakdown.
+
+```json coding-team-artifact
+{
+  "artifact_type": "task_set",
+  "artifact_version": 1,
+  "master_issue_id": "${MULTICA_ISSUE_ID}",
+  "planning_source": "{planning_source}",
+  "tasks": [{json task objects with title, description, acceptance_criteria, estimated_language, source, ado_id}]
+}
+```
 COMMENT
 ```
 

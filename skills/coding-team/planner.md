@@ -240,15 +240,36 @@ Execute in order:
 
 ---
 
-## Step 5B — Final action when implementation-ready: post plan, update state, and hand off to Implementer
+## Step 5B — Final action when implementation-ready: validate, post plan, update state, and hand off to Implementer
 
 **Use this only when Step 4 determined the task is implementation-ready. Your response MUST be a bash tool call executing the commands below. Do not write conversational text.**
 
 Execute in order:
 
-1. Update master issue state — set this task's `status` to `"planned"`. Write back.
+1. Build a structured `implementation_plan` artifact and validate it with the `coding_plan_validate` deterministic tool before any handoff. The artifact is the downstream source of truth; the markdown plan is for humans. If validation returns non-`ok`, do not hand off. Fix the plan or use Step 5A.
 
-2. Post the implementation plan on the **task issue** by executing:
+   Artifact shape:
+   ```json
+   {
+     "artifact_type": "implementation_plan",
+     "artifact_version": 1,
+     "task_issue_id": "${MULTICA_ISSUE_ID}",
+     "master_issue_id": "${MASTER_ISSUE_ID}",
+     "language": "python|csharp|unknown",
+     "owning_project": "relative/path/to/owning/project",
+     "owning_project_justification": "why this existing project owns the work",
+     "files_to_create": ["relative/path"],
+     "files_to_modify": ["relative/path"],
+     "acceptance_criteria_coverage": [
+       {"criterion": "verbatim task acceptance criterion", "planned_coverage": "file/test/approach that will cover it"}
+     ],
+     "key_decisions": ["specific implementation decision"]
+   }
+   ```
+
+2. Update master issue state — set this task's `status` to `"planned"`. Write back.
+
+3. Post the implementation plan on the **task issue** by executing:
    ```bash
    cat <<'COMMENT' | multica issue comment add "$MULTICA_ISSUE_ID" --content-stdin
    ## Implementation Plan
@@ -275,10 +296,26 @@ Execute in order:
 
    ### Acceptance Criteria Coverage
    {for each criterion: - {criterion} → covered by {file or approach}}
+
+   ```json coding-team-artifact
+   {
+     "artifact_type": "implementation_plan",
+     "artifact_version": 1,
+     "task_issue_id": "${MULTICA_ISSUE_ID}",
+     "master_issue_id": "${MASTER_ISSUE_ID}",
+     "language": "{language}",
+     "owning_project": "{owning_project}",
+     "owning_project_justification": "{owning_project_justification}",
+     "files_to_create": [{json strings}],
+     "files_to_modify": [{json strings}],
+     "acceptance_criteria_coverage": [{json objects}],
+     "key_decisions": [{json strings}]
+   }
+   ```
    COMMENT
    ```
 
-3. **Last step — execute this bash command to hand off:**
+4. **Last step — execute this bash command to hand off:**
    ```bash
    AGENTS=$(multica agent list --output json)
    IMPLEMENTER_ID=$(get_agent_id "$AGENTS" "Coding Team Implementer")

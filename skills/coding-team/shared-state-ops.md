@@ -22,6 +22,11 @@ Use `machine_data.config` and `machine_data.body` during Fresh Start when the
 issue has a config-only JSON block. If the tool is unavailable, use the shell
 fallback in **Read state from the master issue** below.
 
+When the `coding_comment_extract` deterministic tool is available, use it to
+parse coding-team comments, marker ordering, and fenced `json coding-team-artifact`
+blocks. Downstream roles must prefer `machine_data.artifacts.*` over prose
+markdown when an artifact exists.
+
 ---
 
 ## State schema
