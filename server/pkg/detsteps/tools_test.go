@@ -23,12 +23,12 @@ func Run(input map[string]any) map[string]any {
 }`,
 	}}
 
-	tools := Tools(steps)
+	tools := Tools(os.Args[0], steps)
 	if len(tools) != 1 || tools[0].Name != "greet" {
 		t.Fatalf("Tools() = %+v, want one tool named greet", tools)
 	}
 
-	env := dettools.ToolEnv{Timeout: 2 * time.Second}
+	env := dettools.ToolEnv{Timeout: 5 * time.Second}
 	res := tools[0].Handler(context.Background(), json.RawMessage(`{"name":"world"}`), env)
 	if res.Status != dettools.StatusOK || res.Summary != "hi WORLD" {
 		t.Fatalf("handler result = %+v, want ok/hi WORLD", res)
@@ -36,7 +36,7 @@ func Run(input map[string]any) map[string]any {
 }
 
 func TestToolsHandlerRejectsBadInput(t *testing.T) {
-	tools := Tools([]StepDef{{Name: "x", Source: "package step\nfunc Run(i map[string]any) map[string]any { return nil }"}})
+	tools := Tools(os.Args[0], []StepDef{{Name: "x", Source: "package step\nfunc Run(i map[string]any) map[string]any { return nil }"}})
 	res := tools[0].Handler(context.Background(), json.RawMessage(`{not json`), dettools.ToolEnv{Timeout: time.Second})
 	if res.Status != dettools.StatusError || res.ErrorCode != dettools.CodeInvalidInput {
 		t.Fatalf("result = %+v, want error/INVALID_INPUT for malformed args", res)
@@ -65,7 +65,7 @@ func TestLoadStepsFile(t *testing.T) {
 // A step name that collides with a built-in must not shadow it in the registry.
 func TestRegistryAddRefusesBuiltinCollision(t *testing.T) {
 	reg := dettools.NewRegistry(dettools.AllToolNames())
-	tools := Tools([]StepDef{{Name: "repo_facts", Source: "package step\nfunc Run(i map[string]any) map[string]any { return nil }"}})
+	tools := Tools("", []StepDef{{Name: "repo_facts", Source: "package step\nfunc Run(i map[string]any) map[string]any { return nil }"}})
 	if reg.Add(tools[0]) {
 		t.Fatal("Add returned true for a name colliding with built-in repo_facts; want false")
 	}

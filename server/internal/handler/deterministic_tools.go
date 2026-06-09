@@ -249,7 +249,10 @@ func (h *Handler) TestDeterministicTool(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	res := detsteps.Run(r.Context(), req.Source, req.Input, detsteps.Options{})
+	// Run in an isolated, killable subprocess (this binary re-exec'd as a step
+	// sandbox) rather than in-process, so tenant Go never executes inside the
+	// long-lived server process and a runaway step is hard-killed.
+	res := detsteps.RunSubprocess(r.Context(), detsteps.SelfBin(), req.Source, req.Input, detsteps.DefaultTimeout)
 	writeJSON(w, http.StatusOK, res)
 }
 

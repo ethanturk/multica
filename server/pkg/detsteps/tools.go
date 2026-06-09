@@ -9,6 +9,15 @@ import (
 	"github.com/multica-ai/multica/server/pkg/dettools"
 )
 
+// SelfBin resolves the current binary's path for re-exec as a step sandbox.
+// Falls back to empty (RunSubprocess then degrades to in-process) on error.
+func SelfBin() string {
+	if p, err := os.Executable(); err == nil {
+		return p
+	}
+	return ""
+}
+
 // StepDef is a workspace-authored deterministic tool delivered to the per-task
 // MCP server: the name an agent calls, a description, and the Go source run in
 // the sandbox. The daemon writes a JSON array of these into the task work dir
@@ -24,16 +33,17 @@ type StepDef struct {
 var stepInputSchema = json.RawMessage(`{"type":"object","additionalProperties":true}`)
 
 // Tools converts step definitions into dettools.Tool values whose handlers run
-// the step source in the sandbox and return the standard Result envelope.
-func Tools(steps []StepDef) []dettools.Tool {
+// the step source in an isolated, killable subprocess (selfBin re-exec'd as a
+// step sandbox) and return the standard Result envelope.
+func Tools(selfBin string, steps []StepDef) []dettools.Tool {
 	out := make([]dettools.Tool, 0, len(steps))
 	for _, s := range steps {
-		out = append(out, stepTool(s))
+		out = append(out, stepTool(selfBin, s))
 	}
 	return out
 }
 
-func stepTool(s StepDef) dettools.Tool {
+func stepTool(selfBin string, s StepDef) dettools.Tool {
 	source := s.Source // capture per definition
 	desc := strings.TrimSpace(s.Description)
 	if desc == "" {
@@ -50,7 +60,7 @@ func stepTool(s StepDef) dettools.Tool {
 					return dettools.Errf(dettools.CodeInvalidInput, "invalid tool input: %v", err)
 				}
 			}
-			return Run(ctx, source, input, Options{Timeout: env.Timeout})
+			return RunSubprocess(ctx, selfBin, source, input, env.Timeout)
 		},
 	}
 }

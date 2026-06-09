@@ -39,7 +39,7 @@ var mcpToolsServeCmd = &cobra.Command{
 		if steps, err := detsteps.LoadStepsFile(opts.StepsFile); err != nil {
 			logger.Warn("dettools: failed to load workspace steps; serving built-ins only", "error", err)
 		} else {
-			for _, t := range detsteps.Tools(steps) {
+			for _, t := range detsteps.Tools(detsteps.SelfBin(), steps) {
 				if !reg.Add(t) {
 					logger.Warn("dettools: workspace step shadows a built-in tool; skipping", "name", t.Name)
 				}
