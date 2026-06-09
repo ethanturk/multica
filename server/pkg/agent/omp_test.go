@@ -80,17 +80,25 @@ func TestBuildOmpArgsBlockedArgsFiltered(t *testing.T) {
 		CustomArgs: []string{"-p", "--mode", "text"},
 	}, slog.Default())
 
-	count := 0
+	pCount := 0
+	modeCount := 0
 	for _, arg := range args {
 		if arg == "-p" {
-			count++
+			pCount++
 		}
 		if arg == "--mode" {
-			t.Errorf("--mode from custom_args should be filtered, got: %v", args)
+			modeCount++
+		}
+		// The value "text" from custom_args must be filtered.
+		if arg == "text" {
+			t.Errorf("\"text\" from custom_args should be filtered, got: %v", args)
 		}
 	}
-	if count != 1 {
-		t.Errorf("expected exactly one -p (the hardcoded one), got %d in: %v", count, args)
+	if pCount != 1 {
+		t.Errorf("expected exactly one -p (the hardcoded one), got %d in: %v", pCount, args)
+	}
+	if modeCount != 1 {
+		t.Errorf("expected exactly one --mode (the hardcoded one), got %d in: %v", modeCount, args)
 	}
 }
 
