@@ -228,7 +228,7 @@ export MULTICA_DETTOOLS_ALLOWED=repo_facts,policy_check,build_probe,test_gate  #
 export MULTICA_DETTOOLS_TIMEOUT=90s                                    # per-tool timeout
 ```
 
-Per-agent narrowing is available via the agent's `runtime_config` (`deterministic_tools.allowed_tools` / `denied_tools`) — an agent can only narrow the daemon allow-list, never widen it.
+Once enabled, a workspace's **saved** tools are delivered to each task alongside the built-ins: on claim the daemon writes the enabled tools into the task work dir and the per-task MCP server runs each in the sandbox, so the agent calls them by name like any other tool. Per-agent narrowing is available via the agent's `runtime_config` (`deterministic_tools.allowed_tools` / `denied_tools`) — an agent can only narrow the daemon allow-list, never widen it.
 
 ---
 

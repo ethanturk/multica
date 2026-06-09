@@ -231,7 +231,7 @@ export MULTICA_DETTOOLS_ALLOWED=repo_facts,policy_check,build_probe,test_gate  #
 export MULTICA_DETTOOLS_TIMEOUT=90s                                    # 单个工具的超时
 ```
 
-还可通过 Agent 的 `runtime_config`（`deterministic_tools.allowed_tools` / `denied_tools`）做按 Agent 收窄——Agent 只能收窄 daemon 的白名单，永远无法扩大它。
+启用后，工作区**已保存**的工具会随每个任务一起下发给 Agent：认领任务时，daemon 把启用的工具写入任务工作目录，由每个任务的 MCP 服务在沙箱中运行，Agent 即可像调用其他工具一样按名调用它们。还可通过 Agent 的 `runtime_config`（`deterministic_tools.allowed_tools` / `denied_tools`）做按 Agent 收窄——Agent 只能收窄 daemon 的白名单，永远无法扩大它。
 
 ---
 
