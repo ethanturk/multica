@@ -1395,11 +1395,14 @@ func (h *Handler) DeleteComment(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// loadRootCommentForActor resolves a {commentId} URL param to a root comment in
-// the caller's workspace. Returns the comment, the workspace UUID, the actor
+// loadCommentForActor resolves a {commentId} URL param to a comment in the
+// caller's workspace. Returns the comment, the workspace UUID, the actor
 // identity, and ok. Resolve / unresolve handlers share this scaffolding so the
-// "must be a root comment" rule lives in one place.
-func (h *Handler) loadRootCommentForActor(w http.ResponseWriter, r *http.Request) (db.Comment, string, string, string, bool) {
+// workspace membership + tenant guard stay identical. Any comment (root or
+// reply) may be resolved: resolving a root collapses the whole thread; resolving
+// a reply marks it as the thread's resolution. Which one is the thread's
+// resolution is a pure frontend derivation, so the backend stays a plain setter.
+func (h *Handler) loadCommentForActor(w http.ResponseWriter, r *http.Request) (db.Comment, string, string, string, bool) {
 	commentId := chi.URLParam(r, "commentId")
 	userID, ok := requireUserID(w, r)
 	if !ok {
@@ -1425,16 +1428,12 @@ func (h *Handler) loadRootCommentForActor(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotFound, "comment not found")
 		return db.Comment{}, "", "", "", false
 	}
-	if comment.ParentID.Valid {
-		writeError(w, http.StatusBadRequest, "only root comments can be resolved")
-		return db.Comment{}, "", "", "", false
-	}
 	actorType, actorID := h.resolveActor(r, userID, workspaceID)
 	return comment, workspaceID, actorType, actorID, true
 }
 
 func (h *Handler) ResolveComment(w http.ResponseWriter, r *http.Request) {
-	comment, workspaceID, actorType, actorID, ok := h.loadRootCommentForActor(w, r)
+	comment, workspaceID, actorType, actorID, ok := h.loadCommentForActor(w, r)
 	if !ok {
 		return
 	}
@@ -1445,7 +1444,31 @@ func (h *Handler) ResolveComment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid actor id")
 		return
 	}
-	updated, err := h.Queries.ResolveComment(r.Context(), db.ResolveCommentParams{
+
+	// Single-resolution invariant: a thread has at most one resolved comment, so
+	// resolving this one must clear any other resolution in the same thread. Both
+	// writes run in one tx — clearing the old resolution and setting the new one
+	// is atomic, so a crash can never leave two resolutions (or none) visible.
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve comment")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	qtx := h.Queries.WithTx(tx)
+
+	cleared, err := qtx.ClearOtherThreadResolutions(r.Context(), db.ClearOtherThreadResolutionsParams{
+		TargetID:    comment.ID,
+		IssueID:     comment.IssueID,
+		WorkspaceID: comment.WorkspaceID,
+	})
+	if err != nil {
+		slog.Warn("clear other thread resolutions failed", append(logger.RequestAttrs(r), "error", err, "comment_id", uuidToString(comment.ID))...)
+		writeError(w, http.StatusInternalServerError, "failed to resolve comment")
+		return
+	}
+
+	updated, err := qtx.ResolveComment(r.Context(), db.ResolveCommentParams{
 		ID:             comment.ID,
 		ResolvedByType: pgtype.Text{String: actorType, Valid: true},
 		ResolvedByID:   actorUUID,
@@ -1456,13 +1479,33 @@ func (h *Handler) ResolveComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := tx.Commit(r.Context()); err != nil {
+		slog.Warn("resolve comment commit failed", append(logger.RequestAttrs(r), "error", err, "comment_id", uuidToString(comment.ID))...)
+		writeError(w, http.StatusInternalServerError, "failed to resolve comment")
+		return
+	}
+
+	// Emit a comment:unresolved per cleared sibling so granular realtime
+	// consumers (which patch a single comment in place) drop the stale
+	// resolution instead of showing two. Published after commit so no event ever
+	// describes an uncommitted state.
+	for _, c := range cleared {
+		clearedID := uuidToString(c.ID)
+		clearedReactions := h.groupReactions(r, []pgtype.UUID{c.ID})
+		clearedAtt := h.groupAttachments(r, []pgtype.UUID{c.ID})
+		clearedResp := commentToResponse(c, clearedReactions[clearedID], clearedAtt[clearedID])
+		slog.Info("comment unresolved (replaced)", append(logger.RequestAttrs(r), "comment_id", clearedID)...)
+		h.publish(protocol.EventCommentUnresolved, workspaceID, actorType, actorID, map[string]any{"comment": clearedResp})
+	}
+
 	grouped := h.groupReactions(r, []pgtype.UUID{updated.ID})
 	groupedAtt := h.groupAttachments(r, []pgtype.UUID{updated.ID})
 	cid := uuidToString(updated.ID)
 	resp := commentToResponse(updated, grouped[cid], groupedAtt[cid])
 
-	// Suppress the event on a re-resolve no-op so consumers do not re-process
-	// an unchanged thread (notifications, log spam).
+	// Suppress the target event on a re-resolve no-op so consumers do not
+	// re-process an unchanged thread (notifications, log spam). Cleared siblings
+	// still get their own events above — those rows did change.
 	if !wasResolved {
 		slog.Info("comment resolved", append(logger.RequestAttrs(r), "comment_id", cid)...)
 		h.publish(protocol.EventCommentResolved, workspaceID, actorType, actorID, map[string]any{"comment": resp})
@@ -1471,7 +1514,7 @@ func (h *Handler) ResolveComment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) UnresolveComment(w http.ResponseWriter, r *http.Request) {
-	comment, workspaceID, actorType, actorID, ok := h.loadRootCommentForActor(w, r)
+	comment, workspaceID, actorType, actorID, ok := h.loadCommentForActor(w, r)
 	if !ok {
 		return
 	}
