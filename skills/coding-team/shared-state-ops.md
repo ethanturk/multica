@@ -9,23 +9,16 @@ All pipeline state lives in the master Multica issue description as a fenced JSO
 
 Role boundaries are strict: Orchestrator coordinates, never edits repository code, and checks out the repo only in Run 2a to create/verify the shared feature branch; Planner owns the first codebase inspection and never edits; Implementer writes production code and must commit/push before handoff; Test Writer writes tests and must commit/push before handoff; Reviewer reviews and signals; PR Writer creates the draft PR. Never clean or delete a worktree that contains uncommitted or unpushed changes.
 
-When the `pipeline_state_parse` deterministic tool is available, use it to parse
-issue descriptions instead of reimplementing the fenced/leading JSON extraction
-logic. Call it with:
+Use the `pipeline_state_parse` deterministic tool to parse issue descriptions. Do not reimplement fenced/leading JSON extraction in shell or Python.
 
+Call shape:
 ```json
 {"description":"{issue description text}"}
 ```
 
-Use `machine_data.state` only when `machine_data.is_pipeline_state == true`.
-Use `machine_data.config` and `machine_data.body` during Fresh Start when the
-issue has a config-only JSON block. If the tool is unavailable, use the shell
-fallback in **Read state from the master issue** below.
+Use `machine_data.state` only when `machine_data.is_pipeline_state == true`. Use `machine_data.config` and `machine_data.body` during Fresh Start when the issue has a config-only JSON block. If `pipeline_state_parse` is unavailable, stop and report that the deterministic tool plane is not enabled.
 
-When the `coding_comment_extract` deterministic tool is available, use it to
-parse coding-team comments, marker ordering, and fenced `json coding-team-artifact`
-blocks. Downstream roles must prefer `machine_data.artifacts.*` over prose
-markdown when an artifact exists.
+Use the `coding_comment_extract` deterministic tool to parse coding-team comments, marker ordering, and fenced `json coding-team-artifact` blocks. Downstream roles must prefer `machine_data.artifacts.*` over prose markdown when an artifact exists. If `coding_comment_extract` is unavailable, stop instead of regex-scanning comment markdown.
 
 ---
 
@@ -121,68 +114,13 @@ If old issues omit repo fields, default to `code_org: "ineight"`, `code_project:
 
 ## Read state from the master issue
 
-Preferred path when deterministic tools are available:
-
 1. Fetch the issue JSON with `multica issue get {master_issue_id} --output json`.
 2. Pass its `description` to `pipeline_state_parse`.
-3. Treat an empty/non-state result the same way as `{}` in the fallback below.
+3. Use `machine_data.state` when `machine_data.is_pipeline_state == true`; otherwise treat the state as `{}`.
 
-Fallback shell path:
+An empty object `{}` means the issue is uninitialized (Orchestrator first run). A config-only JSON block without `stage` must be handled via `machine_data.config`/`machine_data.body`; it is Run 1 input, not resumable state.
 
-```bash
-MASTER_JSON=$(multica issue get {master_issue_id} --output json)
-
-STATE=$(python3 - "$MASTER_JSON" <<'EOF'
-import json, re, sys
-
-issue = json.loads(sys.argv[1])
-desc = issue.get('description') or ''
-
-# Extract JSON from a fenced code block if present
-m = re.search(r'```json\s*(.*?)\s*```', desc, re.DOTALL)
-if m:
-    raw = m.group(1)
-else:
-    s = desc.lstrip()
-    raw = s
-    if s.startswith('{'):
-        depth = 0
-        in_str = False
-        esc = False
-        for i, ch in enumerate(s):
-            if in_str:
-                esc = (not esc and ch == '\\')
-                if ch == '"' and not esc:
-                    in_str = False
-                elif ch != '\\':
-                    esc = False
-                continue
-            if ch == '"':
-                in_str = True
-            elif ch == '{':
-                depth += 1
-            elif ch == '}':
-                depth -= 1
-                if depth == 0:
-                    raw = s[:i+1]
-                    break
-    raw = raw.strip()
-
-try:
-    state = json.loads(raw)
-    if 'stage' not in state:
-        # A leading/fenced JSON config block is not pipeline state yet.
-        print('{}')
-        raise SystemExit
-    print(json.dumps(state))
-except json.JSONDecodeError:
-    # Issue has not been initialized yet — return empty object
-    print('{}')
-EOF
-)
-```
-
-Parse `$STATE` as JSON in your subsequent logic. An empty object `{}` means the issue is uninitialized (Orchestrator first run). A config-only JSON block without `stage` must return `{}` even if it contains fields such as `planning_source`, `planning_mode`, or `base_branch`; those are inputs for Run 1, not resumable state.
+If `pipeline_state_parse` is unavailable, stop and report that the deterministic tool plane is not enabled. Do not substitute inline Python, jq, grep, or regex parsing.
 
 ---
 

@@ -16,8 +16,7 @@ The Review Team is a specialist review group for PR and branch review work. The 
 ## Deterministic tools to import
 
 Import `dettools/review_scope_partition.go` as the `review_scope_partition`
-deterministic tool and enable it for the Reviewer Orchestrator. The orchestrator
-can still apply the scope rules manually when the tool is unavailable.
+deterministic tool and enable it for the Reviewer Orchestrator. This tool is required for Review Team routing. If it is unavailable, stop and report that the deterministic tool plane is not enabled.
 
 From the repo root, import or refresh it with:
 

@@ -50,42 +50,15 @@ Your output must not contain:
 
 ## Scope detection
 
-When the `review_scope_partition` deterministic tool is available, use it to
-partition the changed or assigned file list before delegation. Call it with:
+Use the `review_scope_partition` deterministic tool to partition the changed or assigned file list before delegation. Call it with:
 
 ```json
 {"files":["relative/path.cs","relative/path.py",".github/workflows/ci.yml"]}
 ```
 
-Use `machine_data.python_files`, `machine_data.dotnet_files`,
-`machine_data.devops_files`, and `machine_data.required_result_headings` for
-delegation and waiting logic. If the tool is unavailable, apply the scope rules
-below manually.
+Use `machine_data.python_files`, `machine_data.dotnet_files`, `machine_data.devops_files`, and `machine_data.required_result_headings` for delegation and waiting logic. If `review_scope_partition` is unavailable, stop and report that the deterministic tool plane is not enabled.
 
-Python scope:
-- `*.py`
-- `pyproject.toml`
-- `requirements*.txt`
-- `Pipfile*`
-- `poetry.lock`, `uv.lock`, `tox.ini`, `noxfile.py`, `hatch.toml`
-- Python tests and Python-related service config
-
-.NET scope:
-- `*.cs`
-- `*.csproj`, `*.sln`, `*.fsproj`, `*.vbproj`
-- `Directory.Build.props`, `Directory.Build.targets`
-- `appsettings*.json`
-- ASP.NET Core, EF Core, worker, and .NET test files
-
-DevOps scope:
-- Azure Pipelines files, including `azure-pipelines*.yml`, `azure-pipelines*.yaml`, `.azure-pipelines/**`, and `.pipelines/**`
-- GitHub Actions files, including `.github/workflows/*.yml` and `.github/workflows/*.yaml`
-- Other CI/CD definitions, including `.gitlab-ci.yml`, `Jenkinsfile*`, `.circleci/**`, `.buildkite/**`, and TeamCity configuration
-- Container files, including `Dockerfile*`, `docker-compose*.yml`, `docker-compose*.yaml`, `.dockerignore`, and container entrypoint scripts
-- Kubernetes, Helm, and Kustomize files, including `k8s/**`, `kubernetes/**`, `helm/**`, `charts/**`, `Chart.yaml`, `values*.yaml`, and `kustomization.yaml`
-- Infrastructure as code, including `*.tf`, `*.tfvars`, `*.bicep`, ARM templates, CloudFormation templates, Pulumi files, and Ansible playbooks or inventory
-- Build, release, deployment, and operations scripts, including relevant `*.sh`, `*.ps1`, and `Makefile` targets
-- Deployment, environment, observability, and runtime configuration used for operations
+The deterministic tool owns scope classification; do not duplicate the file-pattern rules in the skill.
 
 ## Hard workflow
 
@@ -212,12 +185,8 @@ PR_CHANGES=$(AZURE_DEVOPS_EXT_PAT=$ADO_PAT_INEIGHT az repos pr changes \
   --output json)
 ```
 
-4. Use Python to extract the list of changed file paths and classify them into:
-   - Python files (`*.py`, config)
-   - .NET files (`*.cs`, project/config)
-   - DevOps files (CI/CD, containers, infrastructure, deployment, and operations config)
-5. Use that classification to decide which files to delegate to Python Reviewer,
-   which to delegate to Dotnet Reviewer, and which to delegate to DevOps Reviewer.
+4. Extract the changed file path list from `PR_CHANGES` and pass it to `review_scope_partition`.
+5. Use the tool's `machine_data.python_files`, `machine_data.dotnet_files`, and `machine_data.devops_files` to decide which files to delegate to Python Reviewer, Dotnet Reviewer, and DevOps Reviewer.
 6. When posting your final review, always include the `pr_id` and `PR_URL` for
    reference, but **do not** create PR comments.
 

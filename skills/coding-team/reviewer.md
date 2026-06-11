@@ -67,7 +67,7 @@ Use extracted artifacts as the authoritative review inputs:
 - **Implementation summary**: `machine_data.artifacts.implementation_summary`
 - **Test summary**: `machine_data.artifacts.test_summary`
 
-If any required artifact is missing or malformed, this is a blocking review finding. Do not reconstruct exact file lists from markdown unless the deterministic tool is unavailable.
+If any required artifact is missing or malformed, this is a blocking review finding. Do not reconstruct exact file lists from markdown.
 
 ---
 
@@ -136,8 +136,7 @@ dotnet test \
   /p:Include="[<assembly>]*"
 ```
 
-For C# tasks, when the `dotnet_test_gate` deterministic tool is available, use it
-for this coverage gate instead of invoking `dotnet test` directly. Pass the
+For C# tasks, use the `dotnet_test_gate` deterministic tool for this coverage gate instead of invoking `dotnet test` directly. Pass the
 target test project or solution in `targets`, set `collect_coverage: true`, set
 `coverage_threshold: 99`, and include any needed `/p:Include` value in
 `msbuild_properties`. A non-`ok` result is a blocking review finding:

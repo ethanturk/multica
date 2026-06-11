@@ -69,7 +69,7 @@ Use extracted artifacts as the authoritative inputs:
 - **Plan**: `machine_data.artifacts.implementation_plan` — `files_to_create`, `files_to_modify`, `language`, `acceptance_criteria_coverage`
 - **Implementation summary**: `machine_data.artifacts.implementation_summary` — exact `files_created`, `files_modified`, `unit_tests_added`, `commit_sha`, `coverage`
 
-If either artifact is missing or malformed, tag the responsible prior role and stop; do not infer exact files from prose unless the deterministic tool is unavailable.
+If either artifact is missing or malformed, tag the responsible prior role and stop; do not infer exact files from prose.
 
 ---
 
@@ -123,8 +123,7 @@ Your tests must add:
 
 **Do not lower line coverage.** Re-run the same coverage tooling the Implementer used (`pytest --cov ... --cov-fail-under=99` or `dotnet test /p:Threshold=99 ...`) after your tests are added. If your tests somehow drop coverage below 99% (e.g. by accidentally shadowing the Implementer's test files), fix it before commit.
 
-For C# tasks, when the `dotnet_test_gate` deterministic tool is available, use it
-for this gate instead of invoking `dotnet test` directly. Pass the target test
+For C# tasks, use the `dotnet_test_gate` deterministic tool for this gate instead of invoking `dotnet test` directly. Pass the target test
 project or solution in `targets`, set `collect_coverage: true`, set
 `coverage_threshold: 99`, and include any needed `/p:Include` value in
 `msbuild_properties`. You may commit and hand off only when the tool returns

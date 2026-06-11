@@ -33,9 +33,7 @@ Import all 9 skill files into your Multica workspace. Each SKILL.md file in this
 
 ## Deterministic tools to import
 
-Import these root `dettools/` sources as deterministic tools. The skills can
-run without them by using their shell fallbacks, but these tools replace repeated
-parsing and analysis snippets with typed deterministic outputs.
+Import these root `dettools/` sources as required deterministic tools. The skills assume these tools are enabled and should stop with an operator-facing error if the deterministic tool plane is unavailable.
 
 | File | Tool name | Assign/enable for |
 |------|-----------|-------------------|

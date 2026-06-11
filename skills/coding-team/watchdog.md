@@ -54,8 +54,7 @@ Call shape:
 
 For each returned action, post exactly the returned `content` to
 `target_issue_id` with `multica issue comment add --content-stdin`. Apply any
-returned state patches with `shared-state-ops`. If the tool is unavailable,
-perform Steps 4-8 manually as written below.
+returned state patches with `shared-state-ops`. If `coding_watchdog_analyze` is unavailable, stop and report that the deterministic tool plane is not enabled.
 
 ### 1. Start Tick
 
@@ -135,137 +134,28 @@ Exact names:
 | Reviewer | `Coding Team Reviewer` |
 | Orchestrator | `Coding Team Orchestrator` |
 
-### 4. Scan State Tasks
+### 4. Analyze Active Masters With `coding_watchdog_analyze`
 
-Task issues come from active master issue state: iterate `state.tasks[]` and use each task's `task_issue_id`. Do not discover task issues by scanning `parent_issue_id`; Multica parentage is not the source of truth for this pipeline.
+For each active master issue:
 
-Skip a task when:
+1. Iterate `state.tasks[]`; task issues come only from `task_issue_id` in master state.
+2. Skip tasks whose state is `committed`, `failed`, or `awaiting_clarification`, or whose `task_issue_id` is empty.
+3. Fetch each remaining task's comments with `multica issue comment list "$TASK_ISSUE_ID" --output json`.
+4. Fetch master comments once when any task may need review-pass recovery.
+5. Call `coding_watchdog_analyze` with the state, task comments, master comments, resolved agent IDs, and current time.
 
-- `status` is `committed`, `failed`, or `awaiting_clarification`.
-- `task_issue_id` is empty or missing. Record the skip; do not search the workspace for likely children.
+Do not reimplement marker ordering, dropped-handoff detection, or state-patch calculation in the skill. If `coding_watchdog_analyze` is unavailable, stop and report that the deterministic tool plane is not enabled.
 
-Fetch task comments:
+### 5. Execute Returned Recovery Actions
 
-```bash
-COMMENTS=$(multica issue comment list "$TASK_ISSUE_ID" --output json)
-```
+The deterministic tool only proposes actions; you must execute them. For each returned action:
 
-### 5. Determine Latest Durable Stage
+- Post exactly the returned `content` to `target_issue_id` with `multica issue comment add --content-stdin`.
+- Increment `RECOVERED` only after the recovery comment succeeds.
+- Apply returned `state_patches` with `shared-state-ops` and `multica issue update {master_issue_id} --description-stdin`.
+- Do not use file editing tools for state writes.
 
-Determine actual stage from the index of the last marker, not mere presence. A later implementation after a review failure means retry is in progress.
-
-Markers, newest one wins:
-
-| Marker | Stage |
-| --- | --- |
-| `## Planning Blocked: Clarification Needed` | `planning_blocked` |
-| `## Implementation Plan` | `plan_done` |
-| `## Implementation Complete` | `impl_done` |
-| `## Tests Written` | `tests_done` |
-| `## Review: PASS` | `review_passed` |
-| `## Review: FAIL` | `review_failed` |
-| no marker | `not_started` |
-
-Use this logic:
-
-```python
-bodies = [c.get('content', '') for c in comments]
-def last(marker):
-    return max((i for i, body in enumerate(bodies) if marker in body), default=-1)
-
-markers = {
-    'planning_blocked': last('## Planning Blocked: Clarification Needed'),
-    'plan_done': last('## Implementation Plan'),
-    'impl_done': last('## Implementation Complete'),
-    'tests_done': last('## Tests Written'),
-    'review_passed': last('## Review: PASS'),
-    'review_failed': last('## Review: FAIL'),
-}
-
-stage, marker_idx = max(markers.items(), key=lambda item: item[1])
-if marker_idx < 0:
-    stage = 'not_started'
-    marker_idx = 0
-```
-
-### 6. Dropped Handoff Definition
-
-A dropped handoff notification exists only when all are true:
-
-- The task is active; state is not `committed`, `failed`, or `awaiting_clarification`.
-- The latest durable stage says the next pipeline role should have been notified.
-- The latest task comment is at least 5 minutes old.
-- The expected next agent ID has been resolved with `get_agent_id`.
-- No expected notification exists at or after the latest durable stage marker.
-
-A valid task handoff mention is the real Multica mention link for the expected next role, such as `[@Coding Team Implementer](mention://agent/{id})`, or any text containing `mention://agent/{expected_id}`.
-
-For `review_passed`, the expected notification is on the master issue, not the task issue. Fetch master comments and look for a comment at or after the PASS marker time that contains all of:
-
-- `mention://agent/{ORCHESTRATOR_ID}`
-- `TASK_COMPLETE`
-- `task_issue_id: {TASK_ISSUE_ID}`
-- `status: committed`
-
-If that master notification exists, skip recovery for the task.
-
-Do not repair these as dropped handoffs:
-
-- `planning_blocked`.
-- A task whose latest comment is less than 5 minutes old.
-- A task where the expected notification already exists at or after the latest durable stage marker.
-- A task with a newer downstream stage marker.
-- Stale assignee or status metadata. The watchdog repairs missing notification comments only.
-
-### 7. Recovery Actions
-
-Expected next handoff:
-
-| Stage | Action |
-| --- | --- |
-| `planning_blocked` | Skip; user clarification is needed. |
-| `not_started` | Mention Planner on the task issue. |
-| `plan_done` | Mention Implementer on the task issue. |
-| `impl_done` | Mention Test Writer on the task issue. |
-| `tests_done` | Mention Reviewer on the task issue. |
-| `review_failed` | Mention Implementer on the task issue. |
-| `review_passed` | Mention Orchestrator and post `TASK_COMPLETE status: committed` to the master issue; update master state if needed. |
-
-When re-issuing a task handoff, post exactly one task issue comment:
-
-```bash
-cat <<COMMENT | multica issue comment add "$TASK_ISSUE_ID" --content-stdin
-Watchdog re-issuing handoff - original notification appears to have been lost.
-
-[@Coding Team {Role}](mention://agent/${EXPECTED_ID})
-COMMENT
-```
-
-For `review_passed`, post to the master issue, not the task issue:
-
-```bash
-cat <<COMMENT | multica issue comment add "$MASTER_ISSUE_ID" --content-stdin
-[@Coding Team Orchestrator](mention://agent/${ORCHESTRATOR_ID})
-
-TASK_COMPLETE
-task_issue_id: ${TASK_ISSUE_ID}
-status: committed
-COMMENT
-```
-
-Increment `RECOVERED` only after the recovery comment succeeds.
-
-### 8. Sync Master State
-
-After scanning tasks for a master, write back any state corrections with `shared-state-ops`:
-
-- `review_passed` -> task `status: "committed"` if not already.
-- `review_failed` -> task `status: "pending"` if not already.
-- `planning_blocked` -> task `status: "awaiting_clarification"` if not already.
-
-Do not use file editing tools for state writes. Use `multica issue update {master_issue_id} --description-stdin`.
-
-### 9. Close Tick
+### 6. Close Tick
 
 The final action must be Multica CLI commands, not conversational text. Always post the summary with `--content-stdin`, not `--content`, then immediately close the tick.
 

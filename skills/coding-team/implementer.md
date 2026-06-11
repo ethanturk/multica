@@ -68,14 +68,14 @@ Read the full comment list and pass it to the `coding_comment_extract` determini
 COMMENTS=$(multica issue comment list "$MULTICA_ISSUE_ID" --output json)
 ```
 
-Use `machine_data.artifacts.implementation_plan` from `coding_comment_extract` as the authoritative plan. Do not regex-scan markdown when the artifact is present. Extract from it:
+Use `machine_data.artifacts.implementation_plan` from `coding_comment_extract` as the authoritative plan. Do not regex-scan markdown. Extract from it:
 - `files_to_create` (list)
 - `files_to_modify` (list)
 - `key_decisions` (list)
 - `language`
 - `acceptance_criteria_coverage`
 
-If the artifact is missing or malformed, tag the Planner and stop; do not infer a plan from prose unless the deterministic tool is unavailable.
+If the artifact is missing or malformed, tag the Planner and stop; do not infer a plan from prose.
 
 ---
 
@@ -212,8 +212,7 @@ dotnet test \
 ```
 The `Threshold=99` + `ThresholdType=line` flags make `dotnet test` fail if line coverage is below 99% on the included assembly. Adjust `Include` to match the assembly that contains your changes.
 
-When the `dotnet_test_gate` deterministic tool is available, use it for the C#
-coverage gate instead of invoking `dotnet test` directly. Pass the target test
+Use the `dotnet_test_gate` deterministic tool for the C# coverage gate instead of invoking `dotnet test` directly. Pass the target test
 project or solution in `targets`, set `collect_coverage: true`, set
 `coverage_threshold: 99`, and include any needed `/p:Include` value in
 `msbuild_properties`. You may proceed past this step only when the tool returns
