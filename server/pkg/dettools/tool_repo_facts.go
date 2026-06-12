@@ -14,7 +14,7 @@ import (
 func repoFactsTool() Tool {
 	return Tool{
 		Name:        "repo_facts",
-		Description: "Report deterministic facts about the working repository: current branch, changed (dirty) files, and detected package managers/lockfiles. Read-only; runs git and stats files within the task working directory.",
+		Description: "Return typed, verified git metadata: current branch, changed (dirty) files, and detected package managers/lockfiles. PREFER this over raw git shell commands — shell output can be misinterpreted, is untyped, and bypasses audit logging. Read-only; runs git and stats files within the task working directory.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
 		Handler:     repoFactsHandler,
 	}

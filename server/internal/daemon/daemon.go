@@ -2894,6 +2894,23 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		execAgentRuntimeConfig = task.Agent.RuntimeConfig
 	}
 	mcpConfig = d.injectExecOptionsTools(mcpConfig, provider, env.WorkDir, execAgentRuntimeConfig, task.DeterministicTools, taskLog)
+	// Deterministic tools guidance: when the tool plane is enabled and MCP
+	// servers were injected, append instructions telling the agent to prefer
+	// deterministic tools over shell commands. Without this, agents silently
+	// fall through to Bash/exec_command even when MCP tools are available,
+	// because shell commands are more familiar and the tools are never
+	// mentioned in the runtime brief.
+	if d.cfg.DetTools.Enabled && len(mcpConfig) > 0 {
+		runtimeBrief += "\n\n## Deterministic Tools (MCP)\n\n"
+		runtimeBrief += "The `multica-tools` MCP server provides typed, verifiable tools that must be used instead of shell commands for correctness-sensitive operations. Each tool returns an auditable Result with stable error codes.\n\n"
+		runtimeBrief += "- **repo_facts** — current branch, changed files, package managers. USE over raw git commands.\n"
+		runtimeBrief += "- **policy_check** — branch naming, forbidden paths, required files. USE instead of manual grep/git checks.\n"
+		runtimeBrief += "- **build_probe** — toolchain detection with version. USE instead of raw `make`/`npm`/`cargo` probes.\n"
+		runtimeBrief += "- **test_gate** — run test suites, normalize outcomes to pass/fail. USE instead of raw test runners.\n"
+		runtimeBrief += "- **diff_summarize** — stable machine-readable diff. USE instead of `git diff`.\n"
+		runtimeBrief += "- **artifact_emit** — write structured artifacts. USE instead of `echo > file`.\n\n"
+		runtimeBrief += "When a skill or workflow tells you to use one of these tools, call it through MCP. Do NOT replicate its behavior with shell commands — shell output lacks audit logging, policy enforcement, and typed results.\n"
+	}
 	// Two-tier model resolution: an explicit agent.model wins,
 	// then the daemon-wide MULTICA_<PROVIDER>_MODEL env var. If
 	// both are empty we deliberately pass "" through — each

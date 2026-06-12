@@ -22,7 +22,7 @@ type policyCheckInput struct {
 func policyCheckTool() Tool {
 	return Tool{
 		Name:        "policy_check",
-		Description: "Check the working repository against a deterministic policy: allowed branch prefixes, forbidden changed paths, and required files. Returns POLICY_FAILURE with a list of violations when any rule is broken. Read-only.",
+		Description: "Enforce workspace policy deterministically: branch naming rules, forbidden changed paths, and required files. Returns POLICY_FAILURE with the exact violation list. MUST use instead of manual grep/git checks — manual checks silently miss rules, lack audit trails, and produce inconsistent results across runs. Read-only.",
 		InputSchema: json.RawMessage(`{
   "type": "object",
   "properties": {

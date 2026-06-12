@@ -18,7 +18,7 @@ const testOutputTailBytes = 4000
 func testGateTool() Tool {
 	return Tool{
 		Name:        "test_gate",
-		Description: "Run one or more configured test/smoke commands in the working directory and normalize the outcomes. Returns POLICY_FAILURE if any command exits non-zero. Each command runs through the system shell; output is captured and tail-trimmed.",
+		Description: "Run configured test suites and normalize outcomes to a stable pass/fail per suite. Returns POLICY_FAILURE if any command exits non-zero. USE instead of raw test runners — output formats differ across test frameworks and the model can misclassify partial failures, timeouts, or flaky output as passing. Each command runs through the system shell; output is captured and tail-trimmed.",
 		InputSchema: json.RawMessage(`{
   "type": "object",
   "properties": {

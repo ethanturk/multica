@@ -17,7 +17,7 @@ type diffSummarizeInput struct {
 func diffSummarizeTool() Tool {
 	return Tool{
 		Name:        "diff_summarize",
-		Description: "Produce a stable machine-readable summary of changed files (path, change type, additions, deletions). With no base, summarizes uncommitted changes vs HEAD; with a base ref, summarizes base...HEAD. Read-only.",
+		Description: "Produce a stable, machine-readable diff summary (path, change type, additions, deletions). USE instead of raw 'git diff' — raw diffs are verbose, hard to parse correctly, and differ semantically from a structured change list. With no base, summarizes uncommitted changes vs HEAD; with a base ref, summarizes base...HEAD. Read-only.",
 		InputSchema: json.RawMessage(`{
   "type": "object",
   "properties": {

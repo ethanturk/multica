@@ -30,7 +30,7 @@ var buildToolchains = []struct {
 func buildProbeTool() Tool {
 	return Tool{
 		Name:        "build_probe",
-		Description: "Detect the build toolchains a repository declares (Go, Node, pnpm, Rust, .NET, Maven, Gradle, Python) and report whether the matching tool is installed and its version. Read-only: runs only '--version'-style probes, never a build.",
+		Description: "Detect toolchains and run non-destructive build probes. Reports which build tools are installed (Go, Node, pnpm, Rust, .NET, Maven, Gradle, Python) with versions. USE instead of raw make/npm/cargo — exit codes and output formats vary across toolchains and the model can misinterpret them. Read-only: runs only '--version'-style probes, never a build.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
 		Handler:     buildProbeHandler,
 	}

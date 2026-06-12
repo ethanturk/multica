@@ -18,7 +18,7 @@ type artifactEmitInput struct {
 func artifactEmitTool() Tool {
 	return Tool{
 		Name:        "artifact_emit",
-		Description: "Write a JSON, Markdown, or text artifact under the task artifact directory (.multica/artifacts by default) for the agent or UI to consume. The filename must stay within that directory. This is the only tool that writes files, and it never touches repository sources.",
+		Description: "Write a structured artifact (JSON, Markdown, or text) to the task artifact directory. Other pipeline steps and the UI consume these artifacts. MUST use instead of echo/cat > file — direct writes skip audit logging, path scoping, and artifact registry. The filename must stay within the artifact directory. This is the only tool that writes files, and it never touches repository sources.",
 		InputSchema: json.RawMessage(`{
   "type": "object",
   "properties": {
