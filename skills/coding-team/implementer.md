@@ -19,8 +19,9 @@ The Implementer is the first role allowed to modify repository source/test files
 
 1. **Handoffs are commands, not text.** Every handoff MUST be executed as a `multica issue comment add` bash command containing `[@Agent Name](mention://agent/{id})`. Do NOT describe handoffs in conversational text.
 2. **Your final action MUST be a bash tool call.** After completing Steps 1-7, you MUST execute Step 8 by running the bash commands exactly as written. Do NOT generate conversational text as your final output — the pipeline will stall if you do.
-3. **If a previous agent's work is missing from the branch**, do NOT ask to be "re-mentioned" — immediately tag the responsible agent or the Orchestrator via a `multica issue comment add` bash command.
-4. **No cleanup before durable push.** Do not finish, clean up, delete the worktree, or hand off until `git status --short` is clean and `git rev-list --count "origin/$BRANCH..HEAD"` is `0` after `git_push_clean`.
+3. **Review-fix routing is different from first implementation routing.** If the latest `## Review: FAIL` comment is newer than the latest `## Implementation Complete` comment, this run is a review-fix run. After applying fixes, you MUST hand off back to **Coding Team Reviewer**, not Test Writer. The normal first-implementation route is Implementer → Test Writer; the review-fix route is Reviewer → Implementer → Reviewer.
+4. **If a previous agent's work is missing from the branch**, do NOT ask to be "re-mentioned" — immediately tag the responsible agent or the Orchestrator via a `multica issue comment add` bash command.
+5. **No cleanup before durable push.** Do not finish, clean up, delete the worktree, or hand off until `git status --short` is clean and `git rev-list --count "origin/$BRANCH..HEAD"` is `0` after `git_push_clean`.
 
 ## Step 0 — Idempotency check (skip if already done)
 
@@ -29,7 +30,7 @@ Read the task issue's comment list:
 COMMENTS=$(multica issue comment list "$MULTICA_ISSUE_ID" --output json)
 ```
 
-Check whether this round of implementation is already done:
+Check whether this round of implementation is already done and whether this is a review-fix run:
 
 ```python
 import json, sys
@@ -39,15 +40,20 @@ bodies = [c.get('content', '') for c in comments]
 last_impl = max((i for i, b in enumerate(bodies) if '## Implementation Complete' in b), default=-1)
 last_fail = max((i for i, b in enumerate(bodies) if '## Review: FAIL' in b), default=-1)
 
+review_fix_run = last_fail > last_impl
+
 # Skip only if there is a completed implementation with no subsequent FAIL
 if last_impl >= 0 and last_fail < last_impl:
     print('skip')
+elif review_fix_run:
+    print('review_fix')
 else:
     print('proceed')
 ```
 
-- **`skip`** — implementation already done for this round (watchdog re-mention or duplicate trigger). Do not re-implement, do not commit. Jump directly to Step 8 and re-emit the Test Writer @mention.
-- **`proceed`** — no implementation yet, or a review FAIL came after the last implementation (retry round). Continue normally.
+- **`skip`** — implementation already done for this round (watchdog re-mention or duplicate trigger). Do not re-implement, do not commit. Jump directly to Step 8 and re-emit the appropriate handoff mention based on the latest completed round.
+- **`review_fix`** — a Reviewer FAIL came after the last implementation. Fix exactly the review findings, then Step 8 MUST route back to **Coding Team Reviewer**.
+- **`proceed`** — first implementation round. Continue normally; Step 8 routes to **Coding Team Test Writer**.
 
 ---
 
@@ -305,15 +311,27 @@ echo "Push verified: origin/$BRANCH is up to date with HEAD."
 
 ---
 
-## Step 8 — Final action: post summary, update state, and hand off to Test Writer
+## Step 8 — Final action: post summary, update state, and hand off with deterministic `coding_handoff_decide`
 
-**This is the final step. Your response MUST be a bash tool call executing the commands below. Do not write conversational text.**
+**This is the final step. Your response must call `coding_handoff_decide` and then execute its result. Do not hand off manually.**
 
-Execute in order:
+You **must** use `coding_handoff_decide` before posting the final handoff comment.
 
-1. Update master issue state — set this task's `status` to `"implemented"`. Write back.
+Construct the input JSON with:
+- `current_role`: `implementer`
+- `event`: one of `implementation_complete`, `review_fix`, `proceed`, `skip` (from Step 0; if unavailable, pass `implementation_complete`)
+- `task_issue_id`: `$MULTICA_ISSUE_ID`
+- `master_issue_id`: `$MASTER_ISSUE_ID`
+- `task_comments`: comments returned by `multica issue comment list "$MULTICA_ISSUE_ID" --output json`
+- `agent_ids`: map by role names (`implementer`, `test_writer`, `reviewer`, `orchestrator`)
 
-2. Post the implementation summary on the **task issue** by executing:
+Decision contract: tool output must be status `ok` and include `machine_data.decision.target_issue_id`, `machine_data.decision.next_agent_id`, and `machine_data.decision.comment_content`.
+
+**If status is `error`, stop immediately and post a blocking comment.**
+
+Then execute in order:
+
+1. Post implementation summary to the **task issue** as before:
    ```bash
    cat <<COMMENT | multica issue comment add "$MULTICA_ISSUE_ID" --content-stdin
    ## Implementation Complete
@@ -327,7 +345,7 @@ Execute in order:
    **Unit tests added:**
    {- relative/path/to/test/file}
 
-   **Line coverage on changed files:** {NN.N}% ({tool used: pytest --cov / dotnet test + coverlet / dotnet_test_gate})
+   **Line coverage on changed files:** {NN.N}% ({tool used: pytest / dotnet test / dotnet_test_gate})
    {If any blocks excluded, list them with one-line justifications.}
 
    ```json coding-team-artifact
@@ -348,20 +366,19 @@ Execute in order:
    }
    ```
    COMMENT
-   ```
 
-3. **Last step — execute this bash command to hand off:**
+2. Apply task state patch from `machine_data.decision.state_patches` (status should become `implemented`).
+
+3. Post the deterministic handoff comment exactly:
    ```bash
-   AGENTS=$(multica agent list --output json)
-   TESTER_ID=$(get_agent_id "$AGENTS" "Coding Team Test Writer")
-   if [ -z "$TESTER_ID" ]; then
-     echo "FATAL: Coding Team Test Writer agent not found — pipeline will stall" >&2
-     exit 1
-   fi
-
-   cat <<COMMENT | multica issue comment add "$MULTICA_ISSUE_ID" --content-stdin
-   [@Coding Team Test Writer](mention://agent/${TESTER_ID})
-
-   Implementation and baseline unit tests are committed. Line coverage is at the 99% gate on the changed files. Please add edge-case, error-path, and integration tests on top. The master issue is ${MASTER_ISSUE_ID}.
+   TARGET_ISSUE_ID=$(Handoff result machine_data.decision.target_issue_id)
+   COMMENT=$(Handoff result machine_data.decision.comment_content)
+   cat <<COMMENT | multica issue comment add "$TARGET_ISSUE_ID" --content-stdin
+   $COMMENT
    COMMENT
    ```
+
+4. If the tool returns `status: "error"`, post the error summary and stop. Do not invent the next recipient.
+
+Important rule:
+- Do **not** mention Test Writer during a review-fix handoff unless the reviewer explicitly requested test-writing work.

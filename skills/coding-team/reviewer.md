@@ -151,19 +151,20 @@ If the coverage command exits non-zero, the verdict is **FAIL**. List the uncove
 
 ### If PASS
 
-Execute these steps in order. Do not stop early.
+**Use `coding_handoff_decide` for this transition.**
 
-1. Look up the Orchestrator agent ID:
-   ```bash
-   AGENTS=$(multica agent list --output json)
-   ORCHESTRATOR_ID=$(get_agent_id "$AGENTS" "Coding Team Orchestrator")
-   if [ -z "$ORCHESTRATOR_ID" ]; then
-     echo "FATAL: Coding Team Orchestrator agent not found in workspace — pipeline will stall" >&2
-     exit 1
-   fi
-   ```
+1. Build deterministic input:
+   - `current_role`: `reviewer`
+   - `event`: `review_pass`
+   - `task_issue_id`: `$MULTICA_ISSUE_ID`
+   - `master_issue_id`: `$MASTER_ISSUE_ID`
+   - `task_comments`: task comments
+   - `master_comments`: master comments
+   - `agent_ids` map with role IDs
 
-2. Post the PASS verdict on the **task issue**:
+2. If the tool returns `status: error`, post the failure as a blocking comment and stop (do not hand off).
+
+3. Post the PASS verdict on the **task issue**:
    ```bash
    cat <<'COMMENT' | multica issue comment add "$MULTICA_ISSUE_ID" --content-stdin
    ## Review: PASS
@@ -177,28 +178,26 @@ Execute these steps in order. Do not stop early.
      "task_issue_id": "${MULTICA_ISSUE_ID}",
      "master_issue_id": "${MASTER_ISSUE_ID}",
      "verdict": "pass",
-     "deterministic_gates": [{json objects for policy_check/test_gate/dotnet_test_gate results}],
+     "deterministic_gates": [{"json objects for policy_check/test_gate/dotnet_test_gate results}],
      "issues": []
    }
    ```
    COMMENT
    ```
 
-3. Set the task issue to `done`:
+4. Set the task issue to `done`:
    ```bash
    multica issue status "$MULTICA_ISSUE_ID" done
    ```
 
-4. Update master issue state — set this task's `status` to `committed`. Write back.
+5. Apply the `state_patches` from tool output.
 
-5. **Last step** — signal Orchestrator on the **master issue**:
+6. **Last step** — post the exact handoff content from the tool to `machine_data.decision.comment_content` on `machine_data.decision.target_issue_id`:
    ```bash
-   cat <<COMMENT | multica issue comment add "$MASTER_ISSUE_ID" --content-stdin
-   [@Coding Team Orchestrator](mention://agent/${ORCHESTRATOR_ID})
-
-   TASK_COMPLETE
-   task_issue_id: ${MULTICA_ISSUE_ID}
-   status: committed
+   TARGET_ISSUE_ID=$(decision target)
+   COMMENT=$(decision comment)
+   cat <<COMMENT | multica issue comment add "$TARGET_ISSUE_ID" --content-stdin
+   $COMMENT
    COMMENT
    ```
 
@@ -206,23 +205,20 @@ Execute these steps in order. Do not stop early.
 
 ### If FAIL
 
-A failed review routes back to the Implementer for a fix — it does **not** signal the Orchestrator. The task status resets to `pending` so the pipeline can retry.
+A failed review routes back to the Implementer for a fix — not to Orchestrator.
 
-Post the review issues on the **task issue**. If `ado_id` is present, also post them on the ADO task work item using the `shared-ado-ops` comment pattern, formatted as `<ul><li>...</li></ul>` HTML, natural developer language with no AI/agent mentions. In Multica-only mode, do not call ADO.
+1. Build deterministic input:
+   - `current_role`: `reviewer`
+   - `event`: `review_fail`
+   - `task_issue_id`: `$MULTICA_ISSUE_ID`
+   - `master_issue_id`: `$MASTER_ISSUE_ID`
+   - `task_comments`: task comments
+   - `master_comments`: master comments
+   - `agent_ids` map with role IDs
 
-Execute these steps in order:
+2. If the tool returns `status: error`, post the failure as blocking comment and stop.
 
-1. Look up the Implementer agent ID:
-   ```bash
-   AGENTS=$(multica agent list --output json)
-   IMPLEMENTER_ID=$(get_agent_id "$AGENTS" "Coding Team Implementer")
-   if [ -z "$IMPLEMENTER_ID" ]; then
-     echo "FATAL: Coding Team Implementer agent not found in workspace — pipeline will stall" >&2
-     exit 1
-   fi
-   ```
-
-2. Post the FAIL verdict on the **task issue**:
+3. Post the FAIL verdict on the **task issue**:
    ```bash
    cat <<'COMMENT' | multica issue comment add "$MULTICA_ISSUE_ID" --content-stdin
    ## Review: FAIL
@@ -239,7 +235,7 @@ Execute these steps in order:
      "task_issue_id": "${MULTICA_ISSUE_ID}",
      "master_issue_id": "${MASTER_ISSUE_ID}",
      "verdict": "fail",
-     "deterministic_gates": [{json objects for policy_check/test_gate/dotnet_test_gate results}],
+     "deterministic_gates": [{"json objects for policy_check/test_gate/dotnet_test_gate results}],
      "issues": [
        {"severity": "blocking", "file": "relative/path", "line": 123, "message": "specific issue"}
      ]
@@ -248,18 +244,15 @@ Execute these steps in order:
    COMMENT
    ```
 
-3. Reset the task issue status to `in_progress` (not `blocked` — the Implementer will continue working on it):
+4. Reset the task issue status to `in_progress`.
+
+5. Apply `state_patches` from the tool output.
+
+6. **Last step** — post the exact handoff content from the tool to `machine_data.decision.target_issue_id`:
    ```bash
-   multica issue status "$MULTICA_ISSUE_ID" in_progress
-   ```
-
-4. Update master issue state — reset this task's `status` to `pending`. Write back.
-
-5. **Last step** — @mention the Implementer on the **task issue** with the failure context:
-   ```bash
-   cat <<COMMENT | multica issue comment add "$MULTICA_ISSUE_ID" --content-stdin
-   [@Coding Team Implementer](mention://agent/${IMPLEMENTER_ID})
-
-   Review failed — see issues above. Please fix them, re-run coverage to ≥ 99%, and commit again. The master issue is ${MASTER_ISSUE_ID}.
+   TARGET_ISSUE_ID=$(decision target)
+   COMMENT=$(decision comment)
+   cat <<COMMENT | multica issue comment add "$TARGET_ISSUE_ID" --content-stdin
+   $COMMENT
    COMMENT
    ```
