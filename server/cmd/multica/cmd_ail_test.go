@@ -268,3 +268,291 @@ func TestRunAilStage2ErrorMissingEventsFile(t *testing.T) {
 		t.Fatal("expected error from missing events file, got nil")
 	}
 }
+
+// --- Stage 3 CLI tests ---
+
+func newAilStage3TestCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "stage3"}
+	cmd.Flags().String("index-path", "", "")
+	cmd.Flags().String("output-dir", "", "")
+	cmd.Flags().Int("window-hours", 0, "")
+	cmd.Flags().Int("min-signature-count", 0, "")
+	cmd.Flags().Int("min-unique-tasks", 0, "")
+	cmd.Flags().String("output", "json", "")
+	return cmd
+}
+
+func newAilRunTestCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "run"}
+	cmd.Flags().String("config", "", "")
+	cmd.Flags().String("events-path", "", "")
+	cmd.Flags().String("stage2-output-dir", "", "")
+	cmd.Flags().String("stage3-output-dir", "", "")
+	cmd.Flags().String("emit-categories", "", "")
+	cmd.Flags().Int("window-hours", 0, "")
+	cmd.Flags().Int("min-signature-count", 0, "")
+	cmd.Flags().Int("min-unique-tasks", 0, "")
+	cmd.Flags().String("output", "json", "")
+	return cmd
+}
+
+func writeTestAilIndex(t *testing.T, path string, events []ail.Stage2Event) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create index file: %v", err)
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	for _, evt := range events {
+		if err := enc.Encode(evt); err != nil {
+			t.Fatalf("encode index event: %v", err)
+		}
+	}
+}
+
+func TestRunAilStage3WritesOutputFilesAndJSONStdout(t *testing.T) {
+	now := time.Now().UTC()
+	tmp := t.TempDir()
+	indexPath := filepath.Join(tmp, "stage2_index.jsonl")
+	outputDir := filepath.Join(tmp, "stage3out")
+
+	events := []ail.Stage2Event{
+		{TS: now.Add(-5 * time.Minute).Format(time.RFC3339Nano), EventType: "failure_event", TaskID: "t1", AgentID: "a1", Status: "failed", FailureReason: "agent_error"},
+		{TS: now.Add(-4 * time.Minute).Format(time.RFC3339Nano), EventType: "failure_event", TaskID: "t2", AgentID: "a1", Status: "failed", FailureReason: "agent_error"},
+		{TS: now.Add(-3 * time.Minute).Format(time.RFC3339Nano), EventType: "failure_event", TaskID: "t3", AgentID: "a2", Status: "failed", FailureReason: "agent_error"},
+	}
+	writeTestAilIndex(t, indexPath, events)
+
+	cmd := newAilStage3TestCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	_ = cmd.Flags().Set("index-path", indexPath)
+	_ = cmd.Flags().Set("output-dir", outputDir)
+
+	if err := runAilStage3(cmd, nil); err != nil {
+		t.Fatalf("runAilStage3: %v", err)
+	}
+
+	for _, name := range []string{"stage3_digest.json", "stage3_signatures.jsonl", "stage3_watermark.json"} {
+		if _, err := os.Stat(filepath.Join(outputDir, name)); err != nil {
+			t.Fatalf("%s not created: %v", name, err)
+		}
+	}
+
+	var result ail.Stage3Result
+	if err := json.Unmarshal(buf.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v\noutput: %s", err, buf.String())
+	}
+	if result.TotalEvents == 0 {
+		t.Fatal("total_window_events = 0, want > 0")
+	}
+}
+
+func TestRunAilStage3DeterministicStdout(t *testing.T) {
+	now := time.Now().UTC()
+	tmp := t.TempDir()
+	indexPath := filepath.Join(tmp, "stage2_index.jsonl")
+	outputDir := filepath.Join(tmp, "stage3out")
+
+	events := []ail.Stage2Event{
+		{TS: now.Add(-3 * time.Minute).Format(time.RFC3339Nano), EventType: "failure_event", TaskID: "tx", AgentID: "a1", Status: "failed", FailureReason: "runtime_offline"},
+	}
+	writeTestAilIndex(t, indexPath, events)
+
+	runOnce := func() string {
+		cmd := newAilStage3TestCmd()
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		_ = cmd.Flags().Set("index-path", indexPath)
+		_ = cmd.Flags().Set("output-dir", outputDir)
+		if err := runAilStage3(cmd, nil); err != nil {
+			t.Fatalf("runAilStage3: %v", err)
+		}
+		return buf.String()
+	}
+
+	first := runOnce()
+	second := runOnce()
+	if first != second {
+		t.Fatalf("stdout not deterministic:\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+}
+
+func TestRunAilStage3MissingIndexReturnsError(t *testing.T) {
+	tmp := t.TempDir()
+	cmd := newAilStage3TestCmd()
+	_ = cmd.Flags().Set("index-path", filepath.Join(tmp, "missing.jsonl"))
+	_ = cmd.Flags().Set("output-dir", filepath.Join(tmp, "out"))
+	if err := runAilStage3(cmd, nil); err == nil {
+		t.Fatal("expected error from missing index, got nil")
+	}
+}
+
+func TestRunAilStage3TableOutputNoPainBuckets(t *testing.T) {
+	now := time.Now().UTC()
+	tmp := t.TempDir()
+	indexPath := filepath.Join(tmp, "stage2_index.jsonl")
+	outputDir := filepath.Join(tmp, "stage3out")
+
+	// Event without failure_reason produces no pain buckets.
+	events := []ail.Stage2Event{
+		{TS: now.Add(-5 * time.Minute).Format(time.RFC3339Nano), EventType: "agent_event", TaskID: "t1", AgentID: "a1", Status: "completed"},
+	}
+	writeTestAilIndex(t, indexPath, events)
+
+	cmd := newAilStage3TestCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	_ = cmd.Flags().Set("index-path", indexPath)
+	_ = cmd.Flags().Set("output-dir", outputDir)
+	_ = cmd.Flags().Set("output", "table")
+
+	if err := runAilStage3(cmd, nil); err != nil {
+		t.Fatalf("runAilStage3 table: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "analyzed_at") {
+		t.Fatalf("table output missing analyzed_at summary, got: %q", out)
+	}
+	if !strings.Contains(out, "No pain buckets") {
+		t.Fatalf("table output should say no pain buckets, got: %q", out)
+	}
+}
+
+func TestRunAilStage3TableOutputWithPainBuckets(t *testing.T) {
+	now := time.Now().UTC()
+	tmp := t.TempDir()
+	indexPath := filepath.Join(tmp, "stage2_index.jsonl")
+	outputDir := filepath.Join(tmp, "stage3out")
+
+	events := []ail.Stage2Event{
+		{TS: now.Add(-5 * time.Minute).Format(time.RFC3339Nano), EventType: "failure_event", TaskID: "t1", AgentID: "a1", Status: "failed", FailureReason: "bucket_a"},
+		{TS: now.Add(-4 * time.Minute).Format(time.RFC3339Nano), EventType: "failure_event", TaskID: "t2", AgentID: "a2", Status: "failed", FailureReason: "bucket_b"},
+		{TS: now.Add(-3 * time.Minute).Format(time.RFC3339Nano), EventType: "failure_event", TaskID: "t3", AgentID: "a3", Status: "failed", FailureReason: "bucket_c"},
+		{TS: now.Add(-2 * time.Minute).Format(time.RFC3339Nano), EventType: "failure_event", TaskID: "t4", AgentID: "a4", Status: "failed", FailureReason: "bucket_d"},
+	}
+	writeTestAilIndex(t, indexPath, events)
+
+	cmd := newAilStage3TestCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	_ = cmd.Flags().Set("index-path", indexPath)
+	_ = cmd.Flags().Set("output-dir", outputDir)
+	_ = cmd.Flags().Set("output", "table")
+
+	if err := runAilStage3(cmd, nil); err != nil {
+		t.Fatalf("runAilStage3 table with buckets: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "RANK") {
+		t.Fatalf("table output missing RANK header, got: %q", out)
+	}
+}
+
+// --- run (Stage 2 + 3) CLI tests ---
+
+func TestRunAilRunWritesAllArtifactsAndJSONStdout(t *testing.T) {
+	now := time.Now().UTC()
+	tmp := t.TempDir()
+	eventsPath := filepath.Join(tmp, "events.jsonl")
+	stage2Dir := filepath.Join(tmp, "stage2")
+	stage3Dir := filepath.Join(tmp, "stage3")
+
+	events := []ail.Stage2Event{
+		{TS: now.Add(-5 * time.Minute).Format(time.RFC3339Nano), EventType: "failure_event", TaskID: "t1", AgentID: "a1", Status: "failed", FailureReason: "agent_error"},
+		{TS: now.Add(-4 * time.Minute).Format(time.RFC3339Nano), EventType: "failure_event", TaskID: "t2", AgentID: "a2", Status: "failed", FailureReason: "agent_error"},
+		{TS: now.Add(-3 * time.Minute).Format(time.RFC3339Nano), EventType: "failure_event", TaskID: "t3", AgentID: "a3", Status: "failed", FailureReason: "agent_error"},
+	}
+	writeTestAilEvents(t, eventsPath, events)
+
+	cmd := newAilRunTestCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	_ = cmd.Flags().Set("events-path", eventsPath)
+	_ = cmd.Flags().Set("stage2-output-dir", stage2Dir)
+	_ = cmd.Flags().Set("stage3-output-dir", stage3Dir)
+
+	if err := runAilRun(cmd, nil); err != nil {
+		t.Fatalf("runAilRun: %v", err)
+	}
+
+	for _, path := range []string{
+		filepath.Join(stage2Dir, "stage2_index.jsonl"),
+		filepath.Join(stage2Dir, "stage2_summary.json"),
+		filepath.Join(stage3Dir, "stage3_digest.json"),
+		filepath.Join(stage3Dir, "stage3_signatures.jsonl"),
+		filepath.Join(stage3Dir, "stage3_watermark.json"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("artifact %q not created: %v", path, err)
+		}
+	}
+
+	var combined struct {
+		Stage2 ail.Stage2Result `json:"stage2"`
+		Stage3 ail.Stage3Result `json:"stage3"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &combined); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v\noutput: %s", err, buf.String())
+	}
+	if combined.Stage2.TotalWindow == 0 {
+		t.Fatal("stage2.total_window_events = 0")
+	}
+	if combined.Stage3.TotalEvents == 0 {
+		t.Fatal("stage3.total_window_events = 0")
+	}
+
+	// Watermark must be present in stage3 output.
+	wmBytes, err := os.ReadFile(filepath.Join(stage3Dir, "stage3_watermark.json"))
+	if err != nil {
+		t.Fatalf("read watermark: %v", err)
+	}
+	var wm ail.Stage3Watermark
+	if err := json.Unmarshal(wmBytes, &wm); err != nil {
+		t.Fatalf("parse watermark: %v", err)
+	}
+	if wm.IndexSHA256 == "" {
+		t.Fatal("watermark index_sha256 not set")
+	}
+}
+
+func TestRunAilRunTableOutput(t *testing.T) {
+	now := time.Now().UTC()
+	tmp := t.TempDir()
+	eventsPath := filepath.Join(tmp, "events.jsonl")
+	stage2Dir := filepath.Join(tmp, "stage2")
+	stage3Dir := filepath.Join(tmp, "stage3")
+
+	events := []ail.Stage2Event{
+		{TS: now.Add(-2 * time.Minute).Format(time.RFC3339Nano), EventType: "agent_event", TaskID: "t1", AgentID: "a1", Status: "completed"},
+	}
+	writeTestAilEvents(t, eventsPath, events)
+
+	cmd := newAilRunTestCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	_ = cmd.Flags().Set("events-path", eventsPath)
+	_ = cmd.Flags().Set("stage2-output-dir", stage2Dir)
+	_ = cmd.Flags().Set("stage3-output-dir", stage3Dir)
+	_ = cmd.Flags().Set("output", "table")
+
+	if err := runAilRun(cmd, nil); err != nil {
+		t.Fatalf("runAilRun table: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "stage2:") {
+		t.Fatalf("table output missing stage2 summary line, got: %q", out)
+	}
+	if !strings.Contains(out, "stage3:") {
+		t.Fatalf("table output missing stage3 summary line, got: %q", out)
+	}
+}
+
+func TestRunAilRunErrorMissingEventsFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cmd := newAilRunTestCmd()
+	if err := runAilRun(cmd, nil); err == nil {
+		t.Fatal("expected error from missing events file, got nil")
+	}
+}

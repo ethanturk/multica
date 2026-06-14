@@ -22,19 +22,27 @@ const (
 
 // Stage2Event mirrors the Stage1 telemetry event schema used by the loop.
 type Stage2Event struct {
-	TS            string `json:"ts"`
-	EventType     string `json:"event_type"`
-	WorkspaceID   string `json:"workspace_id"`
-	AgentID       string `json:"agent_id"`
-	IssueID       string `json:"issue_id,omitempty"`
-	TaskID        string `json:"task_id"`
-	RuntimeID     string `json:"runtime_id,omitempty"`
-	Status        string `json:"status"`
-	Attempt       int32  `json:"attempt"`
-	MaxAttempts   int32  `json:"max_attempts"`
-	RetryCount    int32  `json:"retry_count"`
-	FailureReason string `json:"failure_reason,omitempty"`
-	ErrorMessage  string `json:"error_message,omitempty"`
+	TS             string   `json:"ts"`
+	EventType      string   `json:"event_type"`
+	WorkspaceID    string   `json:"workspace_id"`
+	AgentID        string   `json:"agent_id"`
+	IssueID        string   `json:"issue_id,omitempty"`
+	TaskID         string   `json:"task_id"`
+	RuntimeID      string   `json:"runtime_id,omitempty"`
+	Status         string   `json:"status"`
+	Attempt        int32    `json:"attempt"`
+	MaxAttempts    int32    `json:"max_attempts"`
+	RetryCount     int32    `json:"retry_count"`
+	FailureReason  string   `json:"failure_reason,omitempty"`
+	ErrorMessage   string   `json:"error_message,omitempty"`
+	ErrorSignature string   `json:"error_signature,omitempty"`
+	LoopSignature  string   `json:"loop_signature,omitempty"`
+	DettoolsUsed   []string `json:"dettools_used,omitempty"`
+	RunDurationMs  int64    `json:"run_duration_ms,omitempty"`
+	Source         string   `json:"source,omitempty"`
+	Provider       string   `json:"provider,omitempty"`
+	Model          string   `json:"model,omitempty"`
+	RawRef         string   `json:"raw_ref,omitempty"`
 }
 
 // Stage2Config controls capture windowing and file layout.
@@ -317,6 +325,11 @@ func resolveStage2OutputDir() string {
 		return filepath.Join(home, defaultStage2OutputDir)
 	}
 	return filepath.Join(".", defaultStage2OutputDir)
+}
+
+// IndexFilePath returns the full path to the Stage 2 index JSONL file for this config.
+func (cfg Stage2Config) IndexFilePath() string {
+	return filepath.Join(cfg.OutputDir, defaultStage2OutputIndexFile)
 }
 
 func (cfg Stage2Config) shouldKeepEventType(eventType string) bool {

@@ -10,35 +10,35 @@ agent workflow.
 
 ## Current status checkpoint
 
-_Last updated: 2026-06-14 (Stage 2 wiring implemented on branch ail-stage1-2-status-2026-06-14)_
+_Last updated: 2026-06-14 (Stage 3 analysis implemented on branch ail-stage1-2-status-2026-06-14)_
 
 ### Completed in repo
 
 - **Stage 1 — Implemented.** Telemetry is integrated into core task lifecycle in `TaskService` (`server/internal/service/task_stage1_telemetry.go`). Emits normalized JSONL lifecycle events with full env/config controls (`MULTICA_AIL_STAGE1_ENABLED`, `MULTICA_AIL_STAGE1_EVENTS_PATH`, `MULTICA_AIL_STAGE1_EMIT_CATEGORIES`, `MULTICA_AIL_STAGE1_CONFIG`). Tests pass.
 - **Stage 2 code — Implemented (code only).** Capture/index logic exists in `server/internal/ail/stage2.go` (`RunStage2Capture`, `Stage2Config`, `Stage2Result`) with tests in `stage2_test.go`. Outputs: `diagnostics/stage2/stage2_index.jsonl` and `diagnostics/stage2/stage2_summary.json`.
 - **Stage 2 wiring — Implemented.** `server/cmd/multica/cmd_ail.go` adds the `multica ail stage2` CLI subcommand wiring `NewStage2ConfigFromArgs` + `RunStage2Capture`. The `Agent Improvement Loop Stage2-3` autopilot in `run_only` mode runs nightly at `0 2 * * *` UTC via the `Agent Improvement Analyzer` agent.
+- **Stage 3 — Implemented in repo.** `server/internal/ail/stage3.go` (`RunStage3Analyze`, `Stage3Config`, `Stage3Result`) implements pain-bucket refinement, repeat-signature clustering by `(failure_reason, error_signature, loop_signature)`, and ranked candidate dettool generation. Artifacts: `diagnostics/stage3/stage3_digest.json`, `diagnostics/stage3/stage3_signatures.jsonl`, `diagnostics/stage3/stage3_watermark.json`. Output is deterministic (injected clock, sorted slices) and idempotent (watermark short-circuits re-runs with the same index SHA-256 and window). Tests in `stage3_test.go` including a committed golden-file test. `multica ail stage3` and `multica ail run` (Stage 2 → Stage 3 in one process, Option A) are wired in `cmd_ail.go`.
 - **Stage 8 promotion script — Implemented.** `scripts/stage8-promote.sh` moves prospect → production, updates `dettools/prospect/manifest.json`, runs `multica dettool import-file`, and appends `diagnostics/stage8-promotion.jsonl`.
-- **AIL skills and runbooks** — `skills/agent-improvement-loop/{analyzer.md,evaluator.md,SETUP.md}` present.
-- **Architecture choice rule 1 (Stage 1 always-on)** — honored via TaskService integration.
+- **AIL skills and runbooks** — `skills/agent-improvement-loop/{analyzer.md,evaluator.md,SETUP.md}` present and updated.
+- **Architecture choice rules 1–3** — honored: Stage 1 always-on via TaskService; Stage 2 scheduled; Stage 3 runs immediately after Stage 2 in the same `multica ail run` invocation (Option A).
 
 ### Current verification status
 
 - `go test ./internal/service -count=1` ✅ (`/home/ethanturk/multica/server`)
 - `go test ./internal/ail -count=1` ✅ (`/home/ethanturk/multica/server`)
 - `go test ./internal/service ./internal/ail ./cmd/multica -count=1` ✅
-- `grep -rn "RunStage2Capture" --include="*.go"` — called from `server/cmd/multica/cmd_ail.go` ✅ (wiring gap closed)
-- `grep -rn "agent_improvement_capture|agent_improvement_analyze|agent_improvement_evaluate" --include="*.go"` — no results ✅ (confirms Stages 3–4 dettools absent)
+- `grep -rn "RunStage2Capture\|RunStage3Analyze" --include="*.go"` — both called from `server/cmd/multica/cmd_ail.go` ✅
+- `grep -rn "agent_improvement_capture|agent_improvement_analyze|agent_improvement_evaluate" --include="*.go"` — no results ✅ (confirms Stages 3–4 dettools absent; Stage 3 is a plain Go analyzer, not a dettool)
 - `dettools/prospect/manifest.json` has `items: []` ✅ (confirms Stage 6 scaffold absent)
 
 ### Outstanding (unimplemented gaps — one follow-up task each)
 
-1. **Stage 3** — No log-analysis Go code; `agent_improvement_analyze` dettool absent.
-2. **Stage 4** — No candidacy evaluation code; `agent_improvement_evaluate` dettool absent; no `ready_for_candidate / ready_for_review / defer` logic.
-3. **Stage 5** — No digest-reporting code; no `dettool.none` fail-safe path.
-4. **Stage 6** — No candidate scaffold generator; `dettools/prospect/manifest.json` is empty.
-5. **Stage 7** — No replay/evaluation harness; no determinism profile; no replay filters.
-6. **Stage 8 diagnostics** — Missing `diagnostics/stage-summary.jsonl`, `diagnostics/candidate-decision.json`, `diagnostics/rerun-manifest.json`; no baseline telemetry comparator; no 30-day re-evaluation trigger.
-7. **Architecture choice rules 2–4** — Depend on the Stage 3 and Stage 4 follow-up tasks above.
+1. **Stage 4** — No candidacy evaluation code; `agent_improvement_evaluate` dettool absent. Follow-up task PER-10 reads `MinSignatureCount` / `MinUniqueTasks` exported from `stage3.go`.
+2. **Stage 5** — No digest-reporting code; no `dettool.none` fail-safe path.
+3. **Stage 6** — No candidate scaffold generator; `dettools/prospect/manifest.json` is empty.
+4. **Stage 7** — No replay/evaluation harness; no determinism profile; no replay filters.
+5. **Stage 8 diagnostics** — Missing `diagnostics/stage-summary.jsonl`, `diagnostics/candidate-decision.json`, `diagnostics/rerun-manifest.json`; no baseline telemetry comparator; no 30-day re-evaluation trigger.
+6. **Architecture choice rule 4** — Depends on Stage 4 follow-up task.
 
 ## Architecture choice (by stage)
 
