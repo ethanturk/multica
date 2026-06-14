@@ -34,7 +34,7 @@ Staging and production folders are both repo-local:
 
 ### Stage 2 + 3 (nightly)
 
-**Autopilot agent prompt (current):** `multica ail run` — runs Stage 2 capture + Stage 3 analysis in one process (Option A). Stage 3 artifacts: `stage3_digest.json`, `stage3_signatures.jsonl`, `stage3_watermark.json` under `~/diagnostics/stage3/`.
+**Autopilot agent prompt (current):** `MULTICA_AIL_TUNING_ISSUE_ID=<issue-id> multica ail run` — runs Stage 2 capture + Stage 3 analysis in one process (Option A), then writes and posts the Stage 5 digest. Stage 3 artifacts: `stage3_digest.json`, `stage3_signatures.jsonl`, `stage3_watermark.json` under `~/diagnostics/stage3/`. Stage 5 artifacts: `stage5_digest.json`, `stage5_watermark.json` under `~/diagnostics/stage5/`. The digest issue can also be supplied with `--digest-issue <issue-id>`.
 
 ```bash
 AUTOPILOT_NAME="Agent Improvement Loop Stage2-3"

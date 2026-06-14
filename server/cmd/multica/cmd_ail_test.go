@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -41,9 +43,17 @@ func writeTestAilEvents(t *testing.T, path string, events []ail.Stage2Event) {
 	}
 }
 
+func setTestFlag(t *testing.T, cmd *cobra.Command, name string, value string) {
+	t.Helper()
+	if err := cmd.Flags().Set(name, value); err != nil {
+		t.Fatalf("set flag %s: %v", name, err)
+	}
+}
+
 func TestRunAilStage2WritesOutputFilesAndJSONStdout(t *testing.T) {
 	now := time.Now().UTC()
 	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
 	eventsPath := filepath.Join(tmp, "events.jsonl")
 	outputDir := filepath.Join(tmp, "out")
 
@@ -83,6 +93,7 @@ func TestRunAilStage2WritesOutputFilesAndJSONStdout(t *testing.T) {
 func TestRunAilStage2UsesConfigFileForInputAndEmitCategories(t *testing.T) {
 	now := time.Now().UTC()
 	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
 	eventsPath := filepath.Join(tmp, "events.jsonl")
 	configPath := filepath.Join(tmp, "stage2.json")
 	outputDir := filepath.Join(tmp, "out")
@@ -128,6 +139,7 @@ func TestRunAilStage2UsesConfigFileForInputAndEmitCategories(t *testing.T) {
 func TestRunAilStage2FlagsOverrideConfigAndWindowHours(t *testing.T) {
 	now := time.Now().UTC()
 	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
 	eventsPath := filepath.Join(tmp, "events.jsonl")
 	configPath := filepath.Join(tmp, "stage2.json")
 	outputDir := filepath.Join(tmp, "out")
@@ -180,6 +192,7 @@ func TestRunAilStage2FlagsOverrideConfigAndWindowHours(t *testing.T) {
 func TestRunAilStage2TableOutputNoPainBuckets(t *testing.T) {
 	now := time.Now().UTC()
 	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
 	eventsPath := filepath.Join(tmp, "events.jsonl")
 	outputDir := filepath.Join(tmp, "out")
 
@@ -210,6 +223,7 @@ func TestRunAilStage2TableOutputNoPainBuckets(t *testing.T) {
 func TestRunAilStage2TableOutputWithPainBucketsTruncatedToThree(t *testing.T) {
 	now := time.Now().UTC()
 	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
 	eventsPath := filepath.Join(tmp, "events.jsonl")
 	outputDir := filepath.Join(tmp, "out")
 
@@ -292,6 +306,8 @@ func newAilRunTestCmd() *cobra.Command {
 	cmd.Flags().Int("window-hours", 0, "")
 	cmd.Flags().Int("min-signature-count", 0, "")
 	cmd.Flags().Int("min-unique-tasks", 0, "")
+	cmd.Flags().String("stage5-output-dir", "", "")
+	cmd.Flags().String("digest-issue", "", "")
 	cmd.Flags().String("output", "json", "")
 	return cmd
 }
@@ -455,9 +471,11 @@ func TestRunAilStage3TableOutputWithPainBuckets(t *testing.T) {
 func TestRunAilRunWritesAllArtifactsAndJSONStdout(t *testing.T) {
 	now := time.Now().UTC()
 	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
 	eventsPath := filepath.Join(tmp, "events.jsonl")
 	stage2Dir := filepath.Join(tmp, "stage2")
 	stage3Dir := filepath.Join(tmp, "stage3")
+	stage5Dir := filepath.Join(tmp, "diagnostics", "stage5")
 
 	events := []ail.Stage2Event{
 		{TS: now.Add(-5 * time.Minute).Format(time.RFC3339Nano), EventType: "failure_event", TaskID: "t1", AgentID: "a1", Status: "failed", FailureReason: "agent_error"},
@@ -472,6 +490,7 @@ func TestRunAilRunWritesAllArtifactsAndJSONStdout(t *testing.T) {
 	_ = cmd.Flags().Set("events-path", eventsPath)
 	_ = cmd.Flags().Set("stage2-output-dir", stage2Dir)
 	_ = cmd.Flags().Set("stage3-output-dir", stage3Dir)
+	setTestFlag(t, cmd, "stage5-output-dir", stage5Dir)
 
 	if err := runAilRun(cmd, nil); err != nil {
 		t.Fatalf("runAilRun: %v", err)
@@ -483,6 +502,8 @@ func TestRunAilRunWritesAllArtifactsAndJSONStdout(t *testing.T) {
 		filepath.Join(stage3Dir, "stage3_digest.json"),
 		filepath.Join(stage3Dir, "stage3_signatures.jsonl"),
 		filepath.Join(stage3Dir, "stage3_watermark.json"),
+		filepath.Join(stage5Dir, "stage5_digest.json"),
+		filepath.Join(stage5Dir, "stage5_watermark.json"),
 	} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("artifact %q not created: %v", path, err)
@@ -492,6 +513,7 @@ func TestRunAilRunWritesAllArtifactsAndJSONStdout(t *testing.T) {
 	var combined struct {
 		Stage2 ail.Stage2Result `json:"stage2"`
 		Stage3 ail.Stage3Result `json:"stage3"`
+		Stage5 ail.Stage5Digest `json:"stage5"`
 	}
 	if err := json.Unmarshal(buf.Bytes(), &combined); err != nil {
 		t.Fatalf("stdout is not valid JSON: %v\noutput: %s", err, buf.String())
@@ -501,6 +523,9 @@ func TestRunAilRunWritesAllArtifactsAndJSONStdout(t *testing.T) {
 	}
 	if combined.Stage3.TotalEvents == 0 {
 		t.Fatal("stage3.total_window_events = 0")
+	}
+	if combined.Stage5.SignalCount == 0 {
+		t.Fatal("stage5.signal_count = 0")
 	}
 
 	// Watermark must be present in stage3 output.
@@ -520,9 +545,11 @@ func TestRunAilRunWritesAllArtifactsAndJSONStdout(t *testing.T) {
 func TestRunAilRunPassesStage2SignatureFieldsAndStage3Thresholds(t *testing.T) {
 	now := time.Now().UTC()
 	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
 	eventsPath := filepath.Join(tmp, "events.jsonl")
 	stage2Dir := filepath.Join(tmp, "stage2")
 	stage3Dir := filepath.Join(tmp, "stage3")
+	stage5Dir := filepath.Join(tmp, "diagnostics", "stage5")
 
 	events := []ail.Stage2Event{
 		{
@@ -564,6 +591,7 @@ func TestRunAilRunPassesStage2SignatureFieldsAndStage3Thresholds(t *testing.T) {
 	_ = cmd.Flags().Set("events-path", eventsPath)
 	_ = cmd.Flags().Set("stage2-output-dir", stage2Dir)
 	_ = cmd.Flags().Set("stage3-output-dir", stage3Dir)
+	setTestFlag(t, cmd, "stage5-output-dir", stage5Dir)
 	_ = cmd.Flags().Set("min-signature-count", "2")
 	_ = cmd.Flags().Set("min-unique-tasks", "2")
 
@@ -604,9 +632,11 @@ func TestRunAilRunPassesStage2SignatureFieldsAndStage3Thresholds(t *testing.T) {
 func TestRunAilRunTableOutput(t *testing.T) {
 	now := time.Now().UTC()
 	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
 	eventsPath := filepath.Join(tmp, "events.jsonl")
 	stage2Dir := filepath.Join(tmp, "stage2")
 	stage3Dir := filepath.Join(tmp, "stage3")
+	stage5Dir := filepath.Join(tmp, "diagnostics", "stage5")
 
 	events := []ail.Stage2Event{
 		{TS: now.Add(-2 * time.Minute).Format(time.RFC3339Nano), EventType: "agent_event", TaskID: "t1", AgentID: "a1", Status: "completed"},
@@ -619,6 +649,7 @@ func TestRunAilRunTableOutput(t *testing.T) {
 	_ = cmd.Flags().Set("events-path", eventsPath)
 	_ = cmd.Flags().Set("stage2-output-dir", stage2Dir)
 	_ = cmd.Flags().Set("stage3-output-dir", stage3Dir)
+	setTestFlag(t, cmd, "stage5-output-dir", stage5Dir)
 	_ = cmd.Flags().Set("output", "table")
 
 	if err := runAilRun(cmd, nil); err != nil {
@@ -630,6 +661,9 @@ func TestRunAilRunTableOutput(t *testing.T) {
 	}
 	if !strings.Contains(out, "stage3:") {
 		t.Fatalf("table output missing stage3 summary line, got: %q", out)
+	}
+	if !strings.Contains(out, "stage5:") {
+		t.Fatalf("table output missing stage5 summary line, got: %q", out)
 	}
 }
 
@@ -684,5 +718,137 @@ func TestRunAilRunErrorWhenStage3AnalyzeFails(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "stage3:") {
 		t.Fatalf("expected error to contain \"stage3:\", got: %v", err)
+	}
+}
+
+func TestRunAilRunPostsStage5DigestOnce(t *testing.T) {
+	now := time.Now().UTC()
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	eventsPath := filepath.Join(tmp, "events.jsonl")
+	stage2Dir := filepath.Join(tmp, "stage2")
+	stage3Dir := filepath.Join(tmp, "stage3")
+	stage5Dir := filepath.Join(tmp, "diagnostics", "stage5")
+	postCount := 0
+	var postedContent string
+	comments := []map[string]any{}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/issues/tune-1/comments" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		switch r.Method {
+		case http.MethodGet:
+			_ = json.NewEncoder(w).Encode(comments)
+		case http.MethodPost:
+			postCount++
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode post body: %v", err)
+			}
+			postedContent, _ = body["content"].(string)
+			comments = append(comments, map[string]any{"content": postedContent})
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "comment-1"})
+		default:
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+	}))
+	defer srv.Close()
+	t.Setenv("MULTICA_SERVER_URL", srv.URL)
+	t.Setenv("MULTICA_WORKSPACE_ID", "ws-1")
+	t.Setenv("MULTICA_TOKEN", "test-token")
+	t.Setenv(ailTuningIssueEnv, "")
+
+	events := []ail.Stage2Event{
+		{TS: now.Add(-5 * time.Minute).Format(time.RFC3339Nano), EventType: "failure_event", TaskID: "t1", AgentID: "a1", Status: "failed", FailureReason: "agent_error", ErrorSignature: "E_TIMEOUT"},
+		{TS: now.Add(-4 * time.Minute).Format(time.RFC3339Nano), EventType: "failure_event", TaskID: "t2", AgentID: "a2", Status: "failed", FailureReason: "agent_error", ErrorSignature: "E_TIMEOUT"},
+	}
+	writeTestAilEvents(t, eventsPath, events)
+
+	run := func() bool {
+		cmd := newAilRunTestCmd()
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		_ = cmd.Flags().Set("events-path", eventsPath)
+		_ = cmd.Flags().Set("stage2-output-dir", stage2Dir)
+		_ = cmd.Flags().Set("stage3-output-dir", stage3Dir)
+		setTestFlag(t, cmd, "stage5-output-dir", stage5Dir)
+		setTestFlag(t, cmd, "digest-issue", "tune-1")
+		_ = cmd.Flags().Set("min-signature-count", "2")
+		_ = cmd.Flags().Set("min-unique-tasks", "2")
+		if err := runAilRun(cmd, nil); err != nil {
+			t.Fatalf("runAilRun: %v", err)
+		}
+		var result struct {
+			Stage5DigestPost bool `json:"stage5_digest_posted"`
+		}
+		if err := json.Unmarshal(buf.Bytes(), &result); err != nil {
+			t.Fatalf("decode stdout: %v\n%s", err, buf.String())
+		}
+		return result.Stage5DigestPost
+	}
+
+	if !run() {
+		t.Fatal("first run should post digest")
+	}
+	if run() {
+		t.Fatal("second run should skip duplicate digest")
+	}
+	if postCount != 1 {
+		t.Fatalf("post count = %d, want 1", postCount)
+	}
+	if !strings.Contains(postedContent, "Agent Improvement Digest") {
+		t.Fatalf("posted digest missing heading: %q", postedContent)
+	}
+	if !strings.Contains(postedContent, "Suggested tools") {
+		t.Fatalf("posted digest missing suggested tools: %q", postedContent)
+	}
+}
+
+func TestRunAilRunUsesDigestIssueEnvFallback(t *testing.T) {
+	now := time.Now().UTC()
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	eventsPath := filepath.Join(tmp, "events.jsonl")
+	stage2Dir := filepath.Join(tmp, "stage2")
+	stage3Dir := filepath.Join(tmp, "stage3")
+	stage5Dir := filepath.Join(tmp, "diagnostics", "stage5")
+	postCount := 0
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/issues/env-tune/comments" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		switch r.Method {
+		case http.MethodGet:
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		case http.MethodPost:
+			postCount++
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "comment-1"})
+		default:
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+	}))
+	defer srv.Close()
+	t.Setenv("MULTICA_SERVER_URL", srv.URL)
+	t.Setenv("MULTICA_WORKSPACE_ID", "ws-1")
+	t.Setenv("MULTICA_TOKEN", "test-token")
+	t.Setenv(ailTuningIssueEnv, "env-tune")
+
+	events := []ail.Stage2Event{
+		{TS: now.Add(-5 * time.Minute).Format(time.RFC3339Nano), EventType: "failure_event", TaskID: "t1", AgentID: "a1", Status: "failed", FailureReason: "agent_error"},
+	}
+	writeTestAilEvents(t, eventsPath, events)
+
+	cmd := newAilRunTestCmd()
+	_ = cmd.Flags().Set("events-path", eventsPath)
+	_ = cmd.Flags().Set("stage2-output-dir", stage2Dir)
+	_ = cmd.Flags().Set("stage3-output-dir", stage3Dir)
+	setTestFlag(t, cmd, "stage5-output-dir", stage5Dir)
+	if err := runAilRun(cmd, nil); err != nil {
+		t.Fatalf("runAilRun: %v", err)
+	}
+	if postCount != 1 {
+		t.Fatalf("post count = %d, want 1", postCount)
 	}
 }
