@@ -394,7 +394,7 @@ func stage6BoolValue(values map[string]any, key string, fallback bool) bool {
 	return fallback
 }
 
-const stage6CandidateTemplate = `package {{.PackageName}}
+var stage6CandidateTemplate = `package {{.PackageName}}
 
 import (
 	"bytes"
@@ -478,7 +478,7 @@ func Is{{.TypeName}}InvalidInput(err error) bool {
 }
 `
 
-const stage6CandidateTestTemplate = `package {{.PackageName}}
+var stage6CandidateTestTemplate = `package {{.PackageName}}
 
 import "testing"
 

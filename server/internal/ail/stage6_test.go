@@ -350,6 +350,42 @@ func TestRunStage6GenerateReturnsFilesystemErrors(t *testing.T) {
 	}
 }
 
+func TestRunStage6GenerateReturnsTemplateErrors(t *testing.T) {
+	tmp := t.TempDir()
+	candidatePath := filepath.Join(tmp, "contract.json")
+	writeStage6TestContract(t, candidatePath, stage6TestContract("detect_agent_error"))
+
+	originalCandidateTemplate := stage6CandidateTemplate
+	originalCandidateTestTemplate := stage6CandidateTestTemplate
+	t.Cleanup(func() {
+		stage6CandidateTemplate = originalCandidateTemplate
+		stage6CandidateTestTemplate = originalCandidateTestTemplate
+	})
+
+	stage6CandidateTemplate = "{{"
+	_, err := RunStage6Generate(Stage6Config{
+		CandidateJSONPath: candidatePath,
+		ProspectDir:       filepath.Join(tmp, "candidate-template"),
+		HumanApproveRef:   "PER-12",
+		Owner:             "platform",
+	})
+	if err == nil {
+		t.Fatal("expected candidate template error, got nil")
+	}
+
+	stage6CandidateTemplate = originalCandidateTemplate
+	stage6CandidateTestTemplate = "{{"
+	_, err = RunStage6Generate(Stage6Config{
+		CandidateJSONPath: candidatePath,
+		ProspectDir:       filepath.Join(tmp, "test-template"),
+		HumanApproveRef:   "PER-12",
+		Owner:             "platform",
+	})
+	if err == nil {
+		t.Fatal("expected candidate test template error, got nil")
+	}
+}
+
 func TestReadStage6ManifestHandlesMissingAndInvalidFiles(t *testing.T) {
 	tmp := t.TempDir()
 	missing := filepath.Join(tmp, "missing", "manifest.json")
@@ -463,6 +499,21 @@ func TestUpsertStage6ManifestAppendsAndSorts(t *testing.T) {
 	}
 	if err := upsertStage6Manifest(blockingPath, first); err == nil {
 		t.Fatal("expected mkdir error from blocked manifest parent, got nil")
+	}
+
+	blockingDir := filepath.Join(tmp, "no-write")
+	if err := os.Mkdir(blockingDir, 0o755); err != nil {
+		t.Fatalf("create no-write dir: %v", err)
+	}
+	if err := os.Chmod(blockingDir, 0o555); err != nil {
+		t.Fatalf("chmod no-write dir: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(blockingDir, 0o755)
+	})
+	noWritePath := filepath.Join(blockingDir, "child", "manifest.json")
+	if err := upsertStage6Manifest(noWritePath, first); err == nil {
+		t.Fatal("expected mkdir error under non-writable parent, got nil")
 	}
 }
 
