@@ -226,15 +226,20 @@ echo "Push verified: origin/$BRANCH is up to date with HEAD."
 
 ---
 
-## Step 6 — Final action: post summary, update state, and hand off to Reviewer
+## Step 6 — Final action: post summary, update state, and hand off with deterministic `coding_handoff_decide`
 
-**This is the final step. Your response MUST be a bash tool call executing the commands below. Do not write conversational text.**
+**Use `coding_handoff_decide` to determine the next role.**
 
-Execute in order:
+1. Build deterministic input:
+   - `current_role`: `test_writer`
+   - `event`: `tests_written`
+   - `task_issue_id`: `$MULTICA_ISSUE_ID`
+   - `task_comments`: task comments
+   - `agent_ids` map with role IDs
 
-1. Update master issue state — set this task's `status` to `"tested"`. Write back.
+2. If the tool returns `status: error`, post the failure as a blocking comment and stop.
 
-2. Post the test summary on the **task issue** by executing:
+3. Post the test summary on the **task issue**:
    ```bash
    cat <<COMMENT | multica issue comment add "$MULTICA_ISSUE_ID" --content-stdin
    ## Tests Written
@@ -265,18 +270,13 @@ Execute in order:
    COMMENT
    ```
 
-3. **Last step — execute this bash command to hand off:**
+4. Apply the tool's `state_patches` to task state.
+
+5. **Last step** — post exact handoff from tool output on `machine_data.decision.target_issue_id`:
    ```bash
-   AGENTS=$(multica agent list --output json)
-   REVIEWER_ID=$(get_agent_id "$AGENTS" "Coding Team Reviewer")
-   if [ -z "$REVIEWER_ID" ]; then
-     echo "FATAL: Coding Team Reviewer agent not found — pipeline will stall" >&2
-     exit 1
-   fi
-
-   cat <<COMMENT | multica issue comment add "$MULTICA_ISSUE_ID" --content-stdin
-   [@Coding Team Reviewer](mention://agent/${REVIEWER_ID})
-
-   Tests are written. See summary above. The master issue is ${MASTER_ISSUE_ID}.
+   TARGET_ISSUE_ID=$(decision target)
+   COMMENT=$(decision comment)
+   cat <<COMMENT | multica issue comment add "$TARGET_ISSUE_ID" --content-stdin
+   $COMMENT
    COMMENT
    ```
