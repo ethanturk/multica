@@ -171,6 +171,95 @@ func TestRunStage8DiagnosticsInfersLatestPromotionEntry(t *testing.T) {
 	}
 }
 
+func TestRunStage8DiagnosticsAllowsExplicitPromotionWithoutLog(t *testing.T) {
+	tmp := t.TempDir()
+	indexPath := filepath.Join(tmp, "stage2_index.jsonl")
+	diagnosticsDir := filepath.Join(tmp, "diagnostics")
+	writeStage8IndexFile(t, indexPath, stage8FixtureEvents())
+
+	result, err := RunStage8Diagnostics(Stage8Config{
+		PromotionLogPath:    filepath.Join(tmp, "missing-promotion.jsonl"),
+		IndexPath:           indexPath,
+		DiagnosticsDir:      diagnosticsDir,
+		ToolName:            " detect_timeout ",
+		ApproveRef:          " PER-14 ",
+		PromotedAt:          "2026-01-15T12:00:00Z",
+		ComparisonWindow:    24 * time.Hour,
+		ReevaluateAfterDays: 30,
+		Now:                 func() time.Time { return time.Date(2026, 1, 20, 9, 0, 0, 0, time.UTC) },
+	})
+	if err != nil {
+		t.Fatalf("RunStage8Diagnostics explicit promotion: %v", err)
+	}
+
+	if result.ToolName != "detect_timeout" {
+		t.Fatalf("tool_name = %q, want trimmed detect_timeout", result.ToolName)
+	}
+	if result.ApproveRef != "PER-14" {
+		t.Fatalf("approve_ref = %q, want trimmed PER-14", result.ApproveRef)
+	}
+	if _, err := os.Stat(result.StageSummaryPath); err != nil {
+		t.Fatalf("stage summary not written: %v", err)
+	}
+}
+
+func TestBuildStage8ComparisonUsesHalfOpenWindowsAndExactTool(t *testing.T) {
+	promotedAt := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	events := []Stage2Event{
+		{TS: "2026-01-15T10:00:00Z", Status: "completed", DettoolsUsed: []string{"detect_timeout"}},
+		{TS: "2026-01-15T10:59:59Z", Status: "completed", DettoolsUsed: []string{"detect_timeout"}},
+		{TS: "2026-01-15T11:00:00Z", Status: "completed", DettoolsUsed: []string{" detect_timeout "}},
+		{TS: "2026-01-15T11:30:00Z", Status: "completed", DettoolsUsed: []string{"other_tool"}},
+		{TS: "2026-01-15T12:00:00Z", Status: "failed", FailureReason: "tool_error", RetryCount: 2, DettoolsUsed: []string{"detect_timeout"}},
+		{TS: "2026-01-15T12:30:00Z", Status: "completed", DettoolsUsed: []string{"other_tool"}},
+		{TS: "2026-01-15T12:59:59Z", Status: "completed", DettoolsUsed: []string{"detect_timeout"}},
+		{TS: "2026-01-15T13:00:00Z", Status: "completed", DettoolsUsed: []string{"detect_timeout"}},
+	}
+
+	comparison := buildStage8Comparison(events, 3, "detect_timeout", promotedAt, time.Hour)
+
+	if comparison.SkippedLineCount != 3 {
+		t.Fatalf("skipped_line_count = %d, want 3", comparison.SkippedLineCount)
+	}
+	if comparison.PrePromotion.EventCount != 2 {
+		t.Fatalf("pre event count = %d, want 2", comparison.PrePromotion.EventCount)
+	}
+	if comparison.PrePromotion.ToolEventCount != 1 {
+		t.Fatalf("pre tool event count = %d, want 1", comparison.PrePromotion.ToolEventCount)
+	}
+	if comparison.PrePromotion.DettoolHitRate != 0.5 {
+		t.Fatalf("pre hit rate = %v, want 0.5", comparison.PrePromotion.DettoolHitRate)
+	}
+	if comparison.PostPromotion.EventCount != 3 {
+		t.Fatalf("post event count = %d, want 3", comparison.PostPromotion.EventCount)
+	}
+	if comparison.PostPromotion.ToolEventCount != 2 {
+		t.Fatalf("post tool event count = %d, want 2", comparison.PostPromotion.ToolEventCount)
+	}
+	if comparison.PostPromotion.ToolFailRate != 0.5 {
+		t.Fatalf("post tool fail rate = %v, want 0.5", comparison.PostPromotion.ToolFailRate)
+	}
+	if comparison.PostPromotion.RetryRatioAfterTool != 0.5 {
+		t.Fatalf("post retry ratio = %v, want 0.5", comparison.PostPromotion.RetryRatioAfterTool)
+	}
+}
+
+func TestBuildStage8ComparisonHandlesEmptyWindowsWithoutNaN(t *testing.T) {
+	promotedAt := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+
+	comparison := buildStage8Comparison(nil, 0, "detect_timeout", promotedAt, time.Hour)
+
+	if comparison.PrePromotion.DettoolHitRate != 0 || comparison.PostPromotion.DettoolHitRate != 0 {
+		t.Fatalf("empty hit rates should be zero: %#v", comparison)
+	}
+	if comparison.PrePromotion.ToolFailRate != 0 || comparison.PostPromotion.ToolFailRate != 0 {
+		t.Fatalf("empty fail rates should be zero: %#v", comparison)
+	}
+	if comparison.PrePromotion.RetryRatioAfterTool != 0 || comparison.PostPromotion.RetryRatioAfterTool != 0 {
+		t.Fatalf("empty retry ratios should be zero: %#v", comparison)
+	}
+}
+
 func TestRunStage8DiagnosticsReturnsErrorsForMissingInputs(t *testing.T) {
 	tmp := t.TempDir()
 	_, err := RunStage8Diagnostics(Stage8Config{

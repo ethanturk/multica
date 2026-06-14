@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -1349,6 +1350,56 @@ func TestRunAilStage8TableOutput(t *testing.T) {
 	}
 }
 
+func TestRunAilStage8UsesExplicitPromotionFlagsWithoutPromotionLog(t *testing.T) {
+	tmp := t.TempDir()
+	indexPath := filepath.Join(tmp, "stage2_index.jsonl")
+	diagnosticsDir := filepath.Join(tmp, "diagnostics")
+	events := []ail.Stage2Event{
+		{TS: "2026-01-15T11:30:00Z", EventType: "agent_event", TaskID: "task-1", Status: "completed"},
+		{TS: "2026-01-15T12:00:00Z", EventType: "agent_event", TaskID: "task-2", Status: "completed", DettoolsUsed: []string{"detect_timeout"}},
+	}
+	writeTestAilIndex(t, indexPath, events)
+
+	cmd := newAilStage8TestCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	setTestFlag(t, cmd, "promotion-log", filepath.Join(tmp, "missing-promotion.jsonl"))
+	setTestFlag(t, cmd, "index-path", indexPath)
+	setTestFlag(t, cmd, "diagnostics-dir", diagnosticsDir)
+	setTestFlag(t, cmd, "tool", " detect_timeout ")
+	setTestFlag(t, cmd, "approve-ref", " PER-14 ")
+	setTestFlag(t, cmd, "promoted-at", "2026-01-15T12:00:00Z")
+	setTestFlag(t, cmd, "comparison-window-hours", "1")
+	setTestFlag(t, cmd, "reevaluate-days", "15")
+
+	if err := runAilStage8(cmd, nil); err != nil {
+		t.Fatalf("runAilStage8 explicit promotion: %v", err)
+	}
+
+	var result ail.Stage8Result
+	if err := json.Unmarshal(buf.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v\noutput: %s", err, buf.String())
+	}
+	if result.ToolName != "detect_timeout" {
+		t.Fatalf("tool_name = %q, want trimmed detect_timeout", result.ToolName)
+	}
+	if result.ApproveRef != "PER-14" {
+		t.Fatalf("approve_ref = %q, want trimmed PER-14", result.ApproveRef)
+	}
+
+	var manifest ail.Stage8RerunManifest
+	manifestBytes, err := os.ReadFile(filepath.Join(diagnosticsDir, "rerun-manifest.json"))
+	if err != nil {
+		t.Fatalf("read rerun manifest: %v", err)
+	}
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatalf("parse rerun manifest: %v", err)
+	}
+	if manifest.ReevaluateAfterDays != 15 {
+		t.Fatalf("reevaluate_after_days = %d, want 15", manifest.ReevaluateAfterDays)
+	}
+}
+
 func TestRunAilStage8ReturnsStage8Error(t *testing.T) {
 	tmp := t.TempDir()
 	cmd := newAilStage8TestCmd()
@@ -1362,5 +1413,89 @@ func TestRunAilStage8ReturnsStage8Error(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "read promotion log") {
 		t.Fatalf("error should mention promotion log, got: %v", err)
+	}
+}
+
+func TestStage8PromoteScriptAppendsDiagnosticsAndInvokesBundleGenerator(t *testing.T) {
+	tmp := t.TempDir()
+	repoRoot := filepath.Join(tmp, "repo")
+	for _, dir := range []string{
+		filepath.Join(repoRoot, "dettools", "prospect"),
+		filepath.Join(repoRoot, "skills", "agent-improvement-loop"),
+		filepath.Join(repoRoot, "diagnostics", "stage2"),
+		filepath.Join(tmp, "bin"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	for _, name := range []string{"analyzer.md", "evaluator.md", "SETUP.md"} {
+		if err := os.WriteFile(filepath.Join(repoRoot, "skills", "agent-improvement-loop", name), []byte("# test\n"), 0o644); err != nil {
+			t.Fatalf("write skill file %s: %v", name, err)
+		}
+	}
+	candidatePath := filepath.Join(repoRoot, "dettools", "prospect", "detect_timeout_candidate.go")
+	if err := os.WriteFile(candidatePath, []byte("package dettools\n"), 0o644); err != nil {
+		t.Fatalf("write candidate: %v", err)
+	}
+	manifestPath := filepath.Join(repoRoot, "dettools", "prospect", "manifest.json")
+	if err := os.WriteFile(manifestPath, []byte(`{"items":[{"tool_name":"detect_timeout","tool_file":"detect_timeout_candidate.go","status":"candidate"}]}`), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	indexPath := filepath.Join(repoRoot, "diagnostics", "stage2", "stage2_index.jsonl")
+	if err := os.WriteFile(indexPath, []byte(`{"ts":"2026-01-15T12:00:00Z","dettools_used":["detect_timeout"]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write stage2 index: %v", err)
+	}
+	fakeMulticaPath := filepath.Join(tmp, "bin", "multica")
+	callsPath := filepath.Join(tmp, "multica-calls.txt")
+	fakeMultica := "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> " + strconv.Quote(callsPath) + "\n"
+	if err := os.WriteFile(fakeMulticaPath, []byte(fakeMultica), 0o755); err != nil {
+		t.Fatalf("write fake multica: %v", err)
+	}
+
+	cmd := exec.Command("bash", "../../../scripts/stage8-promote.sh",
+		"--tool", "detect_timeout",
+		"--approve-ref", "PER-14",
+		"--approved-by", "tester",
+		"--commit", "abc123",
+		"--skip-import",
+		"--comparison-window-hours", "12",
+		"--reevaluate-days", "45",
+	)
+	cmd.Env = append(os.Environ(),
+		"MULTICA_REPO_ROOT="+repoRoot,
+		"PATH="+filepath.Join(tmp, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("stage8-promote.sh failed: %v\n%s", err, out)
+	}
+
+	if _, err := os.Stat(filepath.Join(repoRoot, "dettools", "detect_timeout.go")); err != nil {
+		t.Fatalf("promoted tool not moved: %v", err)
+	}
+	diagBytes, err := os.ReadFile(filepath.Join(repoRoot, "diagnostics", "stage8-promotion.jsonl"))
+	if err != nil {
+		t.Fatalf("read diagnostics log: %v", err)
+	}
+	if !strings.Contains(string(diagBytes), `"tool_name": "detect_timeout"`) {
+		t.Fatalf("diagnostics log missing promoted tool entry:\n%s", diagBytes)
+	}
+	callsBytes, err := os.ReadFile(callsPath)
+	if err != nil {
+		t.Fatalf("read fake multica calls: %v", err)
+	}
+	calls := string(callsBytes)
+	for _, want := range []string{
+		"ail stage8",
+		"--promotion-log diagnostics/stage8-promotion.jsonl",
+		"--index-path diagnostics/stage2/stage2_index.jsonl",
+		"--comparison-window-hours 12",
+		"--reevaluate-days 45",
+		"--output table",
+	} {
+		if !strings.Contains(calls, want) {
+			t.Fatalf("fake multica call missing %q:\n%s", want, calls)
+		}
 	}
 }
