@@ -324,6 +324,42 @@ func TestRunStage3AnalyzeEventsOutsideWindowAreFiltered(t *testing.T) {
 	}
 }
 
+func TestRunStage3AnalyzeSkipsMalformedAndInvalidTimestampLines(t *testing.T) {
+	tmp := t.TempDir()
+	indexPath := filepath.Join(tmp, "stage2_index.jsonl")
+
+	validLine := `{"ts":"` + fixedClock2026.Add(-time.Minute).Format(time.RFC3339Nano) + `","event_type":"failure_event","workspace_id":"ws1","agent_id":"a1","task_id":"valid","status":"failed","failure_reason":"agent_error"}`
+	invalidTimestampLine := `{"ts":"not-a-time","event_type":"failure_event","workspace_id":"ws1","agent_id":"a2","task_id":"invalid-ts","status":"failed","failure_reason":"runtime_offline"}`
+	data := strings.Join([]string{
+		"not-json",
+		invalidTimestampLine,
+		validLine,
+		"",
+	}, "\n")
+	if err := os.WriteFile(indexPath, []byte(data), 0o644); err != nil {
+		t.Fatalf("write index: %v", err)
+	}
+
+	result, err := RunStage3Analyze(Stage3Config{
+		IndexPath:      indexPath,
+		OutputDir:      filepath.Join(tmp, "stage3"),
+		WindowDuration: 24 * time.Hour,
+		Now:            func() time.Time { return fixedClock2026 },
+	})
+	if err != nil {
+		t.Fatalf("RunStage3Analyze: %v", err)
+	}
+	if result.TotalEvents != 1 {
+		t.Fatalf("total_window_events = %d, want only the single valid line", result.TotalEvents)
+	}
+	if result.ByFailureReason["agent_error"] != 1 {
+		t.Fatalf("agent_error count = %d, want 1", result.ByFailureReason["agent_error"])
+	}
+	if _, ok := result.ByFailureReason["runtime_offline"]; ok {
+		t.Fatalf("invalid timestamp event should be skipped: %#v", result.ByFailureReason)
+	}
+}
+
 func TestRunStage3AnalyzeRepeatSignatureClustering(t *testing.T) {
 	now := time.Now().UTC()
 	tmp := t.TempDir()
@@ -376,6 +412,62 @@ func TestRunStage3AnalyzeRepeatSignatureClustering(t *testing.T) {
 	}
 }
 
+func TestRunStage3AnalyzeKeepsEarliestExampleAndRawRefForCluster(t *testing.T) {
+	tmp := t.TempDir()
+	indexPath := filepath.Join(tmp, "stage2_index.jsonl")
+
+	events := []Stage2Event{
+		{
+			TS:             fixedClock2026.Add(-3 * time.Minute).Format(time.RFC3339Nano),
+			EventType:      "failure_event",
+			AgentID:        "a1",
+			TaskID:         "task-first",
+			Status:         "failed",
+			FailureReason:  "agent_error",
+			ErrorSignature: "E_TIMEOUT",
+			LoopSignature:  "retry_loop",
+			RawRef:         "comment:first",
+		},
+		{
+			TS:             fixedClock2026.Add(-2 * time.Minute).Format(time.RFC3339Nano),
+			EventType:      "failure_event",
+			AgentID:        "a2",
+			TaskID:         "task-second",
+			Status:         "failed",
+			FailureReason:  "agent_error",
+			ErrorSignature: "E_TIMEOUT",
+			LoopSignature:  "retry_loop",
+			RawRef:         "comment:second",
+		},
+	}
+	writeStage3IndexEvents(t, indexPath, events)
+
+	result, err := RunStage3Analyze(Stage3Config{
+		IndexPath:      indexPath,
+		OutputDir:      filepath.Join(tmp, "stage3"),
+		WindowDuration: 24 * time.Hour,
+		MinSigCount:    2,
+		MinUniqueTasks: 2,
+		Now:            func() time.Time { return fixedClock2026 },
+	})
+	if err != nil {
+		t.Fatalf("RunStage3Analyze: %v", err)
+	}
+	if len(result.RepeatSignatures) != 1 {
+		t.Fatalf("repeat_signatures len = %d, want 1", len(result.RepeatSignatures))
+	}
+	sig := result.RepeatSignatures[0]
+	if sig.ExampleTaskID != "task-first" {
+		t.Fatalf("example_task_id = %q, want task-first", sig.ExampleTaskID)
+	}
+	if sig.ExampleRawRef != "comment:first" {
+		t.Fatalf("example_raw_ref = %q, want comment:first", sig.ExampleRawRef)
+	}
+	if sig.UniqueAgents != 2 {
+		t.Fatalf("unique_agents = %d, want 2", sig.UniqueAgents)
+	}
+}
+
 func TestRunStage3AnalyzeCandidateDetoolRanking(t *testing.T) {
 	now := time.Now().UTC()
 	tmp := t.TempDir()
@@ -420,6 +512,47 @@ func TestRunStage3AnalyzeCandidateDetoolRanking(t *testing.T) {
 	}
 	if result.CandidateDettools[0].ExpectedDeterminismGain <= result.CandidateDettools[1].ExpectedDeterminismGain {
 		t.Fatal("first candidate should have higher gain than second")
+	}
+}
+
+func TestRunStage3AnalyzeCandidateTieBreaksBySuggestedName(t *testing.T) {
+	tmp := t.TempDir()
+	indexPath := filepath.Join(tmp, "stage2_index.jsonl")
+
+	var events []Stage2Event
+	for _, reason := range []string{"zeta_error", "alpha_error"} {
+		for i := 0; i < 3; i++ {
+			events = append(events, Stage2Event{
+				TS:            fixedClock2026.Add(-time.Duration(len(events)+1) * time.Minute).Format(time.RFC3339Nano),
+				EventType:     "failure_event",
+				AgentID:       "agent-" + reason,
+				TaskID:        reason + string(rune('0'+i)),
+				Status:        "failed",
+				FailureReason: reason,
+			})
+		}
+	}
+	writeStage3IndexEvents(t, indexPath, events)
+
+	result, err := RunStage3Analyze(Stage3Config{
+		IndexPath:      indexPath,
+		OutputDir:      filepath.Join(tmp, "stage3"),
+		WindowDuration: 24 * time.Hour,
+		MinSigCount:    3,
+		MinUniqueTasks: 3,
+		Now:            func() time.Time { return fixedClock2026 },
+	})
+	if err != nil {
+		t.Fatalf("RunStage3Analyze: %v", err)
+	}
+	if len(result.CandidateDettools) != 2 {
+		t.Fatalf("candidate_dettools len = %d, want 2", len(result.CandidateDettools))
+	}
+	if result.CandidateDettools[0].SuggestedName != "detect_alpha_error" {
+		t.Fatalf("first tied candidate = %q, want detect_alpha_error", result.CandidateDettools[0].SuggestedName)
+	}
+	if result.CandidateDettools[1].SuggestedName != "detect_zeta_error" {
+		t.Fatalf("second tied candidate = %q, want detect_zeta_error", result.CandidateDettools[1].SuggestedName)
 	}
 }
 
@@ -489,6 +622,82 @@ func TestRunStage3AnalyzeCandidateDefer(t *testing.T) {
 	// count=3 >= minSigCount=3 but uniqueTasks=1 < minUniqueTasks=2 → not a candidate
 	if len(result.CandidateDettools) != 0 {
 		t.Fatalf("candidate_dettools should be empty, got %d", len(result.CandidateDettools))
+	}
+}
+
+func TestRunStage3AnalyzeReturnsErrorWhenOutputDirCannotBeCreated(t *testing.T) {
+	tmp := t.TempDir()
+	indexPath := writeGoldenIndexFile(t, tmp)
+	notDir := filepath.Join(tmp, "not-a-dir")
+	if err := os.WriteFile(notDir, []byte("file"), 0o644); err != nil {
+		t.Fatalf("write blocking file: %v", err)
+	}
+
+	_, err := RunStage3Analyze(Stage3Config{
+		IndexPath:      indexPath,
+		OutputDir:      filepath.Join(notDir, "stage3"),
+		WindowDuration: 24 * time.Hour,
+		Now:            func() time.Time { return fixedClock2026 },
+	})
+	if err == nil {
+		t.Fatal("expected error when output dir cannot be created, got nil")
+	}
+}
+
+func TestRunStage3AnalyzeReturnsErrorWhenDigestPathIsDirectory(t *testing.T) {
+	tmp := t.TempDir()
+	indexPath := writeGoldenIndexFile(t, tmp)
+	outputDir := filepath.Join(tmp, "stage3")
+	if err := os.MkdirAll(filepath.Join(outputDir, defaultStage3DigestFile), 0o755); err != nil {
+		t.Fatalf("mkdir digest path: %v", err)
+	}
+
+	_, err := RunStage3Analyze(Stage3Config{
+		IndexPath:      indexPath,
+		OutputDir:      outputDir,
+		WindowDuration: 24 * time.Hour,
+		Now:            func() time.Time { return fixedClock2026 },
+	})
+	if err == nil {
+		t.Fatal("expected error when digest path is a directory, got nil")
+	}
+}
+
+func TestRunStage3AnalyzeReturnsErrorWhenSignaturesPathIsDirectory(t *testing.T) {
+	tmp := t.TempDir()
+	indexPath := writeGoldenIndexFile(t, tmp)
+	outputDir := filepath.Join(tmp, "stage3")
+	if err := os.MkdirAll(filepath.Join(outputDir, defaultStage3SignaturesFile), 0o755); err != nil {
+		t.Fatalf("mkdir signatures path: %v", err)
+	}
+
+	_, err := RunStage3Analyze(Stage3Config{
+		IndexPath:      indexPath,
+		OutputDir:      outputDir,
+		WindowDuration: 24 * time.Hour,
+		Now:            func() time.Time { return fixedClock2026 },
+	})
+	if err == nil {
+		t.Fatal("expected error when signatures path is a directory, got nil")
+	}
+}
+
+func TestRunStage3AnalyzeReturnsErrorWhenWatermarkPathIsDirectory(t *testing.T) {
+	tmp := t.TempDir()
+	indexPath := writeGoldenIndexFile(t, tmp)
+	outputDir := filepath.Join(tmp, "stage3")
+	if err := os.MkdirAll(filepath.Join(outputDir, defaultStage3WatermarkFile), 0o755); err != nil {
+		t.Fatalf("mkdir watermark path: %v", err)
+	}
+
+	_, err := RunStage3Analyze(Stage3Config{
+		IndexPath:      indexPath,
+		OutputDir:      outputDir,
+		WindowDuration: 24 * time.Hour,
+		Now:            func() time.Time { return fixedClock2026 },
+	})
+	if err == nil {
+		t.Fatal("expected error when watermark path is a directory, got nil")
 	}
 }
 
@@ -600,6 +809,21 @@ func TestResolveStage3OutputDirWithNoHome(t *testing.T) {
 	dir := resolveStage3OutputDir()
 	if !strings.HasSuffix(dir, defaultStage3OutputDir) {
 		t.Fatalf("resolveStage3OutputDir with no HOME = %q, should end with %q", dir, defaultStage3OutputDir)
+	}
+}
+
+func writeStage3IndexEvents(t *testing.T, path string, events []Stage2Event) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create index: %v", err)
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	for _, evt := range events {
+		if err := enc.Encode(evt); err != nil {
+			t.Fatalf("encode index event: %v", err)
+		}
 	}
 }
 

@@ -517,6 +517,90 @@ func TestRunAilRunWritesAllArtifactsAndJSONStdout(t *testing.T) {
 	}
 }
 
+func TestRunAilRunPassesStage2SignatureFieldsAndStage3Thresholds(t *testing.T) {
+	now := time.Now().UTC()
+	tmp := t.TempDir()
+	eventsPath := filepath.Join(tmp, "events.jsonl")
+	stage2Dir := filepath.Join(tmp, "stage2")
+	stage3Dir := filepath.Join(tmp, "stage3")
+
+	events := []ail.Stage2Event{
+		{
+			TS:             now.Add(-5 * time.Minute).Format(time.RFC3339Nano),
+			EventType:      "failure_event",
+			TaskID:         "task-1",
+			AgentID:        "agent-1",
+			Status:         "failed",
+			FailureReason:  "agent_error",
+			ErrorSignature: "E_PARSE",
+			LoopSignature:  "setup_loop",
+			RawRef:         "run:1",
+		},
+		{
+			TS:             now.Add(-4 * time.Minute).Format(time.RFC3339Nano),
+			EventType:      "failure_event",
+			TaskID:         "task-2",
+			AgentID:        "agent-2",
+			Status:         "failed",
+			FailureReason:  "agent_error",
+			ErrorSignature: "E_PARSE",
+			LoopSignature:  "setup_loop",
+			RawRef:         "run:2",
+		},
+		{
+			TS:            now.Add(-3 * time.Minute).Format(time.RFC3339Nano),
+			EventType:     "failure_event",
+			TaskID:        "task-ignored",
+			AgentID:       "agent-3",
+			Status:        "failed",
+			FailureReason: "runtime_offline",
+		},
+	}
+	writeTestAilEvents(t, eventsPath, events)
+
+	cmd := newAilRunTestCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	_ = cmd.Flags().Set("events-path", eventsPath)
+	_ = cmd.Flags().Set("stage2-output-dir", stage2Dir)
+	_ = cmd.Flags().Set("stage3-output-dir", stage3Dir)
+	_ = cmd.Flags().Set("min-signature-count", "2")
+	_ = cmd.Flags().Set("min-unique-tasks", "2")
+
+	if err := runAilRun(cmd, nil); err != nil {
+		t.Fatalf("runAilRun: %v", err)
+	}
+
+	var combined struct {
+		Stage2 ail.Stage2Result `json:"stage2"`
+		Stage3 ail.Stage3Result `json:"stage3"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &combined); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v\noutput: %s", err, buf.String())
+	}
+	if combined.Stage2.TotalWindow != 3 {
+		t.Fatalf("stage2.total_window_events = %d, want 3", combined.Stage2.TotalWindow)
+	}
+	if len(combined.Stage3.CandidateDettools) != 1 {
+		t.Fatalf("stage3.candidate_dettools len = %d, want 1", len(combined.Stage3.CandidateDettools))
+	}
+	cand := combined.Stage3.CandidateDettools[0]
+	if cand.SourceSignatureKey != "agent_error::E_PARSE::setup_loop" {
+		t.Fatalf("source_signature_key = %q, want agent_error::E_PARSE::setup_loop", cand.SourceSignatureKey)
+	}
+	if cand.SuggestedName != "detect_agent_error_e_parse_setup_loop" {
+		t.Fatalf("suggested_name = %q, want detect_agent_error_e_parse_setup_loop", cand.SuggestedName)
+	}
+
+	signaturesBytes, err := os.ReadFile(filepath.Join(stage3Dir, "stage3_signatures.jsonl"))
+	if err != nil {
+		t.Fatalf("read stage3 signatures: %v", err)
+	}
+	if !strings.Contains(string(signaturesBytes), `"example_raw_ref":"run:1"`) {
+		t.Fatalf("stage3 signatures should preserve raw_ref from Stage 2 index, got:\n%s", signaturesBytes)
+	}
+}
+
 func TestRunAilRunTableOutput(t *testing.T) {
 	now := time.Now().UTC()
 	tmp := t.TempDir()
