@@ -25,6 +25,10 @@ Optional:
   --commit <sha>              Git commit SHA/short SHA to record
   --manifest <path>           Manifest path (default: dettools/prospect/manifest.json)
   --diagnostics <path>        Diagnostics JSONL path (default: diagnostics/stage8-promotion.jsonl)
+  --events-index <path>        Stage 2 index path for baseline comparison (default: diagnostics/stage2/stage2_index.jsonl)
+  --candidate-decision <path>  Optional JSON decision payload to embed
+  --comparison-window-hours N  Pre/post telemetry comparison window in hours (default: 720)
+  --reevaluate-days N          Re-evaluation timer days (default: 30)
   --required-skill-file <path> Repeatable expected skill file paths
   --dry-run                   Print actions without changing files/importing
   --force                     Allow overwrite if destination tool file exists
@@ -40,6 +44,10 @@ APPROVED_BY=""
 COMMIT_SHA=""
 MANIFEST_PATH="dettools/prospect/manifest.json"
 DIAG_PATH="diagnostics/stage8-promotion.jsonl"
+EVENTS_INDEX_PATH="diagnostics/stage2/stage2_index.jsonl"
+CANDIDATE_DECISION_PATH=""
+COMPARISON_WINDOW_HOURS=720
+REEVALUATE_DAYS=30
 FORCE=0
 DRY_RUN=0
 SKIP_IMPORT=0
@@ -66,6 +74,14 @@ while [[ $# -gt 0 ]]; do
       MANIFEST_PATH="${2:-}"; shift 2;;
     --diagnostics)
       DIAG_PATH="${2:-}"; shift 2;;
+    --events-index)
+      EVENTS_INDEX_PATH="${2:-}"; shift 2;;
+    --candidate-decision)
+      CANDIDATE_DECISION_PATH="${2:-}"; shift 2;;
+    --comparison-window-hours)
+      COMPARISON_WINDOW_HOURS="${2:-}"; shift 2;;
+    --reevaluate-days)
+      REEVALUATE_DAYS="${2:-}"; shift 2;;
     --required-skill-file)
       REQUIRED_SKILLS+=("${2:-}"); shift 2;;
     --dry-run)
@@ -264,7 +280,8 @@ if [[ "$SKIP_IMPORT" -eq 0 ]]; then
 fi
 
 mkdir -p "$(dirname "$DIAG_PATH")"
-python3 - "$DIAG_PATH" "$TOOL_NAME" "$CANDIDATE_PATH" "$PROMOTED_PATH" "$COMMIT_SHA" "$APPROVE_REF" "$APPROVED_BY" "${MANIFEST_PATH}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$action_import" <<'PY'
+PROMOTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+python3 - "$DIAG_PATH" "$TOOL_NAME" "$CANDIDATE_PATH" "$PROMOTED_PATH" "$COMMIT_SHA" "$APPROVE_REF" "$APPROVED_BY" "${MANIFEST_PATH}" "$PROMOTED_AT" "$action_import" <<'PY'
 import json
 import sys
 
@@ -291,5 +308,32 @@ with open(path, "a", encoding="utf-8") as f:
 
 print(f"Diagnostics appended: {path}")
 PY
+
+if [[ ! "$COMPARISON_WINDOW_HOURS" =~ ^[0-9]+$ ]] || [[ "$COMPARISON_WINDOW_HOURS" -le 0 ]]; then
+  echo "--comparison-window-hours must be a positive integer" >&2
+  exit 1
+fi
+
+if [[ ! "$REEVALUATE_DAYS" =~ ^[0-9]+$ ]] || [[ "$REEVALUATE_DAYS" -le 0 ]]; then
+  echo "--reevaluate-days must be a positive integer" >&2
+  exit 1
+fi
+
+STAGE8_ARGS=(
+  ail stage8
+  --promotion-log "$DIAG_PATH"
+  --index-path "$EVENTS_INDEX_PATH"
+  --diagnostics-dir "$(dirname "$DIAG_PATH")"
+  --tool "$TOOL_NAME"
+  --approve-ref "$APPROVE_REF"
+  --promoted-at "$PROMOTED_AT"
+  --comparison-window-hours "$COMPARISON_WINDOW_HOURS"
+  --reevaluate-days "$REEVALUATE_DAYS"
+  --output table
+)
+if [[ -n "$CANDIDATE_DECISION_PATH" ]]; then
+  STAGE8_ARGS+=(--candidate-decision-input "$CANDIDATE_DECISION_PATH")
+fi
+multica "${STAGE8_ARGS[@]}"
 
 echo "Stage-8 promotion complete for: $TOOL_NAME"

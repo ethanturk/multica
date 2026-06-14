@@ -331,6 +331,21 @@ func newAilReplayTestCmd() *cobra.Command {
 	return cmd
 }
 
+func newAilStage8TestCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "stage8"}
+	cmd.Flags().String("promotion-log", "", "")
+	cmd.Flags().String("index-path", "", "")
+	cmd.Flags().String("diagnostics-dir", "", "")
+	cmd.Flags().String("candidate-decision-input", "", "")
+	cmd.Flags().String("tool", "", "")
+	cmd.Flags().String("approve-ref", "", "")
+	cmd.Flags().String("promoted-at", "", "")
+	cmd.Flags().Int("comparison-window-hours", 0, "")
+	cmd.Flags().Int("reevaluate-days", 0, "")
+	cmd.Flags().String("output", "json", "")
+	return cmd
+}
+
 func writeTestAilIndex(t *testing.T, path string, events []ail.Stage2Event) {
 	t.Helper()
 	f, err := os.Create(path)
@@ -1247,5 +1262,105 @@ func TestRunAilReplayReturnsStage7Error(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "read stage2 index") {
 		t.Fatalf("error should mention read stage2 index, got: %v", err)
+	}
+}
+
+// --- Stage 8 CLI tests ---
+
+func TestRunAilStage8WritesDiagnosticsAndJSONStdout(t *testing.T) {
+	tmp := t.TempDir()
+	indexPath := filepath.Join(tmp, "stage2_index.jsonl")
+	diagnosticsDir := filepath.Join(tmp, "diagnostics")
+	promotionLogPath := filepath.Join(diagnosticsDir, "stage8-promotion.jsonl")
+	events := []ail.Stage2Event{
+		{TS: "2026-01-15T11:00:00Z", EventType: "failure_event", TaskID: "task-1", Status: "failed", FailureReason: "tool_error", RetryCount: 1, DettoolsUsed: []string{"detect_timeout"}},
+		{TS: "2026-01-15T12:00:00Z", EventType: "agent_event", TaskID: "task-2", Status: "completed", DettoolsUsed: []string{"detect_timeout"}},
+	}
+	writeTestAilIndex(t, indexPath, events)
+	if err := os.MkdirAll(diagnosticsDir, 0o755); err != nil {
+		t.Fatalf("mkdir diagnostics: %v", err)
+	}
+	if err := os.WriteFile(promotionLogPath, []byte(`{"ts":"2026-01-15T12:00:00Z","tool_name":"detect_timeout","approve_ref":"PER-14"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write promotion log: %v", err)
+	}
+
+	cmd := newAilStage8TestCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	setTestFlag(t, cmd, "promotion-log", promotionLogPath)
+	setTestFlag(t, cmd, "index-path", indexPath)
+	setTestFlag(t, cmd, "diagnostics-dir", diagnosticsDir)
+	setTestFlag(t, cmd, "tool", "detect_timeout")
+	setTestFlag(t, cmd, "comparison-window-hours", "24")
+
+	if err := runAilStage8(cmd, nil); err != nil {
+		t.Fatalf("runAilStage8: %v", err)
+	}
+
+	for _, name := range []string{"stage-summary.jsonl", "candidate-decision.json", "rerun-manifest.json", "stage8-promotion.jsonl"} {
+		if _, err := os.Stat(filepath.Join(diagnosticsDir, name)); err != nil {
+			t.Fatalf("%s not created: %v", name, err)
+		}
+	}
+
+	var result ail.Stage8Result
+	if err := json.Unmarshal(buf.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v\noutput: %s", err, buf.String())
+	}
+	if result.ToolName != "detect_timeout" {
+		t.Fatalf("tool_name = %q, want detect_timeout", result.ToolName)
+	}
+	if result.Comparison.PostPromotion.DettoolHitRate != 1 {
+		t.Fatalf("post hit rate = %v, want 1", result.Comparison.PostPromotion.DettoolHitRate)
+	}
+}
+
+func TestRunAilStage8TableOutput(t *testing.T) {
+	tmp := t.TempDir()
+	indexPath := filepath.Join(tmp, "stage2_index.jsonl")
+	diagnosticsDir := filepath.Join(tmp, "diagnostics")
+	promotionLogPath := filepath.Join(diagnosticsDir, "stage8-promotion.jsonl")
+	writeTestAilIndex(t, indexPath, []ail.Stage2Event{{TS: "2026-01-15T12:00:00Z", EventType: "agent_event", Status: "completed", DettoolsUsed: []string{"detect_timeout"}}})
+	if err := os.MkdirAll(diagnosticsDir, 0o755); err != nil {
+		t.Fatalf("mkdir diagnostics: %v", err)
+	}
+	if err := os.WriteFile(promotionLogPath, []byte(`{"ts":"2026-01-15T12:00:00Z","tool_name":"detect_timeout"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write promotion log: %v", err)
+	}
+
+	cmd := newAilStage8TestCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	setTestFlag(t, cmd, "promotion-log", promotionLogPath)
+	setTestFlag(t, cmd, "index-path", indexPath)
+	setTestFlag(t, cmd, "diagnostics-dir", diagnosticsDir)
+	setTestFlag(t, cmd, "tool", "detect_timeout")
+	setTestFlag(t, cmd, "output", "table")
+
+	if err := runAilStage8(cmd, nil); err != nil {
+		t.Fatalf("runAilStage8 table: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "stage8:") {
+		t.Fatalf("table output missing stage8 summary, got: %q", out)
+	}
+	if !strings.Contains(out, "dettool.hit_rate") {
+		t.Fatalf("table output missing metric line, got: %q", out)
+	}
+}
+
+func TestRunAilStage8ReturnsStage8Error(t *testing.T) {
+	tmp := t.TempDir()
+	cmd := newAilStage8TestCmd()
+	setTestFlag(t, cmd, "promotion-log", filepath.Join(tmp, "missing.jsonl"))
+	setTestFlag(t, cmd, "index-path", filepath.Join(tmp, "missing-index.jsonl"))
+	setTestFlag(t, cmd, "tool", "detect_timeout")
+
+	err := runAilStage8(cmd, nil)
+	if err == nil {
+		t.Fatal("expected stage8 error, got nil")
+	}
+	if !strings.Contains(err.Error(), "read promotion log") {
+		t.Fatalf("error should mention promotion log, got: %v", err)
 	}
 }

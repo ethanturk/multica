@@ -10,7 +10,7 @@ agent workflow.
 
 ## Current status checkpoint
 
-_Last updated: 2026-06-14 (Stage 7 replay/evaluation harness implemented on branch ail-stage1-2-status-2026-06-14)_
+_Last updated: 2026-06-14 (Stage 8 diagnostics bundle implemented on branch ail-stage1-2-status-2026-06-14)_
 
 ### Completed in repo
 
@@ -21,7 +21,8 @@ _Last updated: 2026-06-14 (Stage 7 replay/evaluation harness implemented on bran
 - **Stage 4 — Implemented in repo.** `server/pkg/dettools/tool_agent_improvement_evaluate.go` provides the `agent_improvement_evaluate` deterministic tool with bounded `ready_for_candidate`, `ready_for_review`, and `defer` decisions. It is registered in the dettools catalog and covered by unit tests.
 - **Stage 5 — Implemented in repo.** `server/internal/ail/stage5.go` (`RunStage5Digest`, `BuildStage5Digest`, `RenderStage5Comment`) converts Stage 3 output into a tuning digest with top 5 pain signatures, suggested tool names/signatures, example IO contracts, and the `dettool.none` alert when `signal_count > 0` and no candidates are recommended. `multica ail run` writes `diagnostics/stage5/stage5_digest.json` and `diagnostics/stage5/stage5_watermark.json`; set `--digest-issue` or `MULTICA_AIL_TUNING_ISSUE_ID` to post at most one digest comment per window/signature payload.
 - **Stage 7 — Implemented in repo.** `server/internal/ail/stage7.go` (`RunStage7Replay`, `Stage7ReplayConfig`, `Stage7ReplayDecision`) filters a Stage 2 index by event IDs, issue IDs, agent IDs, `[time_start, time_end)`, failure reasons, and loop signatures. `multica ail replay` writes `diagnostics/stage7/stage7_decision.json` with a deterministic profile (`tool_args`, selected environment keys, git revision, selected-event input checksum), stable replay ID, selected events, and optional evaluation metrics from JSONL (`success_on_retry_delta`, retry reduction, precision, invocation cost). The decision payload intentionally has no wall-clock fields so identical filters/profile/input produce byte-identical JSON.
-- **Stage 8 promotion script — Implemented.** `scripts/stage8-promote.sh` moves prospect → production, updates `dettools/prospect/manifest.json`, runs `multica dettool import-file`, and appends `diagnostics/stage8-promotion.jsonl`.
+- **Stage 8 diagnostics — Implemented in repo.** `server/internal/ail/stage8.go` (`RunStage8Diagnostics`, `Stage8Config`, `Stage8TelemetryComparison`) compares pre/post promotion telemetry around `promoted_at`, writes `diagnostics/stage-summary.jsonl`, `diagnostics/candidate-decision.json`, and `diagnostics/rerun-manifest.json`, and records the 30-day re-evaluation timer as `next_reevaluation_at` + `timer_status`. `multica ail stage8` exposes the bundle generator for manual reruns.
+- **Stage 8 promotion script — Implemented.** `scripts/stage8-promote.sh` moves prospect → production, updates `dettools/prospect/manifest.json`, runs `multica dettool import-file`, appends `diagnostics/stage8-promotion.jsonl`, and invokes `multica ail stage8` so the full diagnostics bundle exists after promotion.
 - **AIL skills and runbooks** — `skills/agent-improvement-loop/{analyzer.md,evaluator.md,SETUP.md}` present and updated.
 - **Architecture choice rules 1–3** — honored: Stage 1 always-on via TaskService; Stage 2 scheduled; Stage 3 runs immediately after Stage 2 in the same `multica ail run` invocation (Option A).
 
@@ -37,7 +38,7 @@ _Last updated: 2026-06-14 (Stage 7 replay/evaluation harness implemented on bran
 ### Outstanding (unimplemented gaps — one follow-up task each)
 
 1. **Stage 6** — No candidate scaffold generator; `dettools/prospect/manifest.json` is empty.
-2. **Stage 8 diagnostics** — Missing `diagnostics/stage-summary.jsonl`, `diagnostics/candidate-decision.json`, `diagnostics/rerun-manifest.json`; no baseline telemetry comparator; no 30-day re-evaluation trigger.
+2. **Stage 8 rollout validation** — Diagnostics are implemented; future work should validate the promotion workflow against live Stage 1/2 telemetry after the next candidate promotion.
 
 ## Architecture choice (by stage)
 
@@ -287,6 +288,11 @@ Promotion steps:
    - `tool_fail_rate`
    - `retry_ratio_after_tool`
 8. Record a final immutable stage artifact under `/home/ethanturk/multica/diagnostics/` so future reviews can rerun the exact promotion evidence.
+
+Current wiring:
+- `multica ail stage8 --tool <tool> --promotion-log diagnostics/stage8-promotion.jsonl --index-path diagnostics/stage2/stage2_index.jsonl --diagnostics-dir diagnostics` writes the three Stage 8 bundle files.
+- `scripts/stage8-promote.sh --tool <tool> --approve-ref <ticket-or-pr>` calls the same generator after appending the promotion log.
+- `diagnostics/rerun-manifest.json` is the observable 30-day timer. A `timer_status` of `scheduled` means the `next_reevaluation_at` timestamp has not arrived; `due` means a new evaluation should be run.
 
 Keep diagnostics artifacts in a persistent path (never overwrite):
 - `/home/ethanturk/multica/diagnostics/` (create if missing)

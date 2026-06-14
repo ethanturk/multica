@@ -44,11 +44,18 @@ var ailReplayCmd = &cobra.Command{
 	RunE:  runAilReplay,
 }
 
+var ailStage8Cmd = &cobra.Command{
+	Use:   "stage8",
+	Short: "Write Stage 8 promotion diagnostics and 30-day re-evaluation manifest",
+	RunE:  runAilStage8,
+}
+
 func init() {
 	ailCmd.AddCommand(ailStage2Cmd)
 	ailCmd.AddCommand(ailStage3Cmd)
 	ailCmd.AddCommand(ailRunCmd)
 	ailCmd.AddCommand(ailReplayCmd)
+	ailCmd.AddCommand(ailStage8Cmd)
 
 	ailStage2Cmd.Flags().String("config", "", "Path to optional Stage 2 config JSON file (contains stage1.events_path, stage1.emit_categories)")
 	ailStage2Cmd.Flags().String("events-path", "", "Path to Stage 1 events JSONL file (overrides config and default)")
@@ -90,6 +97,17 @@ func init() {
 	ailReplayCmd.Flags().String("git-revision", "", "Git revision to record in the deterministic profile")
 	ailReplayCmd.Flags().String("evaluation-results-path", "", "Optional evaluation results JSONL for metrics")
 	ailReplayCmd.Flags().String("output", "json", "Output format: json or table")
+
+	ailStage8Cmd.Flags().String("promotion-log", "", "Path to diagnostics/stage8-promotion.jsonl")
+	ailStage8Cmd.Flags().String("index-path", "", "Path to Stage 2 index JSONL file")
+	ailStage8Cmd.Flags().String("diagnostics-dir", "", "Directory for Stage 8 diagnostics bundle")
+	ailStage8Cmd.Flags().String("candidate-decision-input", "", "Optional JSON decision payload to embed in candidate-decision.json")
+	ailStage8Cmd.Flags().String("tool", "", "Promoted deterministic tool name")
+	ailStage8Cmd.Flags().String("approve-ref", "", "Human approval reference")
+	ailStage8Cmd.Flags().String("promoted-at", "", "Promotion timestamp (RFC3339); defaults to latest matching promotion log entry")
+	ailStage8Cmd.Flags().Int("comparison-window-hours", 0, "Pre/post promotion comparison window in hours (default: 720)")
+	ailStage8Cmd.Flags().Int("reevaluate-days", 0, "Days until re-evaluation is due (default: 30)")
+	ailStage8Cmd.Flags().String("output", "json", "Output format: json or table")
 }
 
 func runAilStage2(cmd *cobra.Command, _ []string) error {
@@ -251,6 +269,31 @@ func runAilReplay(cmd *cobra.Command, _ []string) error {
 	return cli.PrintJSON(cmd.OutOrStdout(), result)
 }
 
+func runAilStage8(cmd *cobra.Command, _ []string) error {
+	promotionLog, _ := cmd.Flags().GetString("promotion-log")
+	indexPath, _ := cmd.Flags().GetString("index-path")
+	diagnosticsDir, _ := cmd.Flags().GetString("diagnostics-dir")
+	candidateDecisionInput, _ := cmd.Flags().GetString("candidate-decision-input")
+	toolName, _ := cmd.Flags().GetString("tool")
+	approveRef, _ := cmd.Flags().GetString("approve-ref")
+	promotedAt, _ := cmd.Flags().GetString("promoted-at")
+	comparisonWindowHours, _ := cmd.Flags().GetInt("comparison-window-hours")
+	reevaluateDays, _ := cmd.Flags().GetInt("reevaluate-days")
+
+	cfg := ail.NewStage8ConfigFromArgs(promotionLog, indexPath, diagnosticsDir, candidateDecisionInput, toolName, approveRef, promotedAt, comparisonWindowHours, reevaluateDays)
+	result, err := ail.RunStage8Diagnostics(cfg)
+	if err != nil {
+		return err
+	}
+
+	output, _ := cmd.Flags().GetString("output")
+	if output == "table" {
+		printAilStage8Table(cmd, result)
+		return nil
+	}
+	return cli.PrintJSON(cmd.OutOrStdout(), result)
+}
+
 func postAilStage5Digest(cmd *cobra.Command, issueID string, digest ail.Stage5Digest) (bool, error) {
 	client, err := newAPIClient(cmd)
 	if err != nil {
@@ -362,4 +405,17 @@ func printAilReplayTable(cmd *cobra.Command, cfg ail.Stage7ReplayConfig, result 
 		result.Metrics.Precision,
 		result.Metrics.InvocationCost,
 		result.Metrics.EvaluationCount)
+}
+
+func printAilStage8Table(cmd *cobra.Command, result ail.Stage8Result) {
+	w := cmd.OutOrStdout()
+	fmt.Fprintf(w, "stage8: tool=%s promoted_at=%s summary=%s\n",
+		result.ToolName, result.PromotedAt, result.StageSummaryPath)
+	fmt.Fprintf(w, "metrics: dettool.hit_rate %.4f -> %.4f  tool_fail_rate %.4f -> %.4f  retry_ratio_after_tool %.4f -> %.4f\n",
+		result.Comparison.PrePromotion.DettoolHitRate,
+		result.Comparison.PostPromotion.DettoolHitRate,
+		result.Comparison.PrePromotion.ToolFailRate,
+		result.Comparison.PostPromotion.ToolFailRate,
+		result.Comparison.PrePromotion.RetryRatioAfterTool,
+		result.Comparison.PostPromotion.RetryRatioAfterTool)
 }
