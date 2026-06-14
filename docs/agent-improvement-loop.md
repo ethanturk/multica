@@ -10,12 +10,13 @@ agent workflow.
 
 ## Current status checkpoint
 
-_Last updated: 2026-06-14 (verified against commit d78f4f7493dc34c1b8a0bd1b3201158844ce517d on branch ail-stage1-2-status-2026-06-14)_
+_Last updated: 2026-06-14 (Stage 2 wiring implemented on branch ail-stage1-2-status-2026-06-14)_
 
 ### Completed in repo
 
 - **Stage 1 — Implemented.** Telemetry is integrated into core task lifecycle in `TaskService` (`server/internal/service/task_stage1_telemetry.go`). Emits normalized JSONL lifecycle events with full env/config controls (`MULTICA_AIL_STAGE1_ENABLED`, `MULTICA_AIL_STAGE1_EVENTS_PATH`, `MULTICA_AIL_STAGE1_EMIT_CATEGORIES`, `MULTICA_AIL_STAGE1_CONFIG`). Tests pass.
 - **Stage 2 code — Implemented (code only).** Capture/index logic exists in `server/internal/ail/stage2.go` (`RunStage2Capture`, `Stage2Config`, `Stage2Result`) with tests in `stage2_test.go`. Outputs: `diagnostics/stage2/stage2_index.jsonl` and `diagnostics/stage2/stage2_summary.json`.
+- **Stage 2 wiring — Implemented.** `server/cmd/multica/cmd_ail.go` adds the `multica ail stage2` CLI subcommand wiring `NewStage2ConfigFromArgs` + `RunStage2Capture`. The `Agent Improvement Loop Stage2-3` autopilot in `run_only` mode runs nightly at `0 2 * * *` UTC via the `Agent Improvement Analyzer` agent.
 - **Stage 8 promotion script — Implemented.** `scripts/stage8-promote.sh` moves prospect → production, updates `dettools/prospect/manifest.json`, runs `multica dettool import-file`, and appends `diagnostics/stage8-promotion.jsonl`.
 - **AIL skills and runbooks** — `skills/agent-improvement-loop/{analyzer.md,evaluator.md,SETUP.md}` present.
 - **Architecture choice rule 1 (Stage 1 always-on)** — honored via TaskService integration.
@@ -24,21 +25,20 @@ _Last updated: 2026-06-14 (verified against commit d78f4f7493dc34c1b8a0bd1b32011
 
 - `go test ./internal/service -count=1` ✅ (`/home/ethanturk/multica/server`)
 - `go test ./internal/ail -count=1` ✅ (`/home/ethanturk/multica/server`)
-- `go test ./internal/service ./internal/ail -count=1` ✅
-- `grep -rn "RunStage2Capture" --include="*.go"` — no production caller outside `stage2.go` itself ✅ (confirms wiring gap)
+- `go test ./internal/service ./internal/ail ./cmd/multica -count=1` ✅
+- `grep -rn "RunStage2Capture" --include="*.go"` — called from `server/cmd/multica/cmd_ail.go` ✅ (wiring gap closed)
 - `grep -rn "agent_improvement_capture|agent_improvement_analyze|agent_improvement_evaluate" --include="*.go"` — no results ✅ (confirms Stages 3–4 dettools absent)
 - `dettools/prospect/manifest.json` has `items: []` ✅ (confirms Stage 6 scaffold absent)
 
 ### Outstanding (unimplemented gaps — one follow-up task each)
 
-1. **Stage 2 wiring** — No CLI subcommand in `server/cmd/multica/`; no autopilot definition; `RunStage2Capture` has zero production callers.
-2. **Stage 3** — No log-analysis Go code; `agent_improvement_analyze` dettool absent.
-3. **Stage 4** — No candidacy evaluation code; `agent_improvement_evaluate` dettool absent; no `ready_for_candidate / ready_for_review / defer` logic.
-4. **Stage 5** — No digest-reporting code; no `dettool.none` fail-safe path.
-5. **Stage 6** — No candidate scaffold generator; `dettools/prospect/manifest.json` is empty.
-6. **Stage 7** — No replay/evaluation harness; no determinism profile; no replay filters.
-7. **Stage 8 diagnostics** — Missing `diagnostics/stage-summary.jsonl`, `diagnostics/candidate-decision.json`, `diagnostics/rerun-manifest.json`; no baseline telemetry comparator; no 30-day re-evaluation trigger.
-8. **Architecture choice rules 2–4** — Depend on the Stage 2 wiring, Stage 3, and Stage 4 follow-up tasks above.
+1. **Stage 3** — No log-analysis Go code; `agent_improvement_analyze` dettool absent.
+2. **Stage 4** — No candidacy evaluation code; `agent_improvement_evaluate` dettool absent; no `ready_for_candidate / ready_for_review / defer` logic.
+3. **Stage 5** — No digest-reporting code; no `dettool.none` fail-safe path.
+4. **Stage 6** — No candidate scaffold generator; `dettools/prospect/manifest.json` is empty.
+5. **Stage 7** — No replay/evaluation harness; no determinism profile; no replay filters.
+6. **Stage 8 diagnostics** — Missing `diagnostics/stage-summary.jsonl`, `diagnostics/candidate-decision.json`, `diagnostics/rerun-manifest.json`; no baseline telemetry comparator; no 30-day re-evaluation trigger.
+7. **Architecture choice rules 2–4** — Depend on the Stage 3 and Stage 4 follow-up tasks above.
 
 ## Architecture choice (by stage)
 

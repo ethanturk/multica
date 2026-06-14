@@ -34,6 +34,8 @@ Staging and production folders are both repo-local:
 
 ### Stage 2 + 3 (nightly)
 
+**Autopilot agent prompt (current):** `multica ail stage2` — runs Stage 2 capture only. Stage 3 analysis will be wired in the follow-up task (PER-9).
+
 ```bash
 AUTOPILOT_NAME="Agent Improvement Loop Stage2-3"
 
