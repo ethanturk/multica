@@ -640,3 +640,49 @@ func TestRunAilRunErrorMissingEventsFile(t *testing.T) {
 		t.Fatal("expected error from missing events file, got nil")
 	}
 }
+
+func TestRunAilRunErrorFromInvalidConfigFile(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "bad.json")
+	if err := os.WriteFile(configPath, []byte("not valid json"), 0o644); err != nil {
+		t.Fatalf("write bad config: %v", err)
+	}
+
+	cmd := newAilRunTestCmd()
+	_ = cmd.Flags().Set("config", configPath)
+
+	if err := runAilRun(cmd, nil); err == nil {
+		t.Fatal("expected error from invalid config, got nil")
+	}
+}
+
+func TestRunAilRunErrorWhenStage3AnalyzeFails(t *testing.T) {
+	now := time.Now().UTC()
+	tmp := t.TempDir()
+	eventsPath := filepath.Join(tmp, "events.jsonl")
+	stage2Dir := filepath.Join(tmp, "stage2")
+
+	events := []ail.Stage2Event{
+		{TS: now.Add(-5 * time.Minute).Format(time.RFC3339Nano), EventType: "failure_event", TaskID: "t1", AgentID: "a1", Status: "failed", FailureReason: "err"},
+	}
+	writeTestAilEvents(t, eventsPath, events)
+
+	// Using a regular file as the parent of stage3-output-dir causes os.MkdirAll to fail inside RunStage3Analyze.
+	blockingFile := filepath.Join(tmp, "blocking_file")
+	if err := os.WriteFile(blockingFile, []byte("block"), 0o644); err != nil {
+		t.Fatalf("create blocking file: %v", err)
+	}
+
+	cmd := newAilRunTestCmd()
+	_ = cmd.Flags().Set("events-path", eventsPath)
+	_ = cmd.Flags().Set("stage2-output-dir", stage2Dir)
+	_ = cmd.Flags().Set("stage3-output-dir", filepath.Join(blockingFile, "subdir"))
+
+	err := runAilRun(cmd, nil)
+	if err == nil {
+		t.Fatal("expected error when stage3 output dir parent is a file, got nil")
+	}
+	if !strings.Contains(err.Error(), "stage3:") {
+		t.Fatalf("expected error to contain \"stage3:\", got: %v", err)
+	}
+}
