@@ -131,7 +131,7 @@ Edit `EXPO_PUBLIC_API_URL` in `.env.staging`, `.env.production`, or `.env.develo
 - For an installed **Debug build**: restart Metro (`pnpm dev:mobile:staging`) so the next JS bundle picks up the new value.
 - For an installed **Release build**: re-run the `ios:mobile:device:staging:release` command — the value is baked into the embedded bundle at build time.
 
-Mobile derives `ws://` / `wss://` from that same value for realtime connections.
+Mobile derives `ws://` / `wss://` from that same value, and both HTTP plus realtime connections now report the actual client OS (`android` or `ios`) to the backend.
 
 For local backend testing:
 

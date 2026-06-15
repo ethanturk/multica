@@ -54,6 +54,8 @@ export interface WSClientOptions {
   token: string;
   /** Workspace slug — server resolves to UUID and gates membership. */
   workspaceSlug: string;
+  /** Native platform metadata surfaced to the backend. */
+  clientOs?: "android" | "ios" | "web";
   /** Mobile app version, surfaced to server logs for debuggability. */
   clientVersion?: string;
   logger?: Logger;
@@ -188,7 +190,7 @@ export class WSClient {
     const url = new URL(this.opts.url);
     url.searchParams.set("workspace_slug", this.opts.workspaceSlug);
     url.searchParams.set("client_platform", "mobile");
-    url.searchParams.set("client_os", "ios");
+    url.searchParams.set("client_os", this.opts.clientOs ?? "ios");
     if (this.opts.clientVersion) {
       url.searchParams.set("client_version", this.opts.clientVersion);
     }
