@@ -65,13 +65,29 @@ describe("buildAndroidActionSheetPages", () => {
   });
 
   it("builds a fallback page when cancel is the only option", () => {
+    const onCancel = vi.fn();
     const pages = buildAndroidActionSheetPages([
-      { label: "Cancel", style: "cancel" },
+      { label: "Cancel", style: "cancel", onPress: onCancel },
     ]);
 
     expect(pages).toHaveLength(1);
     expect(pages[0]?.buttons.map((button) => button.label)).toEqual([
       "Cancel",
+    ]);
+    expect(pages[0]?.buttons[0]).toMatchObject({
+      label: "Cancel",
+      style: "cancel",
+      onPress: onCancel,
+    });
+  });
+
+  it("builds an OK fallback page when no options are provided", () => {
+    const pages = buildAndroidActionSheetPages([]);
+
+    expect(pages).toEqual([
+      {
+        buttons: [{ label: "OK", style: "cancel" }],
+      },
     ]);
   });
 });
@@ -116,6 +132,30 @@ describe("showPlatformActionSheet", () => {
     expect(onDismiss).toHaveBeenCalledTimes(1);
   });
 
+  it("omits iOS special indices when the menu has no cancel or destructive actions", () => {
+    platform.OS = "ios";
+
+    iosShowActionSheetWithOptions.mockImplementation(
+      (_config, callback: (index: number) => void) => {
+        callback(0);
+      },
+    );
+
+    showPlatformActionSheetWithRuntime(runtime, {
+      title: "Inbox",
+      options: [{ label: "Refresh" }, { label: "Mark all read" }],
+    });
+
+    expect(iosShowActionSheetWithOptions).toHaveBeenCalledWith(
+      {
+        title: "Inbox",
+        message: undefined,
+        options: ["Refresh", "Mark all read"],
+      },
+      expect.any(Function),
+    );
+  });
+
   it("uses Alert.alert on android and executes the tapped action", () => {
     platform.OS = "android";
     const onDismiss = vi.fn();
@@ -152,6 +192,7 @@ describe("showPlatformActionSheet", () => {
 
   it("opens the next android page when More is tapped", () => {
     platform.OS = "android";
+    const onDismiss = vi.fn();
 
     androidAlert
       .mockImplementationOnce((_title, _message, buttons) => {
@@ -171,10 +212,28 @@ describe("showPlatformActionSheet", () => {
         { label: "Select Text" },
         { label: "Cancel", style: "cancel" },
       ],
+      onDismiss,
     });
 
     expect(androidAlert).toHaveBeenCalledTimes(2);
     expect(onCopy).toHaveBeenCalledTimes(1);
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders an Android OK fallback when the menu is empty", () => {
+    platform.OS = "android";
+
+    showPlatformActionSheetWithRuntime(runtime, {
+      title: "Empty",
+      options: [],
+    });
+
+    expect(androidAlert).toHaveBeenCalledWith(
+      "Empty",
+      undefined,
+      [expect.objectContaining({ text: "OK", style: "cancel" })],
+      expect.objectContaining({ cancelable: true }),
+    );
   });
 
   it("supports the public wrapper with an injected runtime", () => {
