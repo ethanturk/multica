@@ -2,10 +2,12 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
+import TabsLayout from "./_layout";
+
 const mocks = vi.hoisted(() => ({
-  tabsScreens: [] as Array<Record<string, any>>,
-  tabsProps: [] as Array<Record<string, any>>,
-  anchorProps: [] as Array<Record<string, any>>,
+  tabsScreens: [] as Record<string, any>[],
+  tabsProps: [] as Record<string, any>[],
+  anchorProps: [] as Record<string, any>[],
   inboxUnread: 0,
   chatUnread: 0,
 }));
@@ -69,13 +71,11 @@ vi.mock("@/components/nav/more-tab-dropdown", () => ({
   },
 }));
 
-import TabsLayout from "./_layout";
-
 describe("TabsLayout", () => {
   let renderer: ReactTestRenderer | null = null;
 
   beforeEach(() => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     mocks.tabsScreens.length = 0;
     mocks.tabsProps.length = 0;

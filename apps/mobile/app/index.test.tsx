@@ -2,6 +2,8 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, create } from "react-test-renderer";
 
+import Index from "./index";
+
 const mocks = vi.hoisted(() => ({
   route: null as string | null,
   authUser: null as { id: string } | null,
@@ -42,12 +44,10 @@ vi.mock("@/lib/entry-route", () => ({
   getEntryRoute: vi.fn(() => mocks.route),
 }));
 
-import Index from "./index";
-
 describe("Index", () => {
   beforeEach(() => {
     // react-test-renderer on React 19 requires the act environment flag.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     mocks.route = null;
     mocks.authUser = null;

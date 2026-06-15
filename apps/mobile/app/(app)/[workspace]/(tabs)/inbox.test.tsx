@@ -2,6 +2,8 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
+import Inbox from "./inbox";
+
 function MockView(props: Record<string, any>) {
   return React.createElement("View", props);
 }
@@ -23,8 +25,8 @@ const mocks = vi.hoisted(() => ({
   archiveAllReadMutate: vi.fn(),
   archiveCompletedMutate: vi.fn(),
   showPlatformActionSheet: vi.fn(),
-  iconButtons: [] as Array<Record<string, any>>,
-  rowProps: [] as Array<Record<string, any>>,
+  iconButtons: [] as Record<string, any>[],
+  rowProps: [] as Record<string, any>[],
 }));
 
 vi.mock("react-native", () => ({
@@ -124,14 +126,12 @@ vi.mock("@/lib/inbox-display", () => ({
   deduplicateInboxItems: (items: unknown[]) => items,
 }));
 
-import Inbox from "./inbox";
-
 describe("Inbox", () => {
   let renderer: ReactTestRenderer | null = null;
 
   beforeEach(() => {
     // react-test-renderer on React 19 requires the act environment flag.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     mocks.iconButtons.length = 0;
     mocks.rowProps.length = 0;
@@ -263,7 +263,7 @@ describe("Inbox", () => {
       };
     };
     const renderedRow = flatList.flatListProps.renderItem({
-      item: (mocks.queryState.data as Array<{ id: string }>)[0],
+      item: (mocks.queryState.data as { id: string }[])[0],
     }).props as {
       item: { id: string };
       onPress: () => void;

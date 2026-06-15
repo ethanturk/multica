@@ -2,16 +2,18 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
+import { MoreTabDropdownAnchor } from "./more-tab-dropdown";
+
 const mocks = vi.hoisted(() => ({
   routerPush: vi.fn(),
   pathname: "/alpha/more/issues",
-  triggerProps: [] as Array<Record<string, any>>,
-  menuItemProps: [] as Array<Record<string, any>>,
-  contentProps: [] as Array<Record<string, any>>,
+  triggerProps: [] as Record<string, any>[],
+  menuItemProps: [] as Record<string, any>[],
+  contentProps: [] as Record<string, any>[],
   workspaceData: [
     { id: "ws-1", slug: "alpha", name: "Alpha", avatar_url: null },
     { id: "ws-2", slug: "beta", name: "Beta", avatar_url: null },
-  ] as Array<Record<string, any>>,
+  ] as Record<string, any>[],
 }));
 
 vi.mock("react-native", () => ({
@@ -90,17 +92,15 @@ vi.mock("@/lib/theme", () => ({
 }));
 
 vi.mock("@/lib/utils", () => ({
-  cn: (...values: Array<string | false | undefined>) =>
+  cn: (...values: (string | false | undefined)[]) =>
     values.filter(Boolean).join(" "),
 }));
-
-import { MoreTabDropdownAnchor } from "./more-tab-dropdown";
 
 describe("MoreTabDropdownAnchor", () => {
   let renderer: ReactTestRenderer | null = null;
 
   beforeEach(() => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     mocks.routerPush.mockReset();
     mocks.triggerProps.length = 0;

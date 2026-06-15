@@ -2,16 +2,18 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
+import IssueDetail from "./[id]";
+
 const mocks = vi.hoisted(() => ({
   alertMock: vi.fn(),
   openUrl: vi.fn(),
   setStringAsync: vi.fn(),
   routerBack: vi.fn(),
   routerPush: vi.fn(),
-  stackScreens: [] as Array<Record<string, any>>,
-  iconButtons: [] as Array<Record<string, any>>,
-  timelineProps: [] as Array<Record<string, any>>,
-  composerProps: [] as Array<Record<string, any>>,
+  stackScreens: [] as Record<string, any>[],
+  iconButtons: [] as Record<string, any>[],
+  timelineProps: [] as Record<string, any>[],
+  composerProps: [] as Record<string, any>[],
   detailRefetch: vi.fn(() => Promise.resolve()),
   invalidateQueries: vi.fn(() => Promise.resolve()),
   deleteMutate: vi.fn(),
@@ -189,13 +191,11 @@ vi.mock("@/lib/action-sheet", () => ({
   showPlatformActionSheet: mocks.showPlatformActionSheet,
 }));
 
-import IssueDetail from "./[id]";
-
 describe("IssueDetail", () => {
   let renderer: ReactTestRenderer | null = null;
 
   beforeEach(() => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     mocks.alertMock.mockReset();
     mocks.openUrl.mockReset();

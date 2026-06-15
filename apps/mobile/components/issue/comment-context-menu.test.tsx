@@ -2,6 +2,8 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
+import { useCommentLongPress } from "./comment-context-menu";
+
 const mocks = vi.hoisted(() => ({
   alertMock: vi.fn(),
   routerPush: vi.fn(),
@@ -80,13 +82,11 @@ vi.mock("@/lib/action-sheet", () => ({
   showPlatformActionSheet: mocks.showPlatformActionSheet,
 }));
 
-import { useCommentLongPress } from "./comment-context-menu";
-
 describe("useCommentLongPress", () => {
   let renderer: ReactTestRenderer | null = null;
 
   beforeEach(() => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     mocks.alertMock.mockReset();
     mocks.routerPush.mockReset();

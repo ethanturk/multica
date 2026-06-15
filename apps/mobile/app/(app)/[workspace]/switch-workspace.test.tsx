@@ -2,6 +2,8 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
+import SwitchWorkspaceRoute from "./switch-workspace";
+
 const mocks = vi.hoisted(() => ({
   alertMock: vi.fn(),
   dismiss: vi.fn(),
@@ -9,7 +11,7 @@ const mocks = vi.hoisted(() => ({
   currentWorkspaceSlug: "alpha",
   queryState: {
     data: undefined as
-      | Array<{ id: string; slug: string; name: string; avatar_url: string | null }>
+      | { id: string; slug: string; name: string; avatar_url: string | null }[]
       | undefined,
     isLoading: false,
   },
@@ -75,17 +77,15 @@ vi.mock("@/lib/theme", () => ({
 }));
 
 vi.mock("@/lib/utils", () => ({
-  cn: (...values: Array<string | false | null | undefined>) =>
+  cn: (...values: (string | false | null | undefined)[]) =>
     values.filter(Boolean).join(" "),
 }));
-
-import SwitchWorkspaceRoute from "./switch-workspace";
 
 describe("SwitchWorkspaceRoute", () => {
   let renderer: ReactTestRenderer | null = null;
 
   beforeEach(() => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     mocks.alertMock.mockReset();
     mocks.dismiss.mockReset();

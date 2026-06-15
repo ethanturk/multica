@@ -2,6 +2,8 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
+import { useChatMessageLongPress } from "./message-long-press";
+
 const mocks = vi.hoisted(() => ({
   clipboardSetStringAsync: vi.fn(),
   selectionAsync: vi.fn(() => Promise.resolve()),
@@ -33,8 +35,6 @@ vi.mock("@/data/chat-select-store", () => ({
 vi.mock("@/lib/action-sheet", () => ({
   showPlatformActionSheet: mocks.showPlatformActionSheet,
 }));
-
-import { useChatMessageLongPress } from "./message-long-press";
 
 describe("useChatMessageLongPress", () => {
   let renderer: ReactTestRenderer | null = null;

@@ -2,6 +2,8 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
+import ProfileSettingsScreen from "./profile";
+
 const mocks = vi.hoisted(() => ({
   alertMock: vi.fn(),
   requestCameraPermissionsAsync: vi.fn(),
@@ -77,13 +79,11 @@ vi.mock("@/lib/action-sheet", () => ({
   showPlatformActionSheet: mocks.showPlatformActionSheet,
 }));
 
-import ProfileSettingsScreen from "./profile";
-
 describe("ProfileSettingsScreen", () => {
   let renderer: ReactTestRenderer | null = null;
 
   beforeEach(() => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     mocks.alertMock.mockReset();
     mocks.requestCameraPermissionsAsync.mockReset();

@@ -2,11 +2,13 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
+import WorkspaceLayout, { unstable_settings } from "./_layout";
+
 const mocks = vi.hoisted(() => ({
-  stackScreens: [] as Array<Record<string, any>>,
-  redirects: [] as Array<Record<string, any>>,
+  stackScreens: [] as Record<string, any>[],
+  redirects: [] as Record<string, any>[],
   queryState: {
-    data: undefined as Array<{ id: string; slug: string }> | undefined,
+    data: undefined as { id: string; slug: string }[] | undefined,
     isLoading: false,
   },
   workspaceSlug: "alpha",
@@ -117,13 +119,11 @@ vi.mock("@/data/stores/chat-session-picker-store", () => ({
   useChatSessionPickerResetOnWorkspaceChange: (id: string | null) => mocks.chatPickerReset(id),
 }));
 
-import WorkspaceLayout, { unstable_settings } from "./_layout";
-
 describe("WorkspaceLayout", () => {
   let renderer: ReactTestRenderer | null = null;
 
   beforeEach(() => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     mocks.stackScreens.length = 0;
     mocks.redirects.length = 0;

@@ -2,10 +2,12 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, create } from "react-test-renderer";
 
+import { PlatformSymbol } from "./platform-symbol";
+
 const mocks = vi.hoisted(() => ({
   platform: { OS: "ios" },
-  imageProps: [] as Array<Record<string, unknown>>,
-  iconProps: [] as Array<Record<string, unknown>>,
+  imageProps: [] as Record<string, unknown>[],
+  iconProps: [] as Record<string, unknown>[],
 }));
 
 vi.mock("react-native", () => ({
@@ -26,12 +28,10 @@ vi.mock("@expo/vector-icons", () => ({
   },
 }));
 
-import { PlatformSymbol } from "./platform-symbol";
-
 describe("PlatformSymbol", () => {
   beforeEach(() => {
     // react-test-renderer on React 19 requires the act environment flag.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     mocks.imageProps.length = 0;
     mocks.iconProps.length = 0;

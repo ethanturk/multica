@@ -2,17 +2,19 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
+import ProjectDetail from "./[id]";
+
 const mocks = vi.hoisted(() => ({
   alertMock: vi.fn(),
   openUrl: vi.fn(),
   routerBack: vi.fn(),
   routerPush: vi.fn(),
-  stackScreens: [] as Array<Record<string, any>>,
-  iconButtons: [] as Array<Record<string, any>>,
-  headerCards: [] as Array<Record<string, any>>,
-  propertiesProps: [] as Array<Record<string, any>>,
-  resourcesProps: [] as Array<Record<string, any>>,
-  relatedIssueProps: [] as Array<Record<string, any>>,
+  stackScreens: [] as Record<string, any>[],
+  iconButtons: [] as Record<string, any>[],
+  headerCards: [] as Record<string, any>[],
+  propertiesProps: [] as Record<string, any>[],
+  resourcesProps: [] as Record<string, any>[],
+  relatedIssueProps: [] as Record<string, any>[],
   deleteMutate: vi.fn(),
   createPinMutate: vi.fn(),
   deletePinMutate: vi.fn(),
@@ -162,13 +164,11 @@ vi.mock("@/lib/action-sheet", () => ({
   showPlatformActionSheet: mocks.showPlatformActionSheet,
 }));
 
-import ProjectDetail from "./[id]";
-
 describe("ProjectDetail", () => {
   let renderer: ReactTestRenderer | null = null;
 
   beforeEach(() => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     mocks.alertMock.mockReset();
     mocks.openUrl.mockReset();
