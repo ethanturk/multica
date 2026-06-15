@@ -1,8 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { getMobileEnv } from "./mobile-env";
 
 describe("getMobileEnv", () => {
+  const originalApiUrl = process.env.EXPO_PUBLIC_API_URL;
+
+  afterEach(() => {
+    if (originalApiUrl === undefined) {
+      delete process.env.EXPO_PUBLIC_API_URL;
+    } else {
+      process.env.EXPO_PUBLIC_API_URL = originalApiUrl;
+    }
+  });
+
   it("returns ios defaults from the configured API URL", () => {
     expect(
       getMobileEnv({
@@ -49,6 +59,27 @@ describe("getMobileEnv", () => {
       }),
     ).toMatchObject({
       clientOs: "web",
+    });
+  });
+
+  it("reads the API URL from the Expo public environment by default", () => {
+    process.env.EXPO_PUBLIC_API_URL = "https://prod.multica.ai///";
+
+    expect(getMobileEnv()).toEqual({
+      apiUrl: "https://prod.multica.ai",
+      wsUrl: "wss://prod.multica.ai/ws",
+      clientOs: "ios",
+    });
+  });
+
+  it("falls back to ios when the platform is unknown", () => {
+    expect(
+      getMobileEnv({
+        apiUrl: "https://api.multica.ai",
+        platformOs: "windows",
+      }),
+    ).toMatchObject({
+      clientOs: "ios",
     });
   });
 
