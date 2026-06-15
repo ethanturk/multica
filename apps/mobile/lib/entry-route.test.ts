@@ -2,6 +2,30 @@ import { describe, expect, it } from "vitest";
 import { getEntryRoute } from "./entry-route";
 
 describe("getEntryRoute", () => {
+  it.each([
+    {
+      label: "signed out state",
+      user: null,
+      workspaceSlug: null,
+    },
+    {
+      label: "stale signed-in state",
+      user: { id: "user-1" },
+      workspaceSlug: "alpha",
+    },
+  ])(
+    "returns null while auth initialization is still loading for $label",
+    ({ user, workspaceSlug }) => {
+      expect(
+        getEntryRoute({
+          isLoading: true,
+          user,
+          workspaceSlug,
+        }),
+      ).toBeNull();
+    },
+  );
+
   it("returns null while auth initialization is still loading", () => {
     expect(
       getEntryRoute({
@@ -61,4 +85,34 @@ describe("getEntryRoute", () => {
       }),
     ).toBe("/login");
   });
+
+  it.each([
+    {
+      workspaceSlug: "alpha",
+      expectedRoute: "/alpha/inbox",
+    },
+    {
+      workspaceSlug: "team-42",
+      expectedRoute: "/team-42/inbox",
+    },
+    {
+      workspaceSlug: "workspace.with.dots",
+      expectedRoute: "/workspace.with.dots/inbox",
+    },
+    {
+      workspaceSlug: "munchen",
+      expectedRoute: "/munchen/inbox",
+    },
+  ])(
+    "preserves the selected workspace slug in the inbox route for $workspaceSlug",
+    ({ workspaceSlug, expectedRoute }) => {
+      expect(
+        getEntryRoute({
+          isLoading: false,
+          user: { id: "user-1" },
+          workspaceSlug,
+        }),
+      ).toBe(expectedRoute);
+    },
+  );
 });
