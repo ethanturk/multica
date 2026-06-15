@@ -58,12 +58,11 @@ describe("WSClient", () => {
     globalThis.WebSocket = originalWebSocket;
   });
 
-  it("adds workspace and Android client metadata to the websocket URL and auths on open", () => {
+  it("adds workspace metadata to the websocket URL and auths on open", () => {
     const client = new WSClient({
       url: "wss://api.multica.ai/ws",
       token: "token-123",
       workspaceSlug: "android-team",
-      clientOs: "android",
       clientVersion: "0.1.0",
     });
 
@@ -76,7 +75,7 @@ describe("WSClient", () => {
     expect(url.origin + url.pathname).toBe("wss://api.multica.ai/ws");
     expect(url.searchParams.get("workspace_slug")).toBe("android-team");
     expect(url.searchParams.get("client_platform")).toBe("mobile");
-    expect(url.searchParams.get("client_os")).toBe("android");
+    expect(url.searchParams.get("client_os")).toBe("ios");
     expect(url.searchParams.get("client_version")).toBe("0.1.0");
 
     socket.emitOpen();
@@ -86,7 +85,7 @@ describe("WSClient", () => {
     ]);
   });
 
-  it("defaults the websocket client_os to ios when none is provided", () => {
+  it("defaults the websocket client_os to ios", () => {
     const client = new WSClient({
       url: "wss://api.multica.ai/ws",
       token: "token-123",
@@ -107,7 +106,6 @@ describe("WSClient", () => {
       url: "wss://api.multica.ai/ws",
       token: "token-123",
       workspaceSlug: "realtime-team",
-      clientOs: "android",
     });
     client.onReconnect(onReconnect);
 
@@ -133,7 +131,6 @@ describe("WSClient", () => {
       url: "wss://api.multica.ai/ws",
       token: "token-123",
       workspaceSlug: "reconnect-team",
-      clientOs: "android",
     });
 
     client.connect();
