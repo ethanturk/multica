@@ -44,10 +44,12 @@ vi.mock("@/lib/entry-route", () => ({
   getEntryRoute: vi.fn(() => mocks.route),
 }));
 
+const { getEntryRoute } = await import("@/lib/entry-route");
+
 describe("Index", () => {
   beforeEach(() => {
     // react-test-renderer on React 19 requires the act environment flag.
-     
+
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     mocks.route = null;
     mocks.authUser = null;
@@ -69,15 +71,44 @@ describe("Index", () => {
     expect(renderer).not.toBeNull();
     expect(renderer!.root.findByType("View")).toBeDefined();
     expect(renderer!.root.findByType("ActivityIndicator")).toBeDefined();
+    expect(renderer!.root.findAllByType("Redirect")).toHaveLength(0);
+    expect(renderer!.root.findByType("View").props.className).toBe(
+      "flex-1 items-center justify-center bg-background",
+    );
 
     renderer!.unmount();
   });
 
-  it("renders a redirect once the entry route resolves", async () => {
-    mocks.route = "/alpha/inbox";
+  it("passes the current auth and workspace state into the route helper", async () => {
+    mocks.route = "/select-workspace";
+    mocks.authUser = { id: "user-7" };
+    mocks.authLoading = false;
+    mocks.workspaceSlug = "beta";
+
+    let renderer: ReturnType<typeof create> | null = null;
+
+    await act(async () => {
+      renderer = create(<Index />);
+    });
+
+    expect(getEntryRoute).toHaveBeenCalledWith({
+      isLoading: false,
+      user: { id: "user-7" },
+      workspaceSlug: "beta",
+    });
+
+    renderer!.unmount();
+  });
+
+  it.each([
+    "/login",
+    "/select-workspace",
+    "/alpha/inbox",
+  ])("renders a redirect once the entry route resolves to %s", async (route) => {
+    mocks.route = route;
     mocks.authUser = { id: "user-1" };
     mocks.authLoading = false;
-    mocks.workspaceSlug = "alpha";
+    mocks.workspaceSlug = route === "/alpha/inbox" ? "alpha" : null;
     let renderer: ReturnType<typeof create> | null = null;
 
     await act(async () => {
@@ -85,7 +116,8 @@ describe("Index", () => {
     });
 
     expect(renderer).not.toBeNull();
-    expect(renderer!.root.findByType("Redirect").props.href).toBe("/alpha/inbox");
+    expect(renderer!.root.findByType("Redirect").props.href).toBe(route);
+    expect(renderer!.root.findAllByType("ActivityIndicator")).toHaveLength(0);
 
     renderer!.unmount();
   });
