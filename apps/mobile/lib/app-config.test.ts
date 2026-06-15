@@ -1,4 +1,14 @@
+import type { ConfigContext } from "expo/config";
+import { afterEach, describe, expect, it } from "vitest";
+
 import mobileConfigFactory from "../app.config";
+
+const CONFIG_CONTEXT = {
+  config: {} as never,
+  packageJsonPath: "",
+  projectRoot: "",
+  staticConfigPath: null,
+} satisfies ConfigContext;
 
 describe("mobile app config", () => {
   const originalAppEnv = process.env.APP_ENV;
@@ -29,7 +39,7 @@ describe("mobile app config", () => {
     delete process.env.APP_ENV;
     delete process.env.EXPO_BUNDLE_IDENTIFIER_DEV;
 
-    const config = mobileConfigFactory({ config: {} as never });
+    const config = mobileConfigFactory(CONFIG_CONTEXT);
 
     expect(config.name).toBe("Multica (Dev)");
     expect(config.android?.package).toBe("ai.multica.mobile.dev");
@@ -43,7 +53,7 @@ describe("mobile app config", () => {
   it("returns staging identifiers when APP_ENV is staging", () => {
     process.env.APP_ENV = "staging";
 
-    const config = mobileConfigFactory({ config: {} as never });
+    const config = mobileConfigFactory(CONFIG_CONTEXT);
 
     expect(config.name).toBe("Multica (Staging)");
     expect(config.android?.package).toBe("ai.multica.mobile.staging");
@@ -54,7 +64,7 @@ describe("mobile app config", () => {
     process.env.APP_ENV = "production";
     process.env.EXPO_BUNDLE_IDENTIFIER_PROD = "com.example.multica";
 
-    const config = mobileConfigFactory({ config: {} as never });
+    const config = mobileConfigFactory(CONFIG_CONTEXT);
 
     expect(config.name).toBe("Multica");
     expect(config.android?.package).toBe("ai.multica.mobile");
@@ -65,7 +75,7 @@ describe("mobile app config", () => {
     process.env.APP_ENV = "development";
     process.env.EXPO_BUNDLE_IDENTIFIER_DEV = "com.example.multica.dev";
 
-    const config = mobileConfigFactory({ config: {} as never });
+    const config = mobileConfigFactory(CONFIG_CONTEXT);
 
     expect(config.android?.package).toBe("ai.multica.mobile.dev");
     expect(config.ios?.bundleIdentifier).toBe("com.example.multica.dev");
