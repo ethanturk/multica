@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
 // Mobile vitest is intentionally minimal — Node environment only, scoped to
@@ -10,10 +11,20 @@ import { defineConfig } from "vitest/config";
 // Co-located test files (foo.ts + foo.test.ts) match how the rest of the
 // monorepo organises vitest suites.
 export default defineConfig({
+  resolve: {
+    alias: {
+      "@": fileURLToPath(new URL("./", import.meta.url)),
+    },
+  },
   test: {
     environment: "node",
     globals: true,
-    include: ["lib/**/*.test.ts", "data/**/*.test.ts"],
+    include: [
+      "lib/**/*.test.ts",
+      "data/**/*.test.ts",
+      "components/**/*.test.tsx",
+      "app/**/*.test.tsx",
+    ],
     passWithNoTests: true,
   },
 });
