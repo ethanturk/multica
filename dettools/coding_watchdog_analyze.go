@@ -37,6 +37,30 @@ func Run(input map[string]any) map[string]any {
 	skips := []any{}
 	scanned := 0
 
+	// If the master pipeline is waiting for human action (push/pause), no agent
+	// handoffs are expected — all task work is complete and the user is the
+	// bottleneck. Skip every task to avoid noise (agents getting mentioned for a
+	// handoff that can't be fulfilled).
+	masterStage := str(state["stage"])
+	if masterStage == "push" || masterStage == "pause" {
+		for _, rawTask := range tasks {
+			taskID := str(object(rawTask)["task_issue_id"])
+			skips = append(skips, skip(taskID, "master pipeline is in human-gate stage: "+masterStage))
+		}
+		return map[string]any{
+			"status":  "ok",
+			"summary": fmt.Sprintf("master pipeline is in %s stage (human gate): no handoff recovery needed", masterStage),
+			"machine_data": map[string]any{
+				"actions":      actions,
+				"state_patches": patches,
+				"skipped":      len(skips),
+				"scanned":      0,
+				"recovered":    0,
+				"skips":        skips,
+			},
+		}
+	}
+
 	for _, rawTask := range tasks {
 		task := object(rawTask)
 		taskID := str(task["task_issue_id"])

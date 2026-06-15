@@ -143,7 +143,7 @@ Exact names:
 For each active master issue:
 
 1. Iterate `state.tasks[]`; task issues come only from `task_issue_id` in master state.
-2. Skip tasks whose state is `committed`, `done`, `failed`, or `awaiting_clarification`, or whose `task_issue_id` is empty.
+2. Skip tasks whose state is `committed`, `done`, `failed`, or `awaiting_clarification`, or whose `task_issue_id` is empty. Also skip the entire master issue when its pipeline stage is `push` or `pause` — these are intentional human-gate states where all task work is complete and no agent handoff is expected. Re-issuing notifications in these states creates noise (agents get mentioned for a handoff that can't be fulfilled until the user acts).
 3. Fetch each remaining task's comments with `multica issue comment list "$TASK_ISSUE_ID" --output json`.
 4. Fetch master comments once when any task may need review-pass recovery.
 5. Call `coding_watchdog_analyze` with the state, task comments, master comments, resolved agent IDs, and current time.
