@@ -53,6 +53,8 @@ Focused Android validation and release-gap docs live here:
 
 `dev:*` runs Metro only — assumes the matching variant is already installed. `android:mobile*` and `ios:mobile*` do a full native rebuild + install.
 
+Android scripts explicitly run Expo prebuild first so the committed `apps/mobile/android` project is re-synced from `app.config.ts` for the requested `APP_ENV` before Gradle builds it. That keeps staging/production package identity and app name aligned with the selected variant instead of reusing the last generated dev-native values.
+
 Android package name, iOS bundle id, and display name switch on `APP_ENV` (see `app.config.ts`), so Dev / Staging / Production variants can coexist on the same device or simulator.
 
 ## First-time setup
@@ -77,6 +79,8 @@ pnpm android:mobile:staging
 ```
 
 Requires Android Studio, an SDK platform installed, and either a booted emulator or a USB device visible to `adb devices`. Expo/Gradle pick the active target automatically.
+
+Each `pnpm android:mobile*` command first re-syncs the native Android project for that variant, then runs the actual install/build. If you inspect `apps/mobile/android` after a staging/prod run, the generated package id and app name will reflect that variant until the next sync.
 
 For a local backend, set `EXPO_PUBLIC_API_URL=http://10.0.2.2:8080` in `.env.development.local`. `10.0.2.2` is the Android emulator alias back to your host machine.
 

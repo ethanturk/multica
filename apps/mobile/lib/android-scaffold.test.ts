@@ -4,15 +4,11 @@ import { describe, expect, it } from "vitest";
 const readFixture = (relativePath: string) =>
   readFileSync(new URL(relativePath, import.meta.url), "utf8");
 
-const mobilePackage = JSON.parse(
-  readFixture("../package.json"),
-) as {
+const mobilePackage = JSON.parse(readFixture("../package.json")) as {
   scripts: Record<string, string>;
 };
 
-const workspacePackage = JSON.parse(
-  readFixture("../../../package.json"),
-) as {
+const workspacePackage = JSON.parse(readFixture("../../../package.json")) as {
   scripts: Record<string, string>;
 };
 
@@ -34,7 +30,7 @@ describe("android scaffold", () => {
     }
   });
 
-  it("wires the Android native config to the dev package identity and deep links", () => {
+  it("keeps the committed scaffolded Android native config on the dev identity by default", () => {
     const buildGradle = readFixture("../android/app/build.gradle");
     const manifest = readFixture("../android/app/src/main/AndroidManifest.xml");
     const settingsGradle = readFixture("../android/settings.gradle");
@@ -48,13 +44,18 @@ describe("android scaffold", () => {
     expect(settingsGradle).toContain("rootProject.name = 'Multica (Dev)'");
   });
 
-  it("exposes Android run scripts for local, staging, and production variants", () => {
+  it("re-syncs the Android native project before every variant build", () => {
     expect(mobilePackage.scripts).toMatchObject({
-      android: "expo run:android",
+      "android:sync": "expo prebuild --platform android --no-install",
+      "android:sync:staging":
+        "dotenv -e .env.staging -- cross-env APP_ENV=staging expo prebuild --platform android --no-install",
+      "android:sync:prod":
+        "dotenv -e .env.production -- cross-env APP_ENV=production expo prebuild --platform android --no-install",
+      android: "pnpm android:sync && expo run:android",
       "android:staging":
-        "dotenv -e .env.staging -- cross-env APP_ENV=staging expo run:android",
+        "pnpm android:sync:staging && dotenv -e .env.staging -- cross-env APP_ENV=staging expo run:android",
       "android:prod":
-        "dotenv -e .env.production -- cross-env APP_ENV=production expo run:android",
+        "pnpm android:sync:prod && dotenv -e .env.production -- cross-env APP_ENV=production expo run:android",
     });
 
     expect(workspacePackage.scripts).toMatchObject({
@@ -64,7 +65,7 @@ describe("android scaffold", () => {
     });
   });
 
-  it("documents Android local-backend setup in both env templates and the README", () => {
+  it("documents Android local-backend setup and native sync behavior", () => {
     const envExample = readFixture("../.env.example");
     const readme = readFixture("../README.md");
 
@@ -72,6 +73,9 @@ describe("android scaffold", () => {
     expect(envExample).toContain("Physical iPhone / Android device: use your Mac's LAN IP");
     expect(readme).toContain("## Run it on Android");
     expect(readme).toContain("pnpm android:mobile:staging");
+    expect(readme).toContain("Expo prebuild first");
+    expect(readme).toContain("re-synced from `app.config.ts` for the requested `APP_ENV`");
+    expect(readme).toContain("Each `pnpm android:mobile*` command first re-syncs the native Android project");
     expect(readme).toContain("For a local backend, set `EXPO_PUBLIC_API_URL=http://10.0.2.2:8080`");
     expect(readme).toContain("point `EXPO_PUBLIC_API_URL` at your Mac's LAN IP");
   });
