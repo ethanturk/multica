@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const readFixture = (relativePath: string) =>
-  readFileSync(new URL(relativePath, import.meta.url), "utf8");
+  readFileSync(decodeURIComponent(new URL(relativePath, import.meta.url).pathname), "utf8");
 
 const mobilePackage = JSON.parse(readFixture("../package.json")) as {
   scripts: Record<string, string>;
@@ -26,7 +26,7 @@ describe("android scaffold", () => {
     ];
 
     for (const relativePath of requiredPaths) {
-      expect(existsSync(new URL(relativePath, import.meta.url))).toBe(true);
+      expect(existsSync(decodeURIComponent(new URL(relativePath, import.meta.url).pathname))).toBe(true);
     }
   });
 
@@ -81,6 +81,6 @@ describe("android scaffold", () => {
   });
 
   it("leaves iOS as a shared-config concern instead of committing a native ios project", () => {
-    expect(existsSync(new URL("../ios", import.meta.url))).toBe(false);
+    expect(existsSync(decodeURIComponent(new URL("../ios", import.meta.url).pathname))).toBe(false);
   });
 });

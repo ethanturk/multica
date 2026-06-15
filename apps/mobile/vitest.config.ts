@@ -22,6 +22,7 @@ export default defineConfig({
     include: [
       "lib/**/*.test.ts",
       "data/**/*.test.ts",
+      "data/**/*.test.tsx",
       "components/**/*.test.tsx",
       "app/**/*.test.tsx",
     ],
