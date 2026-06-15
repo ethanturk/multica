@@ -1,10 +1,10 @@
-# Multica Mobile (iOS)
+# Multica Mobile (iOS + Android)
 
-Expo + React Native iOS client for Multica. Independent from web/desktop — shares only types from `@multica/core/`. See [`CLAUDE.md`](./CLAUDE.md) for the locked tech-stack baseline and import rules.
+Expo + React Native mobile client for Multica. Independent from web/desktop — shares only types from `@multica/core/`. See [`CLAUDE.md`](./CLAUDE.md) for the locked tech-stack baseline and import rules.
 
 ## Just want to use it on your phone? (no development)
 
-Multica isn't on the App Store yet — until that changes, anyone who wants it on their iPhone builds from source. One command:
+Multica isn't in the App Store or Play Store yet. Today the supported self-serve path is iPhone via Xcode:
 
 ```bash
 pnpm ios:mobile:device:prod:release
@@ -25,7 +25,7 @@ pnpm ios:mobile:device:prod:release
 
 **7-day signing limit**: a free Apple ID signs builds for 7 days. After that, plug back into the Mac and re-run the command to re-sign. An Apple Developer Program account ($99/yr) extends this to 1 year.
 
-Everything below is for app developers — you can ignore the rest if you only wanted a personal install.
+Android development support now lives in this package too, but release/distribution signing is still a follow-up task. Everything below is for app developers.
 
 ## Scripts
 
@@ -34,6 +34,9 @@ Everything below is for app developers — you can ignore the rest if you only w
 | `pnpm dev:mobile` | Metro only (reuse existing install) | local (`.env.development.local`) |
 | `pnpm dev:mobile:staging` | Metro only (reuse existing install) | staging (`.env.staging`) |
 | `pnpm dev:mobile:prod` | Metro only (reuse existing install) | production (`.env.production`) |
+| `pnpm android:mobile` | Full rebuild + install on **Android Emulator / attached device**, Debug | local |
+| `pnpm android:mobile:staging` | Full rebuild + install on **Android Emulator / attached device**, Debug | staging |
+| `pnpm android:mobile:prod` | Full rebuild + install on **Android Emulator / attached device**, Debug | production |
 | `pnpm ios:mobile` | Full rebuild + install on **iOS Simulator**, Debug | local |
 | `pnpm ios:mobile:staging` | Full rebuild + install on **iOS Simulator**, Debug | staging |
 | `pnpm ios:mobile:prod` | Full rebuild + install on **iOS Simulator**, Debug | production |
@@ -43,9 +46,9 @@ Everything below is for app developers — you can ignore the rest if you only w
 | `pnpm ios:mobile:device:prod` | Full rebuild + install on **USB iPhone**, Debug | production |
 | `pnpm ios:mobile:device:prod:release` | Full rebuild + install on **USB iPhone**, Release (standalone) | production |
 
-`dev:*` runs Metro only — assumes the matching variant is already installed. `ios:mobile*` does a full native rebuild + install.
+`dev:*` runs Metro only — assumes the matching variant is already installed. `android:mobile*` and `ios:mobile*` do a full native rebuild + install.
 
-Bundle id and display name switch on `APP_ENV` (see `app.config.ts`), so Dev / Staging / Production variants can coexist on the same device or simulator.
+Android package name, iOS bundle id, and display name switch on `APP_ENV` (see `app.config.ts`), so Dev / Staging / Production variants can coexist on the same device or simulator.
 
 ## First-time setup
 
@@ -53,10 +56,28 @@ Bundle id and display name switch on `APP_ENV` (see `app.config.ts`), so Dev / S
 
 ```bash
 cp apps/mobile/.env.example apps/mobile/.env.development.local
-# then edit EXPO_PUBLIC_API_URL inside it to your Mac's LAN IP, e.g. http://192.168.1.42:8080
+# then edit EXPO_PUBLIC_API_URL for your target:
+#   - Android Emulator: http://10.0.2.2:8080
+#   - Physical iPhone / Android device: http://<your-mac-lan-ip>:8080
 ```
 
 If your Apple ID isn't on the Multica Apple Developer team yet, also uncomment and set `EXPO_BUNDLE_IDENTIFIER_DEV` to a reverse-domain you own (e.g. `com.yourname.multica.dev`). This **only** overrides the dev variant — staging / production bundle ids are intentionally not overridable so variants can coexist.
+
+## Run it on Android
+
+### Android Emulator
+
+```bash
+pnpm android:mobile:staging
+```
+
+Requires Android Studio, an SDK platform installed, and either a booted emulator or a USB device visible to `adb devices`. Expo/Gradle pick the active target automatically.
+
+For a local backend, set `EXPO_PUBLIC_API_URL=http://10.0.2.2:8080` in `.env.development.local`. `10.0.2.2` is the Android emulator alias back to your host machine.
+
+### Physical Android device
+
+Use the same `pnpm android:mobile*` command, but point `EXPO_PUBLIC_API_URL` at your Mac's LAN IP instead of `10.0.2.2`. USB debugging must be enabled on the device.
 
 ## Build it onto your iPhone
 
@@ -101,4 +122,7 @@ Edit `EXPO_PUBLIC_API_URL` in `.env.staging`, `.env.production`, or `.env.develo
 - For an installed **Debug build**: restart Metro (`pnpm dev:mobile:staging`) so the next JS bundle picks up the new value.
 - For an installed **Release build**: re-run the `ios:mobile:device:staging:release` command — the value is baked into the embedded bundle at build time.
 
-For local backend testing, use your Mac's LAN IP (`ipconfig getifaddr en0`), not `localhost`.
+For local backend testing:
+
+- Android Emulator: use `10.0.2.2`
+- Physical iPhone / Android device: use your Mac's LAN IP (`ipconfig getifaddr en0`)
