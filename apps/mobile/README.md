@@ -27,6 +27,11 @@ pnpm ios:mobile:device:prod:release
 
 Android development support now lives in this package too, but release/distribution signing is still a follow-up task. Everything below is for app developers.
 
+Focused Android validation and release-gap docs live here:
+
+- [`docs/android-smoke-test.md`](./docs/android-smoke-test.md)
+- [`docs/android-release-readiness.md`](./docs/android-release-readiness.md)
+
 ## Scripts
 
 | Command | What it does | Backend |
@@ -78,6 +83,10 @@ For a local backend, set `EXPO_PUBLIC_API_URL=http://10.0.2.2:8080` in `.env.dev
 ### Physical Android device
 
 Use the same `pnpm android:mobile*` command, but point `EXPO_PUBLIC_API_URL` at your Mac's LAN IP instead of `10.0.2.2`. USB debugging must be enabled on the device.
+
+## Android release readiness
+
+Android debug installs are ready for local development and smoke testing, but production release setup is intentionally incomplete. Before a Play Store or tester-facing release, review [`docs/android-release-readiness.md`](./docs/android-release-readiness.md) and complete the signing, store-asset, and secret-management work there.
 
 ## Build it onto your iPhone
 
