@@ -7,6 +7,12 @@
     "dev": "expo start",
     "dev:staging": "dotenv -e .env.staging -- cross-env APP_ENV=staging expo start",
     "dev:prod": "dotenv -e .env.production -- cross-env APP_ENV=production expo start",
+    "android:sync": "expo prebuild --platform android --no-install",
+    "android:sync:staging": "dotenv -e .env.staging -- cross-env APP_ENV=staging expo prebuild --platform android --no-install",
+    "android:sync:prod": "dotenv -e .env.production -- cross-env APP_ENV=production expo prebuild --platform android --no-install",
+    "android": "pnpm android:sync && expo run:android",
+    "android:staging": "pnpm android:sync:staging && dotenv -e .env.staging -- cross-env APP_ENV=staging expo run:android",
+    "android:prod": "pnpm android:sync:prod && dotenv -e .env.production -- cross-env APP_ENV=production expo run:android",
     "ios": "expo run:ios",
     "ios:staging": "dotenv -e .env.staging -- cross-env APP_ENV=staging expo run:ios",
     "ios:prod": "dotenv -e .env.production -- cross-env APP_ENV=production expo run:ios",
@@ -82,11 +88,13 @@
     "zustand": "^5.0.0"
   },
   "devDependencies": {
+    "@vitest/coverage-v8": "4.1.0",
     "@babel/core": "^7.25.0",
     "@types/react": "~19.0.0",
     "cross-env": "^7.0.3",
     "dotenv-cli": "^7.4.4",
     "eslint-config-expo": "~55.0.0",
+    "react-test-renderer": "19.2.0",
     "typescript": "~5.9.0",
     "vitest": "catalog:"
   }
