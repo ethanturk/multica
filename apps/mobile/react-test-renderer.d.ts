@@ -2,6 +2,7 @@ declare module "react-test-renderer" {
   import type { ReactElement } from "react";
 
   interface TestRenderer {
+    update(element: ReactElement): void;
     unmount(): void;
   }
 

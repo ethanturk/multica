@@ -147,47 +147,61 @@ describe("RealtimeProvider", () => {
   it("skips client creation when auth, workspace, or token are missing", async () => {
     const { RealtimeProvider, useWSClient } = await import("./realtime-provider");
     useWSClientHook = useWSClient;
+    const values: unknown[] = [];
 
-    authState.user = null;
+    let renderer: { update(element: React.ReactElement): void; unmount(): void } | null = null;
     await act(async () => {
-      const renderer = create(
+      renderer = create(
         <RealtimeProvider>
-          <HookProbe onValue={() => {}} />
+          <HookProbe onValue={(value) => values.push(value)} />
           <></>
         </RealtimeProvider>,
       );
       await Promise.resolve();
-      renderer.unmount();
     });
-    expect(wsInstances).toHaveLength(0);
+    expect(wsInstances).toHaveLength(1);
+
+    authState.user = null;
+    await act(async () => {
+      renderer?.update(
+        <RealtimeProvider>
+          <HookProbe onValue={(value) => values.push(value)} />
+          <></>
+        </RealtimeProvider>,
+      );
+      await Promise.resolve();
+    });
+    expect(values.at(-1)).toBeNull();
 
     authState.user = { id: "user-1" };
     workspaceState.currentWorkspaceSlug = null;
     await act(async () => {
-      const renderer = create(
+      renderer?.update(
         <RealtimeProvider>
-          <HookProbe onValue={() => {}} />
+          <HookProbe onValue={(value) => values.push(value)} />
           <></>
         </RealtimeProvider>,
       );
       await Promise.resolve();
-      renderer.unmount();
     });
-    expect(wsInstances).toHaveLength(0);
+    expect(values.at(-1)).toBeNull();
 
     workspaceState.currentWorkspaceSlug = "workspace-a";
     getToken.mockResolvedValueOnce(null as never);
     await act(async () => {
-      const renderer = create(
+      renderer?.update(
         <RealtimeProvider>
-          <HookProbe onValue={() => {}} />
+          <HookProbe onValue={(value) => values.push(value)} />
           <></>
         </RealtimeProvider>,
       );
       await Promise.resolve();
-      renderer.unmount();
     });
-    expect(wsInstances).toHaveLength(0);
+    expect(wsInstances).toHaveLength(1);
+
+    await act(async () => {
+      renderer?.unmount();
+    });
   });
 
   it("bails out cleanly when the async token read resolves after unmount", async () => {
@@ -215,6 +229,10 @@ describe("RealtimeProvider", () => {
 
     await act(async () => {
       renderer?.unmount();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
       resolveToken?.("late-token");
       await Promise.resolve();
     });

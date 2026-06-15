@@ -13,6 +13,7 @@
  *   3. X-Request-ID per request + structured logger (debug + tracing)
  *   4. Bearer auth + X-Workspace-Slug — NOT cookie auth (no CSRF, no credentials)
  */
+import { Platform } from "react-native";
 import type {
   Agent,
   AgentTask,
@@ -123,7 +124,9 @@ import { getMobileEnv } from "@/lib/mobile-env";
 import { parseWithFallback } from "@/lib/parse-response";
 import { createRequestId } from "@/lib/request-id";
 
-const { apiUrl: API_URL, clientOs: CLIENT_OS } = getMobileEnv();
+const { apiUrl: API_URL, clientOs: CLIENT_OS } = getMobileEnv({
+  platformOs: Platform.OS,
+});
 
 export interface LoginResponse {
   token: string;

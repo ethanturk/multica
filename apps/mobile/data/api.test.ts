@@ -16,6 +16,12 @@ vi.mock("@/lib/request-id", () => ({
   createRequestId,
 }));
 
+vi.mock("react-native", () => ({
+  Platform: {
+    OS: "android",
+  },
+}));
+
 describe("api", () => {
   const originalApiUrl = process.env.EXPO_PUBLIC_API_URL;
   const originalFetch = globalThis.fetch;
@@ -235,7 +241,7 @@ describe("api", () => {
     const meHeaders = new Headers(fetchMock.mock.calls[2]?.[1]?.headers as HeadersInit);
     expect(meHeaders.get("Authorization")).toBe("Bearer secret-token");
     expect(meHeaders.get("X-Workspace-Slug")).toBe("workspace-a");
-    expect(meHeaders.get("X-Client-OS")).toBe("ios");
+    expect(meHeaders.get("X-Client-OS")).toBe("android");
     expect(createRequestId).toHaveBeenCalled();
   });
 
