@@ -3,8 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
 const mocks = vi.hoisted(() => ({
-  stackScreens: [] as Array<Record<string, unknown>>,
-  redirects: [] as Array<Record<string, unknown>>,
+  stackScreens: [] as Array<Record<string, any>>,
+  redirects: [] as Array<Record<string, any>>,
   queryState: {
     data: undefined as Array<{ id: string; slug: string }> | undefined,
     isLoading: false,
@@ -32,14 +32,14 @@ vi.mock("react-native", () => ({
 }));
 
 vi.mock("expo-router", () => ({
-  Redirect: (props: Record<string, unknown>) => {
+  Redirect: (props: Record<string, any>) => {
     mocks.redirects.push(props);
     return React.createElement("Redirect", props);
   },
   Stack: Object.assign(
-    (props: Record<string, unknown>) => React.createElement("Stack", props, props.children),
+    (props: Record<string, any>) => React.createElement("Stack", props, props.children),
     {
-      Screen: (props: Record<string, unknown>) => {
+      Screen: (props: Record<string, any>) => {
         mocks.stackScreens.push(props);
         return React.createElement("StackScreen", props);
       },
@@ -65,7 +65,7 @@ vi.mock("@/data/workspace-store", () => ({
 }));
 
 vi.mock("@/data/realtime/realtime-provider", () => ({
-  RealtimeProvider: (props: Record<string, unknown>) =>
+  RealtimeProvider: (props: Record<string, any>) =>
     React.createElement("RealtimeProvider", props, props.children),
 }));
 

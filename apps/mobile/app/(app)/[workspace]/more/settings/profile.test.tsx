@@ -20,14 +20,14 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("react-native", () => ({
-  ActivityIndicator: (props: Record<string, unknown>) =>
+  ActivityIndicator: (props: Record<string, any>) =>
     React.createElement("ActivityIndicator", props),
   Alert: { alert: mocks.alertMock },
-  Pressable: (props: Record<string, unknown>) =>
+  Pressable: (props: Record<string, any>) =>
     React.createElement("Pressable", props, props.children),
-  ScrollView: (props: Record<string, unknown>) =>
+  ScrollView: (props: Record<string, any>) =>
     React.createElement("ScrollView", props, props.children),
-  View: (props: Record<string, unknown>) =>
+  View: (props: Record<string, any>) =>
     React.createElement("View", props, props.children),
 }));
 
@@ -38,26 +38,26 @@ vi.mock("expo-image-picker", () => ({
 }));
 
 vi.mock("@/components/ui/text", () => ({
-  Text: (props: Record<string, unknown>) => React.createElement("Text", props, props.children),
+  Text: (props: Record<string, any>) => React.createElement("Text", props, props.children),
 }));
 
 vi.mock("@/components/ui/button", () => ({
-  Button: (props: Record<string, unknown>) => React.createElement("Button", props, props.children),
+  Button: (props: Record<string, any>) => React.createElement("Button", props, props.children),
 }));
 
 vi.mock("@/components/ui/text-field", () => ({
-  TextField: (props: Record<string, unknown>) => React.createElement("TextField", props),
+  TextField: (props: Record<string, any>) => React.createElement("TextField", props),
 }));
 
 vi.mock("@/components/ui/avatar", () => ({
-  Avatar: (props: Record<string, unknown>) => React.createElement("Avatar", props, props.children),
-  AvatarFallback: (props: Record<string, unknown>) =>
+  Avatar: (props: Record<string, any>) => React.createElement("Avatar", props, props.children),
+  AvatarFallback: (props: Record<string, any>) =>
     React.createElement("AvatarFallback", props, props.children),
-  AvatarImage: (props: Record<string, unknown>) => React.createElement("AvatarImage", props),
+  AvatarImage: (props: Record<string, any>) => React.createElement("AvatarImage", props),
 }));
 
 vi.mock("@/components/ui/separator", () => ({
-  Separator: (props: Record<string, unknown>) => React.createElement("Separator", props),
+  Separator: (props: Record<string, any>) => React.createElement("Separator", props),
 }));
 
 vi.mock("@/data/auth-store", () => ({

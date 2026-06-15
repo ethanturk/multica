@@ -8,10 +8,10 @@ const mocks = vi.hoisted(() => ({
   setStringAsync: vi.fn(),
   routerBack: vi.fn(),
   routerPush: vi.fn(),
-  stackScreens: [] as Array<Record<string, unknown>>,
-  iconButtons: [] as Array<Record<string, unknown>>,
-  timelineProps: [] as Array<Record<string, unknown>>,
-  composerProps: [] as Array<Record<string, unknown>>,
+  stackScreens: [] as Array<Record<string, any>>,
+  iconButtons: [] as Array<Record<string, any>>,
+  timelineProps: [] as Array<Record<string, any>>,
+  composerProps: [] as Array<Record<string, any>>,
   detailRefetch: vi.fn(() => Promise.resolve()),
   invalidateQueries: vi.fn(() => Promise.resolve()),
   deleteMutate: vi.fn(),
@@ -48,17 +48,17 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("react-native", () => ({
-  ActivityIndicator: (props: Record<string, unknown>) =>
+  ActivityIndicator: (props: Record<string, any>) =>
     React.createElement("ActivityIndicator", props),
   Alert: { alert: mocks.alertMock },
   Linking: { openURL: mocks.openUrl },
-  View: (props: Record<string, unknown>) =>
+  View: (props: Record<string, any>) =>
     React.createElement("View", props, props.children),
 }));
 
 vi.mock("expo-router", () => ({
   Stack: {
-    Screen: (props: Record<string, unknown>) => {
+    Screen: (props: Record<string, any>) => {
       mocks.stackScreens.push(props);
       return React.createElement("StackScreen", props);
     },
@@ -91,34 +91,34 @@ vi.mock("@tanstack/react-query", () => ({
 }));
 
 vi.mock("@/components/ui/text", () => ({
-  Text: (props: Record<string, unknown>) => React.createElement("Text", props),
+  Text: (props: Record<string, any>) => React.createElement("Text", props),
 }));
 
 vi.mock("@/components/ui/button", () => ({
-  Button: (props: Record<string, unknown>) => React.createElement("Button", props),
+  Button: (props: Record<string, any>) => React.createElement("Button", props),
 }));
 
 vi.mock("@/components/ui/icon-button", () => ({
-  IconButton: (props: Record<string, unknown>) => {
+  IconButton: (props: Record<string, any>) => {
     mocks.iconButtons.push(props);
     return React.createElement("IconButton", props);
   },
 }));
 
 vi.mock("@/components/issue/timeline-list", () => ({
-  TimelineList: (props: Record<string, unknown>) => {
+  TimelineList: (props: Record<string, any>) => {
     mocks.timelineProps.push(props);
     return React.createElement("TimelineList", props);
   },
 }));
 
 vi.mock("@/components/issue/agent-header-badge", () => ({
-  AgentHeaderBadge: (props: Record<string, unknown>) =>
+  AgentHeaderBadge: (props: Record<string, any>) =>
     React.createElement("AgentHeaderBadge", props),
 }));
 
 vi.mock("@/components/issue/inline-comment-composer", () => ({
-  InlineCommentComposer: (props: Record<string, unknown>) => {
+  InlineCommentComposer: (props: Record<string, any>) => {
     mocks.composerProps.push(props);
     return React.createElement("InlineCommentComposer", props);
   },
@@ -425,7 +425,7 @@ describe("IssueDetail", () => {
       itemType: "issue",
       itemId: "issue-2",
     });
-    menuRenderer?.unmount();
+    (menuRenderer as ReactTestRenderer | null)?.unmount();
   });
 
   it("renders the not-found fallback when detail data is missing", () => {

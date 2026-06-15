@@ -2,7 +2,7 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
-function MockView(props: Record<string, unknown>) {
+function MockView(props: Record<string, any>) {
   return React.createElement("View", props);
 }
 
@@ -23,13 +23,13 @@ const mocks = vi.hoisted(() => ({
   archiveAllReadMutate: vi.fn(),
   archiveCompletedMutate: vi.fn(),
   showPlatformActionSheet: vi.fn(),
-  iconButtons: [] as Array<Record<string, unknown>>,
-  rowProps: [] as Array<Record<string, unknown>>,
+  iconButtons: [] as Array<Record<string, any>>,
+  rowProps: [] as Array<Record<string, any>>,
 }));
 
 vi.mock("react-native", () => ({
   Alert: { alert: mocks.alertMock },
-  FlatList: (props: Record<string, unknown>) => {
+  FlatList: (props: Record<string, any>) => {
     mocks.rowProps.push({ flatListProps: props });
     return React.createElement("FlatList", props);
   },
@@ -41,7 +41,7 @@ vi.mock("expo-router", () => ({
 }));
 
 vi.mock("@expo/vector-icons", () => ({
-  Ionicons: (props: Record<string, unknown>) =>
+  Ionicons: (props: Record<string, any>) =>
     React.createElement("Ionicons", props),
 }));
 
@@ -50,19 +50,19 @@ vi.mock("@tanstack/react-query", () => ({
 }));
 
 vi.mock("@/components/ui/text", () => ({
-  Text: (props: Record<string, unknown>) => React.createElement("Text", props),
+  Text: (props: Record<string, any>) => React.createElement("Text", props),
 }));
 
 vi.mock("@/components/ui/button", () => ({
-  Button: (props: Record<string, unknown>) => React.createElement("Button", props),
+  Button: (props: Record<string, any>) => React.createElement("Button", props),
 }));
 
 vi.mock("@/components/ui/skeleton", () => ({
-  Skeleton: (props: Record<string, unknown>) => React.createElement("Skeleton", props),
+  Skeleton: (props: Record<string, any>) => React.createElement("Skeleton", props),
 }));
 
 vi.mock("@/components/ui/header", () => ({
-  Header: (props: Record<string, unknown>) =>
+  Header: (props: Record<string, any>) =>
     React.createElement(
       "Header",
       props,
@@ -71,7 +71,7 @@ vi.mock("@/components/ui/header", () => ({
 }));
 
 vi.mock("@/components/ui/icon-button", () => ({
-  IconButton: (props: Record<string, unknown>) => {
+  IconButton: (props: Record<string, any>) => {
     mocks.iconButtons.push(props);
     return React.createElement("IconButton", props);
   },
@@ -82,7 +82,7 @@ vi.mock("@/components/ui/app-header-actions", () => ({
 }));
 
 vi.mock("@/components/inbox/swipeable-inbox-row", () => ({
-  SwipeableInboxRow: (props: Record<string, unknown>) => {
+  SwipeableInboxRow: (props: Record<string, any>) => {
     mocks.rowProps.push(props);
     return React.createElement("SwipeableInboxRow", props);
   },
@@ -263,7 +263,7 @@ describe("Inbox", () => {
       };
     };
     const renderedRow = flatList.flatListProps.renderItem({
-      item: mocks.queryState.data![0],
+      item: (mocks.queryState.data as Array<{ id: string }>)[0],
     }).props as {
       item: { id: string };
       onPress: () => void;

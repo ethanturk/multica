@@ -7,12 +7,12 @@ const mocks = vi.hoisted(() => ({
   openUrl: vi.fn(),
   routerBack: vi.fn(),
   routerPush: vi.fn(),
-  stackScreens: [] as Array<Record<string, unknown>>,
-  iconButtons: [] as Array<Record<string, unknown>>,
-  headerCards: [] as Array<Record<string, unknown>>,
-  propertiesProps: [] as Array<Record<string, unknown>>,
-  resourcesProps: [] as Array<Record<string, unknown>>,
-  relatedIssueProps: [] as Array<Record<string, unknown>>,
+  stackScreens: [] as Array<Record<string, any>>,
+  iconButtons: [] as Array<Record<string, any>>,
+  headerCards: [] as Array<Record<string, any>>,
+  propertiesProps: [] as Array<Record<string, any>>,
+  resourcesProps: [] as Array<Record<string, any>>,
+  relatedIssueProps: [] as Array<Record<string, any>>,
   deleteMutate: vi.fn(),
   createPinMutate: vi.fn(),
   deletePinMutate: vi.fn(),
@@ -38,24 +38,24 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("react-native", () => ({
-  ActivityIndicator: (props: Record<string, unknown>) =>
+  ActivityIndicator: (props: Record<string, any>) =>
     React.createElement("ActivityIndicator", props),
   Alert: { alert: mocks.alertMock },
   Linking: { openURL: mocks.openUrl },
-  RefreshControl: (props: Record<string, unknown>) =>
+  RefreshControl: (props: Record<string, any>) =>
     React.createElement("RefreshControl", props),
-  ScrollView: (props: Record<string, unknown>) => React.createElement("ScrollView", props, props.children),
-  View: (props: Record<string, unknown>) => React.createElement("View", props, props.children),
+  ScrollView: (props: Record<string, any>) => React.createElement("ScrollView", props, props.children),
+  View: (props: Record<string, any>) => React.createElement("View", props, props.children),
 }));
 
 vi.mock("react-native-safe-area-context", () => ({
-  SafeAreaView: (props: Record<string, unknown>) =>
+  SafeAreaView: (props: Record<string, any>) =>
     React.createElement("SafeAreaView", props, props.children),
 }));
 
 vi.mock("expo-router", () => ({
   Stack: {
-    Screen: (props: Record<string, unknown>) => {
+    Screen: (props: Record<string, any>) => {
       mocks.stackScreens.push(props);
       return React.createElement("StackScreen", props);
     },
@@ -76,43 +76,43 @@ vi.mock("@tanstack/react-query", () => ({
 }));
 
 vi.mock("@/components/ui/text", () => ({
-  Text: (props: Record<string, unknown>) => React.createElement("Text", props),
+  Text: (props: Record<string, any>) => React.createElement("Text", props),
 }));
 
 vi.mock("@/components/ui/button", () => ({
-  Button: (props: Record<string, unknown>) => React.createElement("Button", props),
+  Button: (props: Record<string, any>) => React.createElement("Button", props),
 }));
 
 vi.mock("@/components/ui/icon-button", () => ({
-  IconButton: (props: Record<string, unknown>) => {
+  IconButton: (props: Record<string, any>) => {
     mocks.iconButtons.push(props);
     return React.createElement("IconButton", props);
   },
 }));
 
 vi.mock("@/components/project/project-header-card", () => ({
-  ProjectHeaderCard: (props: Record<string, unknown>) => {
+  ProjectHeaderCard: (props: Record<string, any>) => {
     mocks.headerCards.push(props);
     return React.createElement("ProjectHeaderCard", props);
   },
 }));
 
 vi.mock("@/components/project/project-properties-section", () => ({
-  ProjectPropertiesSection: (props: Record<string, unknown>) => {
+  ProjectPropertiesSection: (props: Record<string, any>) => {
     mocks.propertiesProps.push(props);
     return React.createElement("ProjectPropertiesSection", props);
   },
 }));
 
 vi.mock("@/components/project/project-related-issues", () => ({
-  ProjectRelatedIssues: (props: Record<string, unknown>) => {
+  ProjectRelatedIssues: (props: Record<string, any>) => {
     mocks.relatedIssueProps.push(props);
     return React.createElement("ProjectRelatedIssues", props);
   },
 }));
 
 vi.mock("@/components/project/project-resources-section", () => ({
-  ProjectResourcesSection: (props: Record<string, unknown>) => {
+  ProjectResourcesSection: (props: Record<string, any>) => {
     mocks.resourcesProps.push(props);
     return React.createElement("ProjectResourcesSection", props);
   },
@@ -426,6 +426,6 @@ describe("ProjectDetail", () => {
       )
       .filter((value): value is string => typeof value === "string");
     expect(textValues).toContain("not found");
-    menuRenderer?.unmount();
+    (menuRenderer as ReactTestRenderer | null)?.unmount();
   });
 });

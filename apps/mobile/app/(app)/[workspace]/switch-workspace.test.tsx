@@ -16,14 +16,14 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("react-native", () => ({
-  ActivityIndicator: (props: Record<string, unknown>) =>
+  ActivityIndicator: (props: Record<string, any>) =>
     React.createElement("ActivityIndicator", props),
   Alert: { alert: mocks.alertMock },
-  Pressable: (props: Record<string, unknown>) =>
+  Pressable: (props: Record<string, any>) =>
     React.createElement("Pressable", props, props.children),
-  ScrollView: (props: Record<string, unknown>) =>
+  ScrollView: (props: Record<string, any>) =>
     React.createElement("ScrollView", props, props.children),
-  View: (props: Record<string, unknown>) =>
+  View: (props: Record<string, any>) =>
     React.createElement("View", props, props.children),
 }));
 
@@ -39,16 +39,16 @@ vi.mock("@tanstack/react-query", () => ({
 }));
 
 vi.mock("@/components/ui/platform-symbol", () => ({
-  PlatformSymbol: (props: Record<string, unknown>) =>
+  PlatformSymbol: (props: Record<string, any>) =>
     React.createElement("PlatformSymbol", props),
 }));
 
 vi.mock("@/components/ui/text", () => ({
-  Text: (props: Record<string, unknown>) => React.createElement("Text", props, props.children),
+  Text: (props: Record<string, any>) => React.createElement("Text", props, props.children),
 }));
 
 vi.mock("@/components/workspace/workspace-avatar", () => ({
-  WorkspaceAvatar: (props: Record<string, unknown>) =>
+  WorkspaceAvatar: (props: Record<string, any>) =>
     React.createElement("WorkspaceAvatar", props),
 }));
 

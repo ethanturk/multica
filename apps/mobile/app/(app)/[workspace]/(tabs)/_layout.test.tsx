@@ -3,25 +3,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
 const mocks = vi.hoisted(() => ({
-  tabsScreens: [] as Array<Record<string, unknown>>,
-  tabsProps: [] as Array<Record<string, unknown>>,
-  anchorProps: [] as Array<Record<string, unknown>>,
+  tabsScreens: [] as Array<Record<string, any>>,
+  tabsProps: [] as Array<Record<string, any>>,
+  anchorProps: [] as Array<Record<string, any>>,
   inboxUnread: 0,
   chatUnread: 0,
 }));
 
 vi.mock("react-native", () => ({
-  View: (props: Record<string, unknown>) => React.createElement("View", props, props.children),
+  View: (props: Record<string, any>) => React.createElement("View", props, props.children),
 }));
 
 vi.mock("expo-router", () => ({
   Tabs: Object.assign(
-    (props: Record<string, unknown>) => {
+    (props: Record<string, any>) => {
       mocks.tabsProps.push(props);
       return React.createElement("Tabs", props, props.children);
     },
     {
-      Screen: (props: Record<string, unknown>) => {
+      Screen: (props: Record<string, any>) => {
         mocks.tabsScreens.push(props);
         return React.createElement("TabsScreen", props);
       },
@@ -30,7 +30,7 @@ vi.mock("expo-router", () => ({
 }));
 
 vi.mock("@/components/ui/platform-symbol", () => ({
-  PlatformSymbol: (props: Record<string, unknown>) =>
+  PlatformSymbol: (props: Record<string, any>) =>
     React.createElement("PlatformSymbol", props),
 }));
 
@@ -60,7 +60,7 @@ vi.mock("@/lib/unread-counts", () => ({
 }));
 
 vi.mock("@/components/nav/more-tab-dropdown", () => ({
-  MoreTabDropdownAnchor: (props: Record<string, unknown>) => {
+  MoreTabDropdownAnchor: (props: Record<string, any>) => {
     mocks.anchorProps.push(props);
     if (props.triggerRef && "current" in props.triggerRef) {
       props.triggerRef.current = { open: vi.fn() };

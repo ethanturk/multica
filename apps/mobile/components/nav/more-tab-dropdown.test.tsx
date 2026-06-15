@@ -5,19 +5,19 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 const mocks = vi.hoisted(() => ({
   routerPush: vi.fn(),
   pathname: "/alpha/more/issues",
-  triggerProps: [] as Array<Record<string, unknown>>,
-  menuItemProps: [] as Array<Record<string, unknown>>,
-  contentProps: [] as Array<Record<string, unknown>>,
+  triggerProps: [] as Array<Record<string, any>>,
+  menuItemProps: [] as Array<Record<string, any>>,
+  contentProps: [] as Array<Record<string, any>>,
   workspaceData: [
     { id: "ws-1", slug: "alpha", name: "Alpha", avatar_url: null },
     { id: "ws-2", slug: "beta", name: "Beta", avatar_url: null },
-  ] as Array<Record<string, unknown>>,
+  ] as Array<Record<string, any>>,
 }));
 
 vi.mock("react-native", () => ({
-  Image: (props: Record<string, unknown>) => React.createElement("Image", props),
-  Pressable: (props: Record<string, unknown>) => React.createElement("Pressable", props, props.children),
-  View: (props: Record<string, unknown>) => React.createElement("View", props, props.children),
+  Image: (props: Record<string, any>) => React.createElement("Image", props),
+  Pressable: (props: Record<string, any>) => React.createElement("Pressable", props, props.children),
+  View: (props: Record<string, any>) => React.createElement("View", props, props.children),
 }));
 
 vi.mock("expo-router", () => ({
@@ -34,16 +34,16 @@ vi.mock("react-native-safe-area-context", () => ({
 }));
 
 vi.mock("@/components/ui/dropdown-menu", () => ({
-  DropdownMenu: (props: Record<string, unknown>) => React.createElement("DropdownMenu", props, props.children),
-  DropdownMenuTrigger: (props: Record<string, unknown>) => {
+  DropdownMenu: (props: Record<string, any>) => React.createElement("DropdownMenu", props, props.children),
+  DropdownMenuTrigger: (props: Record<string, any>) => {
     mocks.triggerProps.push(props);
     return React.createElement("DropdownMenuTrigger", props, props.children);
   },
-  DropdownMenuContent: (props: Record<string, unknown>) => {
+  DropdownMenuContent: (props: Record<string, any>) => {
     mocks.contentProps.push(props);
     return React.createElement("DropdownMenuContent", props, props.children);
   },
-  DropdownMenuItem: (props: Record<string, unknown>) => {
+  DropdownMenuItem: (props: Record<string, any>) => {
     mocks.menuItemProps.push(props);
     return React.createElement("DropdownMenuItem", props, props.children);
   },
@@ -51,15 +51,15 @@ vi.mock("@/components/ui/dropdown-menu", () => ({
 }));
 
 vi.mock("@/components/ui/text", () => ({
-  Text: (props: Record<string, unknown>) => React.createElement("Text", props, props.children),
+  Text: (props: Record<string, any>) => React.createElement("Text", props, props.children),
 }));
 
 vi.mock("@/components/workspace/workspace-avatar", () => ({
-  WorkspaceAvatar: (props: Record<string, unknown>) => React.createElement("WorkspaceAvatar", props),
+  WorkspaceAvatar: (props: Record<string, any>) => React.createElement("WorkspaceAvatar", props),
 }));
 
 vi.mock("@/components/ui/platform-symbol", () => ({
-  PlatformSymbol: (props: Record<string, unknown>) => React.createElement("PlatformSymbol", props),
+  PlatformSymbol: (props: Record<string, any>) => React.createElement("PlatformSymbol", props),
 }));
 
 vi.mock("@/data/queries/workspaces", () => ({
