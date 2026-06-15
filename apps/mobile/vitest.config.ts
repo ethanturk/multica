@@ -1,5 +1,8 @@
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
+
+const appRoot = dirname(fileURLToPath(import.meta.url));
 
 // Mobile vitest is intentionally minimal — Node environment only, scoped to
 // pure-function tests in `lib/`. We don't ship jsdom or RN test renderers
@@ -13,7 +16,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   resolve: {
     alias: {
-      "@": fileURLToPath(new URL("./", import.meta.url)),
+      "@": resolve(appRoot),
     },
   },
   test: {
