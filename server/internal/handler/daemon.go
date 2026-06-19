@@ -255,6 +255,13 @@ func workspaceReposResponse(workspaceID string, raw []byte, settingsRaw []byte) 
 	return resp
 }
 
+// normalizeProvider canonicalizes a provider string for storage: trimmed and
+// lowercased so client-side pricing lookups tolerate case drift. Returns "" for
+// a blank input.
+func normalizeProvider(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
+}
+
 func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 	var req DaemonRegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -311,7 +318,7 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 
 	resp := make([]AgentRuntimeResponse, 0, len(req.Runtimes))
 	for _, runtime := range req.Runtimes {
-		provider := strings.TrimSpace(runtime.Type)
+		provider := normalizeProvider(runtime.Type)
 		if provider == "" {
 			provider = "unknown"
 		}
@@ -2070,10 +2077,29 @@ func (h *Handler) ReportTaskUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Provider is lowercased on write so client-side pricing lookups tolerate
+	// case drift. An empty provider (an older daemon that omits the field) is
+	// stamped from the task's runtime, so generic model ids like `auto` still
+	// resolve to a provider instead of landing as '' and pricing $0.
+	var runtimeProvider string
+	runtimeProviderLoaded := false
 	for _, u := range req.Usage {
+		provider := normalizeProvider(u.Provider)
+		if provider == "" {
+			if !runtimeProviderLoaded {
+				if rt, err := h.Queries.GetAgentRuntime(r.Context(), task.RuntimeID); err == nil {
+					runtimeProvider = normalizeProvider(rt.Provider)
+				} else {
+					slog.Warn("load runtime provider for usage backfill failed",
+						"task_id", taskID, "runtime_id", uuidToString(task.RuntimeID), "error", err)
+				}
+				runtimeProviderLoaded = true
+			}
+			provider = runtimeProvider
+		}
 		if err := h.Queries.UpsertTaskUsage(r.Context(), db.UpsertTaskUsageParams{
 			TaskID:           parseUUID(taskID),
-			Provider:         u.Provider,
+			Provider:         provider,
 			Model:            u.Model,
 			InputTokens:      u.InputTokens,
 			OutputTokens:     u.OutputTokens,
@@ -2083,7 +2109,7 @@ func (h *Handler) ReportTaskUsage(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("upsert task usage failed", "task_id", taskID, "model", u.Model, "error", err)
 			continue
 		}
-		h.TaskService.CaptureTaskUsage(r.Context(), task, u.Provider, u.Model, u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheWriteTokens)
+		h.TaskService.CaptureTaskUsage(r.Context(), task, provider, u.Model, u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheWriteTokens)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -2497,9 +2523,10 @@ func (h *Handler) GetChatSessionGCCheck(w http.ResponseWriter, r *http.Request) 
 }
 
 // GetAutopilotRunGCCheck returns the status and completed_at of an autopilot
-// run for the daemon GC loop. autopilot_run has no updated_at column; the
-// daemon uses completed_at as the TTL anchor for terminal runs, and treats
-// non-terminal status as a skip signal regardless of timestamp.
+// run for the daemon GC loop. The daemon decides purely on terminal status:
+// an autopilot run's workdir is never reused, so a terminal run is reclaimed on
+// sight while non-terminal status is a skip signal — completed_at is returned
+// for the API contract and diagnostics, not as a TTL anchor.
 //
 // Workspace ownership is resolved via the parent autopilot row.
 func (h *Handler) GetAutopilotRunGCCheck(w http.ResponseWriter, r *http.Request) {

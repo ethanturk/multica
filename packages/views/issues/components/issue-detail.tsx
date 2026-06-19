@@ -87,6 +87,12 @@ import { ProgressRing } from "./progress-ring";
 import { matchesPinyin } from "../../editor/extensions/pinyin-match";
 import { useT } from "../../i18n";
 import { useIssueDetailScrollRestore } from "../hooks/use-issue-detail-scroll-restore";
+import {
+  AnimatedRightSidebar,
+  getAnimatedRightSidebarInitialOpen,
+  rightSidebarPanelMotionProps,
+  useAnimatedRightSidebarState,
+} from "../../layout/animated-right-sidebar";
 
 function SubscriberPopoverContent({
   members,
@@ -683,7 +689,17 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
   });
   const sidebarRef = usePanelRef();
   const isMobile = useIsMobile();
-  const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(defaultSidebarOpen);
+  const desktopSidebarInitialOpen = getAnimatedRightSidebarInitialOpen(
+    defaultSidebarOpen,
+    defaultLayout,
+  );
+  const {
+    open: desktopSidebarOpen,
+    visualOpen: desktopSidebarVisualOpen,
+    motionEnabled: desktopSidebarMotionEnabled,
+    beginToggle: beginDesktopSidebarToggle,
+    handleResize: handleDesktopSidebarResize,
+  } = useAnimatedRightSidebarState(desktopSidebarInitialOpen);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   useEffect(() => {
@@ -1296,9 +1312,13 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
 
     const panel = sidebarRef.current;
     if (!panel) return;
-    if (panel.isCollapsed()) panel.expand();
-    else panel.collapse();
-  }, [isMobile, sidebarRef]);
+    const nextOpen = panel.isCollapsed();
+    beginDesktopSidebarToggle(nextOpen);
+    window.requestAnimationFrame(() => {
+      if (nextOpen) panel.expand();
+      else panel.collapse();
+    });
+  }, [beginDesktopSidebarToggle, isMobile, sidebarRef]);
 
   useIssueDetailScrollRestore({
     restoreKey: `${wsId}:${id}`,
@@ -2155,19 +2175,19 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
       <ResizableHandle />
       <ResizablePanel
         id="sidebar"
-        defaultSize={defaultSidebarOpen ? 320 : 0}
+        {...rightSidebarPanelMotionProps}
+        data-right-sidebar-motion={desktopSidebarMotionEnabled ? "enabled" : undefined}
+        defaultSize={desktopSidebarOpen ? 320 : 0}
         minSize={260}
         maxSize={420}
         collapsible
         groupResizeBehavior="preserve-pixel-size"
         panelRef={sidebarRef}
-        onResize={(size) => setDesktopSidebarOpen(size.inPixels > 0)}
+        onResize={handleDesktopSidebarResize}
       >
-      <div className="overflow-y-auto border-l h-full">
-        <div className="p-4">
+        <AnimatedRightSidebar open={desktopSidebarVisualOpen} motionEnabled={desktopSidebarMotionEnabled}>
           {sidebarContent}
-        </div>
-      </div>
+        </AnimatedRightSidebar>
       </ResizablePanel>
     </ResizablePanelGroup>
   );
