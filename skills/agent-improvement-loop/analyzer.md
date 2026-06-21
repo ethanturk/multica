@@ -59,16 +59,35 @@ Optional flags: `--index-path`, `--output-dir`, `--window-hours`, `--min-signatu
 
 The digest output is deterministic (sorted slices, injected clock in tests) and watermarked (index SHA-256 stored in `stage3_watermark.json`). Re-running with the same index and window returns the cached digest without recomputing.
 
+## Stage 3 -> Stage 4 handoff (required)
+
+Immediately after Stage 3 completes, hand the Stage 3 artifacts to the Stage 4 evaluator workflow.
+
+Load:
+- `~/diagnostics/stage3/stage3_digest.json`
+- `~/diagnostics/stage3/stage3_signatures.jsonl`
+
+Then call the default-allowlisted `agent_improvement_evaluate` dettool with:
+- `candidate_dettools` from `stage3_digest.json`
+- `repeat_signatures` from `stage3_signatures.jsonl` (or the equivalent Stage 3 digest payload when the evaluator expects the aggregated shape)
+
+The Stage 4 boundary is the dettool call itself. Do not invent or suggest a `multica ail stage4` CLI command.
+
 ## After each run
 
 Post the key metrics from `stage3_digest.json` as a comment on the tuning issue:
 - `total_window_events`, `top_pain_buckets` (top 3), `repeat_signatures` count, `candidate_dettools` count
-- Decision hints: `ready_for_candidate` → flag for Stage 4; `ready_for_review` → post for human review; `defer` → skip
+
+After posting the digest summary, pass the Stage 3 candidate payloads into `agent_improvement_evaluate` and hand the resulting Stage 4 decisions to the evaluator workflow:
+- `ready_for_candidate` -> Stage 6 input after human approval
+- `ready_for_review` -> post for human review, do not scaffold yet
+- `defer` -> stop and wait for more evidence
 
 ## Allowed actions
 
 - Run `multica ail run` (preferred) or `multica ail stage2` / `multica ail stage3` separately.
 - Post concise digest comments on the tuning issue (never issue spam).
+- Trigger the Stage 4 dettool evaluation with Stage 3 digest/signature data.
 - Write immutable diagnostics artifacts for reruns and future evaluations.
 
 ## Optional deterministic tools
