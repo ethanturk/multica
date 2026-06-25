@@ -66,13 +66,13 @@ If `ISSUE_TITLE` contains `Coding Team Watchdog Tick` case-insensitively, do not
 
 Otherwise read the master issue state. If it is `{}` or lacks `stage`, run **Run 1 - Fresh start**.
 
-Regression recovery: if state has `stage: "awaiting_approval"`, no `deliverable_id`, `planning_source: "guided_plan"`, and `guided_plan.answered_questions` is empty/missing, the issue skipped required Multica-only guided planning. Do not process approval. Reset state to `stage: "guided_planning"`, `planning_status: "questioning"`, clear `tasks`, post one `## Guided Planning Question`, and stop.
+Regression recovery: if state has `stage: "awaiting_approval"`, no `deliverable_id`, `planning_source: "guided_plan"`, and `guided_plan.answered_questions` is empty/missing, the issue skipped required Multica-only guided planning. Do not process approval. Reset state to `stage: "guided_planning"`, `planning_status: "questioning"`, clear `tasks`, mention Coding Team Guided Planner, and stop.
 
 Dispatch by `stage`:
 
 | Stage | Run |
 | --- | --- |
-| `guided_planning` | Run 1G - Continue guided planning |
+| `guided_planning` | Run 1G - Route guided planning |
 | `awaiting_approval` | Run 2 - Process approval or feedback |
 | `implementing` | Run 3 - Task completion signal |
 | `awaiting_push` | Run 4 - Push approval |
@@ -113,14 +113,14 @@ Planning modes:
 | --- | --- |
 | `auto` | With `deliverable_id`, use active ADO child Tasks if present; otherwise guided planning. Without it, guided planning from master issue content. |
 | `ado_existing` | Require active ADO child Tasks; block if none exist. |
-| `guided` | Question the plan one decision at a time, then create child issues after approval. |
+| `guided` | Coding Team Guided Planner questions the plan one decision at a time, then tasks are created after approval. |
 | `decompose` | Automatically decompose the deliverable. |
 
 Accepted aliases: `planning_mode: "guided_plan"` means `guided`; `planning_mode: "regular_ado_tasks"` means `ado_existing`; `planning_mode: "orchestrator_decomposition"` means `decompose`.
 
 ## Run 1 - Fresh Start
 
-Fresh Start guided guard: if `deliverable_id` is absent and config has `planning_source: "guided_plan"`, `planning_mode: "guided"`, `planning_mode: "guided_plan"`, or no explicit decompose request, the only valid Run 1 outcome is `stage: "guided_planning"` plus one `## Guided Planning Question` comment. Do not synthesize tasks in Run 1 for this path.
+Fresh Start guided guard: if `deliverable_id` is absent and config has `planning_source: "guided_plan"`, `planning_mode: "guided"`, `planning_mode: "guided_plan"`, or no explicit decompose request, the only valid Run 1 outcome is `stage: "guided_planning"` plus one Coding Team Guided Planner handoff comment. Do not synthesize tasks in Run 1 for this path.
 
 ### 1a. Get Deliverable Context
 
@@ -214,35 +214,40 @@ For `guided_plan`, do not produce tasks or child issues yet, even if the work lo
     "source_context": "summary of ADO or master-issue deliverable fields and authoritative comments",
     "answered_questions": [],
     "resolved_decisions": [],
+    "domain_glossary": [],
+    "adr_candidates": [],
     "codebase_findings": [],
     "current_question": {}
   }
 }
 ```
 
-Guided planning follows Grill Me: resolve one highest-impact product/task decision at a time from issue text, comments, and ADO context when `deliverable_id` exists. Do not check out or inspect the repository during Run 1 or Run 1G. For Multica-only Fresh Start, you must post one guided planning question and stop before proposing tasks.
+Guided planning follows Grill-with-docs through the separate Coding Team Guided
+Planner. The Orchestrator only initializes state and routes the master issue to
+that agent. Do not ask guided-planning questions from Orchestrator, and do not
+check out or inspect the repository during guided planning.
 
-Set the master issue `in_progress`, post exactly one question, then stop:
+Set the master issue `in_progress`, mention the Guided Planner, then stop:
 
 ```bash
-cat <<'COMMENT' | multica issue comment add "$MULTICA_ISSUE_ID" --content-stdin
-## Guided Planning Question
+multica issue status "$MULTICA_ISSUE_ID" in_progress
+AGENTS=$(multica agent list --output json)
+GUIDED_PLANNER_ID=$(get_agent_id "$AGENTS" "Coding Team Guided Planner")
 
-**Question:** {one specific question that resolves the highest-impact open planning decision}
+cat <<COMMENT | multica issue comment add "$MULTICA_ISSUE_ID" --content-stdin
+[@Coding Team Guided Planner](mention://agent/${GUIDED_PLANNER_ID})
 
-**Recommended answer:** {your recommended answer and why}
-
-**Why this matters:** {the downstream task, implementation, test, or review consequence}
-
-Reply with your answer. If you agree with the recommendation, reply **use recommendation**.
+Please run guided planning for this master issue. Ask one question at a time, record resolved terms and decision notes, and propose tasks when ready.
 COMMENT
 ```
 
-Hard stop: after posting this first guided-planning question, do not continue to task synthesis, child issue creation, branch creation, Planner handoff, or implementation in the same run.
+Hard stop: after posting the Guided Planner handoff, do not continue to task
+synthesis, child issue creation, branch creation, Planner handoff, or
+implementation in the same run.
 
 ### 1d. Post Proposed Tasks
 
-For non-guided sources, or after Run 1G completes guided planning, write state with `stage: "awaiting_approval"`, `planning_source`, `planning_status: "ready"`, and task objects. Preserve `ado_id` for existing ADO tasks; generated/guided ADO-backed tasks leave `ado_id` empty until approval; Multica-only tasks keep `ado_id` null/empty.
+For non-guided sources, or after Coding Team Guided Planner completes guided planning, write state with `stage: "awaiting_approval"`, `planning_source`, `planning_status: "ready"`, and task objects. Preserve `ado_id` for existing ADO tasks; generated/guided ADO-backed tasks leave `ado_id` empty until approval; Multica-only tasks keep `ado_id` null/empty.
 
 Post:
 
@@ -281,49 +286,46 @@ COMMENT
 
 Set master issue status `in_progress`.
 
-## Run 1G - Continue Guided Planning
+## Run 1G - Route Guided Planning
 
-Read state, triggering comment, and all comments:
+If the master issue is already in `guided_planning`, route the current turn to
+Coding Team Guided Planner. Do not inspect ADO, ask questions, synthesize tasks,
+or process approval from this stage.
+
+Resolve the Guided Planner and post:
 
 ```bash
-COMMENTS=$(multica issue comment list "$MULTICA_ISSUE_ID" --output json)
+AGENTS=$(multica agent list --output json)
+GUIDED_PLANNER_ID=$(get_agent_id "$AGENTS" "Coding Team Guided Planner")
+
+cat <<COMMENT | multica issue comment add "$MULTICA_ISSUE_ID" --content-stdin
+[@Coding Team Guided Planner](mention://agent/${GUIDED_PLANNER_ID})
+
+Please continue guided planning for this master issue.
+COMMENT
 ```
 
-If `guided_plan.current_question` exists, treat the triggering user comment as its answer. If the user says `use recommendation`, accept the recommended answer. Append:
-
-```json
-{
-  "question": "...",
-  "recommended_answer": "...",
-  "answer": "...",
-  "resolution": "..."
-}
-```
-
-Also append concrete product, technical, scope, sequencing, testing, or ownership decisions to `guided_plan.resolved_decisions`.
-
-Before asking again, inspect available non-repo sources for answerable questions: deliverable fields/comments and parent/ancestor ADO work items only when `deliverable_id` exists. Do not check out or inspect the repository in Run 1G; Planner owns codebase exploration after task approval. Record findings in `guided_plan.codebase_findings` or `resolved_decisions`.
-
-If a high-impact decision remains, update state with `guided_plan.current_question`, post exactly one `## Guided Planning Question` using the Run 1 format, and stop.
-
-For Multica-only guided planning, at least one user answer is required before task synthesis. If `guided_plan.answered_questions` is empty, ask the next highest-impact question and stop.
-
-If no high-impact decisions remain, synthesize 2-6 independently implementable/testable tasks from deliverable context, optional ADO ancestor context, answered questions, resolved decisions, and codebase findings. Use the same task fields as decomposition, with `source: "guided_plan"` and `status: "pending"`. Update state, preserving existing guided-plan history:
-
-```json
-{
-  "stage": "awaiting_approval",
-  "planning_status": "ready",
-  "guided_plan": { "status": "ready", "current_question": null },
-  "tasks": []
-}
-```
-
-Write state and post the Run 1 proposed-task breakdown. Guided-plan tasks need ADO Task work items only when `deliverable_id` exists; Multica-only runs skip ADO and create child issues only.
+Then stop. Guided-plan tasks need ADO Task work items only when `deliverable_id`
+exists; Multica-only runs skip ADO and create child issues only after approval.
 
 ## Run 2 - Approval Or Feedback
 
-Read triggering comment and full comment list. If the comment contains `approve` case-insensitively, execute Run 2a. Otherwise treat it as feedback, re-analyze with the feedback, update/write the revised tasks in state, post a revised Run 1 task breakdown, and keep `stage: "awaiting_approval"`. Preserve the original planning source unless the user explicitly changes it.
+Read triggering comment and full comment list. If the comment contains `approve` case-insensitively, execute Run 2a.
+
+If the comment is feedback and `planning_source == "guided_plan"`, do not revise the guided tasks from Orchestrator. Set `stage: "guided_planning"`, `planning_status: "questioning"`, append the feedback to `guided_plan.resolved_decisions` or a dedicated feedback note, clear `guided_plan.current_question`, mention Coding Team Guided Planner, and stop:
+
+```bash
+AGENTS=$(multica agent list --output json)
+GUIDED_PLANNER_ID=$(get_agent_id "$AGENTS" "Coding Team Guided Planner")
+
+cat <<COMMENT | multica issue comment add "$MULTICA_ISSUE_ID" --content-stdin
+[@Coding Team Guided Planner](mention://agent/${GUIDED_PLANNER_ID})
+
+Please revise guided planning using the latest approval feedback, then post an updated task proposal.
+COMMENT
+```
+
+Otherwise treat feedback as non-guided decomposition feedback: re-analyze with the feedback, update/write the revised tasks in state, post a revised Run 1 task breakdown, and keep `stage: "awaiting_approval"`. Preserve the original planning source unless the user explicitly changes it.
 
 ### Run 2a - Execute Approved Plan
 
