@@ -208,12 +208,13 @@ EOF
   echo "$result"
 }
 
-PLANNER_ID=$(get_agent_id "Coding Team Planner")
-IMPLEMENTER_ID=$(get_agent_id "Coding Team Implementer")
-TESTER_ID=$(get_agent_id "Coding Team Test Writer")
-REVIEWER_ID=$(get_agent_id "Coding Team Reviewer")
-PR_WRITER_ID=$(get_agent_id "Coding Team PR Writer")
-ORCHESTRATOR_ID=$(get_agent_id "Coding Team Orchestrator")
+PLANNER_ID=$(get_agent_id "$AGENTS_JSON" "Coding Team Planner")
+IMPLEMENTER_ID=$(get_agent_id "$AGENTS_JSON" "Coding Team Implementer")
+TESTER_ID=$(get_agent_id "$AGENTS_JSON" "Coding Team Test Writer")
+REVIEWER_ID=$(get_agent_id "$AGENTS_JSON" "Coding Team Reviewer")
+REFINER_ID=$(get_agent_id "$AGENTS_JSON" "Coding Team Refiner")
+PR_WRITER_ID=$(get_agent_id "$AGENTS_JSON" "Coding Team PR Writer")
+ORCHESTRATOR_ID=$(get_agent_id "$AGENTS_JSON" "Coding Team Orchestrator")
 ```
 
 Agent names (exact, case-sensitive):

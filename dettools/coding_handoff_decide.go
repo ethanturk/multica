@@ -52,6 +52,7 @@ func Run(input map[string]any) map[string]any {
 		failMarker = "requires_test_writer: true"
 	}
 	preferPRWriter := boolValue(options["prefer_pr_writer_after_review_pass"])
+	preferRefiner := boolValue(options["prefer_refiner_after_review_pass"])
 
 	evidence := map[string]any{
 		"current_marker":                         currentMarker,
@@ -146,19 +147,26 @@ func Run(input map[string]any) map[string]any {
 		decision = d
 	case markerReviewPass:
 		targetRole := "orchestrator"
-		if preferPRWriter {
+		targetIssueID := masterIssueID
+		nextStatus := "committed"
+		statePatches := []any{
+			map[string]any{"task_issue_id": taskIssueID, "status": "committed"},
+		}
+		if preferRefiner {
+			targetRole = "refiner"
+			targetIssueID = taskIssueID
+			nextStatus = "refining"
+			statePatches = []any{
+				map[string]any{"task_issue_id": taskIssueID, "status": "refining"},
+			}
+		} else if preferPRWriter {
 			targetRole = "pr_writer"
 		}
-		target, ok := decideByRole(targetRole, masterIssueID, markerReviewPass, "review_pass", "committed", []any{
-			map[string]any{"task_issue_id": taskIssueID, "status": "committed"},
-		}, true, "", agentIDs, agentNames)
+		target, ok := decideByRole(targetRole, targetIssueID, markerReviewPass, "review_pass", nextStatus, statePatches, true, "", agentIDs, agentNames)
 		if !ok {
-			if targetRole == "pr_writer" {
-				return errorMachine("INVALID_INPUT", "missing agent id for role pr_writer")
-			}
-			return errorMachine("INVALID_INPUT", "missing agent id for role orchestrator")
+			return errorMachine("INVALID_INPUT", "missing agent id for role "+targetRole)
 		}
-		if masterIssueID == "" {
+		if !preferRefiner && masterIssueID == "" {
 			return errorMachine("INVALID_INPUT", "missing required field: master_issue_id")
 		}
 		decision = target
@@ -326,6 +334,8 @@ func canonicalRole(raw string) string {
 		return "planner"
 	case "pr_writer", "pr-writer", "pr writer", "coding pr writer", "coding_pr_writer":
 		return "pr_writer"
+	case "refiner", "coding team refiner", "coding_refiner":
+		return "refiner"
 	default:
 		return ""
 	}
@@ -333,6 +343,9 @@ func canonicalRole(raw string) string {
 
 func routeReason(nextRole, routeKind, marker string) string {
 	if marker == markerReviewPass {
+		if nextRole == "refiner" {
+			return "review pass complete, proceed to separate refinement pass"
+		}
 		return "review pass complete, proceed to review closeout"
 	}
 	switch routeKind {
@@ -357,6 +370,9 @@ func handoffComment(marker, nextRole, nextName, nextID, taskIssueID, masterIssue
 	mention := "[@" + nextName + "](mention://agent/" + nextID + ")"
 	switch marker {
 	case markerReviewPass:
+		if nextRole == "refiner" {
+			return mention + "\n\nReview passed. Please run the post-review refinement pass for this task, then either route findings back to the Implementer or notify the Orchestrator with TASK_COMPLETE."
+		}
 		comment := mention + "\n\nTASK_COMPLETE\ntask_issue_id: ${TASK_ID}\nstatus: committed\nmaster_issue_id: ${MASTER_ID}"
 		comment = strings.ReplaceAll(comment, "${TASK_ID}", taskIssueID)
 		comment = strings.ReplaceAll(comment, "${MASTER_ID}", masterIssueID)
@@ -391,6 +407,7 @@ func resolveAgent(agentIDs, agentNames map[string]any, role string) (string, str
 		"orchestrator": {"orchestrator", "coding_orchestrator", "agent_orchestrator"},
 		"planner":      {"planner", "coding_planner", "agent_planner"},
 		"pr_writer":    {"pr_writer", "coding_pr_writer", "agent_pr_writer"},
+		"refiner":      {"refiner", "coding_refiner", "agent_refiner"},
 	}
 	ids, ok := aliases[role]
 	if !ok {
@@ -424,6 +441,8 @@ func canonicalRoleDisplayName(role string) string {
 		return "Coding Team Planner"
 	case "pr_writer":
 		return "Coding Team PR Writer"
+	case "refiner":
+		return "Coding Team Refiner"
 	default:
 		return role
 	}
