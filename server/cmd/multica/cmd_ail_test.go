@@ -1681,7 +1681,7 @@ func TestStage8PromoteScriptAppendsDiagnosticsAndInvokesBundleGenerator(t *testi
 	)
 	cmd.Env = append(os.Environ(),
 		"MULTICA_REPO_ROOT="+repoRoot,
-		"PATH="+filepath.Join(tmp, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"MULTICA_BIN="+fakeMulticaPath,
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

@@ -10,6 +10,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${MULTICA_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 cd "$REPO_ROOT"
+MULTICA_BIN="${MULTICA_BIN:-multica}"
 
 usage() {
   cat <<'USAGE'
@@ -161,7 +162,7 @@ for file in "${REQUIRED_SKILLS[@]}"; do
   fi
  done
 
-if [[ "$SKIP_IMPORT" -eq 0 ]] && ! command -v multica >/dev/null 2>&1; then
+if [[ "$SKIP_IMPORT" -eq 0 ]] && ! command -v "$MULTICA_BIN" >/dev/null 2>&1; then
   echo "multica CLI not found. Use --skip-import if you intentionally want to defer import." >&2
   exit 1
 fi
@@ -270,8 +271,8 @@ echo "Moved candidate: $CANDIDATE_PATH -> $PROMOTED_PATH"
 
 action_import=0
 if [[ "$SKIP_IMPORT" -eq 0 ]]; then
-  if command -v multica >/dev/null 2>&1; then
-    multica dettool import-file "$PROMOTED_PATH" --output table
+  if command -v "$MULTICA_BIN" >/dev/null 2>&1; then
+    "$MULTICA_BIN" dettool import-file "$PROMOTED_PATH" --output table
     action_import=1
   else
     echo "multica CLI not found. Use --skip-import if you intentionally want to defer import." >&2
@@ -334,6 +335,6 @@ STAGE8_ARGS=(
 if [[ -n "$CANDIDATE_DECISION_PATH" ]]; then
   STAGE8_ARGS+=(--candidate-decision-input "$CANDIDATE_DECISION_PATH")
 fi
-multica "${STAGE8_ARGS[@]}"
+"$MULTICA_BIN" "${STAGE8_ARGS[@]}"
 
 echo "Stage-8 promotion complete for: $TOOL_NAME"
