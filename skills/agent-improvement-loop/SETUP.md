@@ -23,7 +23,8 @@ Keep base production dettools imported from repo catalog:
 - `pipeline_state_parse`
 - `repo_facts`
 - `diff_summarize`
-- plus the Stage-4 evaluation tool(s) once promoted.
+- `agent_improvement_evaluate` for the Stage 4 handoff/evaluation boundary
+- plus any later evaluation tool(s) once promoted.
 
 Staging and production folders are both repo-local:
 
@@ -58,6 +59,13 @@ The command writes `dettools/prospect/<tool>_candidate.go`, a matching `_test.go
 ### Stage 2 + 3 (nightly)
 
 **Autopilot agent prompt (current):** `MULTICA_AIL_TUNING_ISSUE_ID=<issue-id> multica ail run` — runs Stage 2 capture + Stage 3 analysis in one process (Option A), then writes and posts the Stage 5 digest. Stage 3 artifacts: `stage3_digest.json`, `stage3_signatures.jsonl`, `stage3_watermark.json` under `~/diagnostics/stage3/`. Stage 5 artifacts: `stage5_digest.json`, `stage5_watermark.json` under `~/diagnostics/stage5/`. The digest issue can also be supplied with `--digest-issue <issue-id>`.
+
+After `multica ail run` completes, the analyzer workflow should immediately start the Stage 4 handoff by calling `agent_improvement_evaluate` with the Stage 3-shaped `candidate_dettools` and `repeat_signatures` data from those Stage 3 artifacts. Do not add or document a `multica ail stage4` command unless the CLI actually gains one in a separate change.
+
+The Stage 4 outcome is limited to:
+- `ready_for_candidate` -> feed Stage 6 after a human approval reference exists
+- `ready_for_review` -> post for human review and wait
+- `defer` -> stop without scaffolding
 
 ```bash
 AUTOPILOT_NAME="Agent Improvement Loop Stage2-3"

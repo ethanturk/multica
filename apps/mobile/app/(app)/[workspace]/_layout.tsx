@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import type { ComponentProps } from "react";
 import { Redirect, Stack, useLocalSearchParams } from "expo-router";
+import { Platform } from "react-native";
 import { useQuery } from "@tanstack/react-query";
 import { workspaceListOptions } from "@/data/queries/workspaces";
 import { useWorkspaceStore } from "@/data/workspace-store";
@@ -44,10 +45,14 @@ import { useChatSessionPickerResetOnWorkspaceChange } from "@/data/stores/chat-s
  *     + optional right action). The native Stack header would double up.
  */
 const SHEET_OPTIONS: ComponentProps<typeof Stack.Screen>["options"] = {
-  presentation: "formSheet",
-  sheetGrabberVisible: true,
-  sheetAllowedDetents: [0.6, 0.95],
-  sheetCornerRadius: 20,
+  presentation: Platform.select({ ios: "formSheet", default: "modal" }),
+  ...(Platform.OS === "ios"
+    ? {
+        sheetGrabberVisible: true,
+        sheetAllowedDetents: [0.6, 0.95] as const,
+        sheetCornerRadius: 20,
+      }
+    : {}),
   contentStyle: { flex: 1 },
   headerShown: false,
 };
