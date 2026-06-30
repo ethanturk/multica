@@ -55,6 +55,7 @@ func init() {
 	skillCmd.GroupID = groupCore
 	dettoolCmd.GroupID = groupCore
 	squadCmd.GroupID = groupCore
+	chatCmd.GroupID = groupCore
 
 	// Runtime commands
 	daemonCmd.GroupID = groupRuntime
@@ -82,6 +83,7 @@ func init() {
 	rootCmd.AddCommand(skillCmd)
 	rootCmd.AddCommand(dettoolCmd)
 	rootCmd.AddCommand(squadCmd)
+	rootCmd.AddCommand(chatCmd)
 	rootCmd.AddCommand(daemonCmd)
 	rootCmd.AddCommand(runtimeCmd)
 	rootCmd.AddCommand(mcpToolsCmd)

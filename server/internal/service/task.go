@@ -1603,7 +1603,7 @@ func (s *TaskService) markCodingTeamWatchdogIssueDone(ctx context.Context, task 
 		"task_id", util.UUIDToString(task.ID),
 		"issue_id", util.UUIDToString(updated.ID),
 	)
-	s.broadcastIssueUpdated(updated)
+	s.broadcastIssueUpdated(updated, issue.Status)
 }
 
 // FailTask marks a task as failed.
