@@ -294,6 +294,51 @@ export function createEnDict(allowSignup: boolean): LandingDict {
     },
     entries: [
       {
+        version: "0.3.32",
+        date: "2026-06-29",
+        title: "Detach sub-Issues, sturdier daemon reconnects, and friendlier attachment previews",
+        changes: [],
+        features: [
+          "Issues now have a Remove parent action, so you can detach a sub-Issue without first having to pick a different parent.",
+        ],
+        improvements: [
+          "The local daemon reconnects to Multica through a more resilient WebSocket flow with bounded backoff, so brief network drops recover smoothly instead of stalling.",
+          "The daemon now bounds each runtime probe with its own timeout, so a single wedged CLI can no longer block every other runtime from coming online.",
+        ],
+        fixes: [
+          "Scheduled autopilots advance their next-run time the moment a run is dispatched, so a slow runner can no longer cause back-to-back duplicate dispatches.",
+          "Attachment previews open correctly whether the URL redirects inside a frame, comes back from the same origin, or was uploaded locally — and local upload URLs are now preferred when available.",
+          "When the failed-task handler unsticks an Issue, the Issue view refreshes immediately instead of waiting for a manual reload.",
+          "Sticky Issue comment headers share the same background fade as the highlight, so settling on a comment no longer looks out of sync.",
+          "Chat conversations refresh their message cache when reconnecting, so you no longer see stale messages right after coming back online.",
+        ],
+      },
+      {
+        version: "0.3.31",
+        date: "2026-06-26",
+        title: "Cross-workspace unread dot, Composio toolkit foundation, and a friendlier editor",
+        changes: [],
+        features: [
+          "The workspace switcher shows a dot when another workspace has unread inbox items.",
+          "New Composio toolkit foundation that prepares the upcoming third-party integrations.",
+          "You can run desktop dev on multiple checkouts side by side without them clashing.",
+          "The Chinese docs homepage now opens with a short intro video.",
+        ],
+        improvements: [
+          "Contributor docs note that the desktop dev command isolates per checkout.",
+        ],
+        fixes: [
+          "Tab now reliably indents selected list items in the Issue editor and keeps focus in place.",
+          "Squad leaders boot with the full squad briefing when you @-mention them in a comment, and replies that inherit the parent mention no longer trigger them again.",
+          "Code-block selections in Issues stay put while the page re-renders.",
+          "Assigning an Issue directly to an agent opens the handoff note instantly instead of waiting on a check.",
+          "The workspace switcher's unread dot now matches what you actually see in your inbox.",
+          "The edit-comment save button shows a loading state until the change is saved.",
+          "Search results load reliably again.",
+          "Self-hosting fails fast with a clear hint when Docker Compose v2 is missing.",
+        ],
+      },
+      {
         version: "0.3.30",
         date: "2026-06-25",
         title: "Slack Channel Integration, a Smoother Editor, and Many Reliability Fixes",
