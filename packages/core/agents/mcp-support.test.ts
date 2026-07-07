@@ -7,13 +7,28 @@ import {
 } from "./mcp-support";
 
 describe("providerSupportsMcpConfig", () => {
-  it("is true for native MCP providers", () => {
-    for (const p of ["claude", "codex", "dirge", "hermes", "kimi", "kiro", "opencode", "openclaw"]) {
+  it("matches providers whose runtime consumes mcp_config", () => {
+    for (const p of [
+      "claude",
+      "codebuddy",
+      "codex",
+      "cursor",
+      "dirge",
+      "hermes",
+      "kimi",
+      "kiro",
+      "opencode",
+      "openclaw",
+      "qoder",
+      "traecli",
+    ]) {
       expect(providerSupportsMcpConfig(p)).toBe(true);
     }
   });
 
-  it("is false for non-MCP providers and nullish input", () => {
+  it("rejects providers whose runtime ignores mcp_config and nullish input", () => {
+    expect(providerSupportsMcpConfig("antigravity")).toBe(false);
+    expect(providerSupportsMcpConfig("copilot")).toBe(false);
     expect(providerSupportsMcpConfig("gemini")).toBe(false);
     // pi is adapter-backed, not native, so the native mcp_config tab stays hidden.
     expect(providerSupportsMcpConfig("pi")).toBe(false);
