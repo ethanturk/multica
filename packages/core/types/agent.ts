@@ -109,6 +109,7 @@ export const RUNTIME_PROFILE_PROTOCOL_FAMILIES = [
   "kimi",
   "kiro",
   "antigravity",
+  "dirge",
   "qoder",
   "traecli",
 ] as const;
