@@ -75,11 +75,16 @@ export function ChatThreadList({
   agents,
   activeSessionId,
   onSelectSession,
+  onArchive,
 }: {
   sessions: ChatSession[];
   agents: Agent[];
   activeSessionId: string | null;
   onSelectSession: (session: ChatSession) => void;
+  // Archiving is owned by the parent so the selection advance stays layout-
+  // aware (desktop advances to the next chat; mobile drops back to the list)
+  // and routes through the shared controller — see ChatPage.handleArchive.
+  onArchive: (session: ChatSession) => void;
 }) {
   const { t } = useT("chat");
   const wsId = useWorkspaceId();
@@ -358,7 +363,7 @@ export function ChatThreadList({
                   <RowAction
                     icon={<Archive className="size-3.5" />}
                     label={t(($) => $.list.archive)}
-                    onClick={() => setArchived.mutate({ sessionId: session.id, archived: true })}
+                    onClick={() => onArchive(session)}
                   />
                 )}
               </>
