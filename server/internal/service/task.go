@@ -148,6 +148,34 @@ func (s *TaskService) buildCommentTriggerSummary(ctx context.Context, commentID 
 	return pgtype.Text{String: summary, Valid: true}
 }
 
+// ResolveOriginatorFromTriggerComment is the exported wrapper used by the
+// comment-merge path (MUL-4195) to compute the top-of-chain human originator
+// for a newly-arrived comment, so a merge can be gated on the originator being
+// unchanged. See resolveOriginatorFromTriggerComment for the chain rules.
+func (s *TaskService) ResolveOriginatorFromTriggerComment(ctx context.Context, commentID pgtype.UUID) pgtype.UUID {
+	return s.resolveOriginatorFromTriggerComment(ctx, commentID)
+}
+
+// BuildCommentTriggerSummary is the exported wrapper used by the comment-merge
+// path (MUL-4195) to refresh a coalesced task's trigger_summary to the newest
+// trigger comment's snapshot.
+func (s *TaskService) BuildCommentTriggerSummary(ctx context.Context, commentID pgtype.UUID) pgtype.Text {
+	return s.buildCommentTriggerSummary(ctx, commentID)
+}
+
+// BuildRuntimeMCPOverlayForMerge recomputes the Composio MCP overlay +
+// connected-app metadata for (originatorUserID, agent), used when a merge
+// re-stamps a coalesced task's originator (MUL-4195 review must-fix #1). The
+// overlay is a pure function of (originator, agent); re-stamping it alongside
+// originator_user_id keeps the coalescing run's connected-app capabilities and
+// audit attribution consistent with the latest trigger comment's originator
+// instead of the task's original one. Fails soft to empty (same as the enqueue
+// path) so a transient Composio hiccup never blocks the merge.
+func (s *TaskService) BuildRuntimeMCPOverlayForMerge(ctx context.Context, originatorUserID pgtype.UUID, agent db.Agent) (overlay, connectedApps []byte) {
+	data := s.buildRuntimeMCPOverlay(ctx, originatorUserID, agent)
+	return data.Overlay, data.ConnectedApps
+}
+
 func NewTaskService(q *db.Queries, tx TxStarter, hub *realtime.Hub, bus *events.Bus, wakeups ...TaskWakeupNotifier) *TaskService {
 	var wakeup TaskWakeupNotifier
 	if len(wakeups) > 0 {
