@@ -127,6 +127,7 @@ type AgentTaskQueue struct {
 	RuntimeConnectedApps []byte        `json:"runtime_connected_apps"`
 	CoalescedCommentIds  []pgtype.UUID `json:"coalesced_comment_ids"`
 	DeliveredCommentIds  []pgtype.UUID `json:"delivered_comment_ids"`
+	ChatInputTaskID      pgtype.UUID   `json:"chat_input_task_id"`
 }
 
 type Attachment struct {
@@ -305,6 +306,7 @@ type ChatMessage struct {
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
 	FailureReason pgtype.Text        `json:"failure_reason"`
 	ElapsedMs     pgtype.Int8        `json:"elapsed_ms"`
+	MessageKind   string             `json:"message_kind"`
 }
 
 type ChatPinnedAgent struct {
