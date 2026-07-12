@@ -1164,6 +1164,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				r.Get("/", h.ListAgentTemplates)
 				r.Get("/{slug}", h.GetAgentTemplate)
 			})
+			r.Post("/api/agent-builder/sessions", h.CreateAgentBuilderSession)
 
 			// Deterministic tools — author, persist, and immediately test
 			// user-authored Go "steps" (run sandboxed via the interpreter). The
