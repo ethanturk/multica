@@ -10,7 +10,7 @@ import { api } from "@multica/core/api";
 import type { Attachment } from "@multica/core/types";
 import { contentReferencesAttachment } from "@multica/core/types";
 import { formatShortcut, useShortcut } from "@multica/core/shortcuts";
-import { useCommentDraftStore } from "@multica/core/issues/stores";
+import { useCommentComposerStore, useCommentDraftStore } from "@multica/core/issues/stores";
 import { useT } from "../../i18n";
 import { CommentTriggerChips } from "./comment-trigger-chips";
 import { useCommentTriggerPreview } from "../hooks/use-comment-trigger-preview";
@@ -47,6 +47,9 @@ function CommentInput({ issueId, onSubmit }: CommentInputProps) {
   const { isDragOver, dropZoneProps } = useFileDropZone({
     onDrop: (files) => files.forEach((f) => editorRef.current?.uploadFile(f)),
   });
+  // Sticky preference (Settings → Preferences): issue-detail pins this
+  // composer to the bottom of the scroll viewport when enabled.
+  const sticky = useCommentComposerStore((s) => s.sticky);
 
   // Draft persistence. Hydrate from store on mount via `defaultValue` above
   // (ContentEditorRef has no setContent, so this is the only injection point).
@@ -147,6 +150,10 @@ function CommentInput({ issueId, onSubmit }: CommentInputProps) {
       <div
         className={cn(
           "flex-1 min-h-0 overflow-y-auto px-3 py-2",
+          // Pinned to the viewport bottom the composer grows upward; cap it
+          // so a long draft can't swallow the whole timeline (the editor
+          // area scrolls internally instead).
+          sticky && "max-h-[40vh]",
           submitting && "pointer-events-none opacity-60",
         )}
         aria-busy={submitting || undefined}
