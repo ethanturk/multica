@@ -118,6 +118,7 @@ const (
 	EventDaemonRegister               = "daemon:register"
 	EventDaemonTaskAvailable          = "daemon:task_available"
 	EventDaemonRuntimeProfilesChanged = "daemon:runtime_profiles_changed"
+	EventDaemonWorkspacesChanged      = "daemon:workspaces_changed"
 	// Generic daemon→server request/response over the WebSocket control
 	// connection (MUL-4257). The daemon sends EventDaemonRPCRequest with a
 	// correlation id + method + body; the server replies EventDaemonRPCResponse
