@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   AppConfigSchema,
   AgentTaskListSchema,
+  AutopilotRunSchema,
+  FALLBACK_AUTOPILOT_RUN,
+  CommentTriggerPreviewSchema,
   DashboardAgentRunTimeListSchema,
   DashboardUsageByAgentListSchema,
   DashboardUsageDailyListSchema,
@@ -681,5 +684,92 @@ describe("SearchProjectsResponseSchema date drift", () => {
     expect(parsed.projects).toHaveLength(1);
     expect(parsed.projects[0]?.start_date).toBeNull();
     expect(parsed.projects[0]?.due_date).toBeNull();
+  });
+});
+
+// The "run now" flow branches on run.status/reason_code to avoid a false-success
+// toast (MUL-4525), so the trigger response must survive backend drift.
+describe("AutopilotRunSchema", () => {
+  const ENDPOINT = { endpoint: "POST /api/autopilots/:id/trigger" };
+  const baseRun = {
+    id: "run-1",
+    autopilot_id: "ap-1",
+    trigger_id: null,
+    source: "manual",
+    status: "issue_created",
+    issue_id: "issue-1",
+    task_id: null,
+    triggered_at: "2026-07-14T00:00:00Z",
+    completed_at: null,
+    failure_reason: null,
+    trigger_payload: null,
+    result: null,
+    created_at: "2026-07-14T00:00:00Z",
+  };
+
+  it("preserves a blocked run's status and reason_code", () => {
+    const parsed = parseWithFallback(
+      { ...baseRun, status: "skipped", failure_reason: "you are not allowed to trigger this autopilot's assignee agent", reason_code: "invocation_not_allowed" },
+      AutopilotRunSchema,
+      FALLBACK_AUTOPILOT_RUN,
+      ENDPOINT,
+    );
+    expect(parsed.status).toBe("skipped");
+    expect(parsed.reason_code).toBe("invocation_not_allowed");
+  });
+
+  it("tolerates an older server omitting reason_code", () => {
+    const parsed = parseWithFallback(baseRun, AutopilotRunSchema, FALLBACK_AUTOPILOT_RUN, ENDPOINT);
+    expect(parsed.status).toBe("issue_created");
+    expect(parsed.reason_code).toBeUndefined();
+  });
+
+  it("degrades a malformed response to a non-success fallback (never a false success)", () => {
+    const parsed = parseWithFallback("not-an-object", AutopilotRunSchema, FALLBACK_AUTOPILOT_RUN, ENDPOINT);
+    expect(parsed).toBe(FALLBACK_AUTOPILOT_RUN);
+    expect(parsed.status).toBe("failed");
+  });
+});
+
+// The comment composer branches on preview.blocked to warn before sending
+// (MUL-4525 §2), so the additive field must parse and degrade gracefully.
+describe("CommentTriggerPreviewSchema.blocked", () => {
+  it("parses blocked mention outcomes alongside agents", () => {
+    const parsed = CommentTriggerPreviewSchema.parse({
+      agents: [{ id: "a1", source: "mention_agent", reason: "" }],
+      blocked: [
+        { target_type: "squad", target_id: "s1", status: "blocked", reason_code: "invocation_not_allowed" },
+      ],
+    });
+    expect(parsed.agents).toHaveLength(1);
+    expect(parsed.blocked).toEqual([
+      { target_type: "squad", target_id: "s1", status: "blocked", reason_code: "invocation_not_allowed" },
+    ]);
+  });
+
+  it("defaults blocked to [] when an older server omits it", () => {
+    const parsed = CommentTriggerPreviewSchema.parse({ agents: [] });
+    expect(parsed.blocked).toEqual([]);
+  });
+
+  it("degrades a malformed blocked field to [] without dropping agents", () => {
+    const parsed = CommentTriggerPreviewSchema.parse({
+      agents: [{ id: "a1", source: "mention_agent", reason: "" }],
+      blocked: "nope",
+    });
+    expect(parsed.agents).toHaveLength(1);
+    expect(parsed.blocked).toEqual([]);
+  });
+
+  it("drops a single malformed blocked entry without discarding the valid ones", () => {
+    const parsed = CommentTriggerPreviewSchema.parse({
+      agents: [],
+      blocked: [
+        { target_type: "squad", target_id: "s1", status: "blocked", reason_code: "invocation_not_allowed" },
+        { status: "blocked" }, // missing target_id → dropped individually
+        { target_type: "agent", target_id: "a1", status: "blocked", reason_code: "runtime_offline" },
+      ],
+    });
+    expect(parsed.blocked.map((b) => b.target_id)).toEqual(["s1", "a1"]);
   });
 });

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Ban, CheckCircle2, ChevronRight, Loader2, RotateCcw, Square, XCircle } from "lucide-react";
 import { toast } from "sonner";
-import { api } from "@multica/core/api";
+import { api, dispatchReasonCode } from "@multica/core/api";
 import { issueKeys } from "@multica/core/issues/queries";
 import type { AgentTask, TaskFailureReason } from "@multica/core/types";
 import { useTimeAgo } from "../../i18n";
@@ -18,6 +18,7 @@ import { formatDuration } from "../../agents/components/agent-activity-hover-con
 import { TranscriptButton } from "../../common/task-transcript";
 import { failureReasonLabel } from "../../agents/components/tabs/task-failure";
 import { useT } from "../../i18n";
+import { AttributionBadge } from "./attribution-badge";
 import { TerminateTaskConfirmDialog } from "./terminate-task-confirm-dialog";
 
 // Right-panel section that lists every agent run for this issue. Active
@@ -305,6 +306,7 @@ export function ActiveTaskRow({
   return (
     <RowShell task={task}>
       <TriggerText text={trigger} />
+      <AttributionBadge attribution={task.attribution} className="shrink-0" />
       <TaskCommentCoverage task={task} />
       <RowStatus title={label}>
         {task.status === "running" ? (
@@ -387,7 +389,16 @@ function PastRow({ task, issueId }: { task: AgentTask; issueId: string }) {
     try {
       await api.rerunIssue(issueId, task.id);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : t(($) => $.execution_log.retry_failed));
+      // A rerun is now re-gated on the operator's invoke permission (MUL-4525):
+      // a structured 403 means the agent can't be triggered, not a transient
+      // failure — localize it instead of echoing the server's generic message.
+      toast.error(
+        dispatchReasonCode(e) === "invocation_not_allowed"
+          ? t(($) => $.execution_log.retry_blocked)
+          : e instanceof Error
+            ? e.message
+            : t(($) => $.execution_log.retry_failed),
+      );
     } finally {
       // Reset on both success and failure: the past row stays mounted
       // (its task.id is unchanged), so leaving `retrying` true on success
@@ -399,6 +410,7 @@ function PastRow({ task, issueId }: { task: AgentTask; issueId: string }) {
   return (
     <RowShell task={task}>
       <TriggerText text={trigger} />
+      <AttributionBadge attribution={task.attribution} className="shrink-0" />
       <TaskCommentCoverage task={task} />
       <RowStatus title={failureLabel ?? label}>
         <TaskStatusIcon status={task.status} />
