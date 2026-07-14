@@ -160,6 +160,7 @@ func formatProjectResource(r ProjectResourceForEnv) string {
 // For Codex:    writes {workDir}/AGENTS.md  (skills discovered natively via CODEX_HOME)
 // For Copilot:  writes {workDir}/AGENTS.md  (skills discovered natively from .github/skills/)
 // For OpenCode: writes {workDir}/AGENTS.md  (skills discovered natively from .opencode/skills/)
+// For DevEco Code: writes {workDir}/AGENTS.md  (skills discovered natively from .deveco/skills/)
 // For OpenClaw: writes {workDir}/AGENTS.md  (skills discovered natively from {workDir}/skills/ via per-task openclaw-config.json that pins agents.defaults.workspace)
 // For Hermes:   writes {workDir}/AGENTS.md  (skills discovered natively from a per-task HERMES_HOME/skills seeded by the daemon; see hermes_home.go)
 // For Pi:       writes {workDir}/AGENTS.md  (skills discovered natively from .pi/skills/)
@@ -189,7 +190,7 @@ func runtimeConfigPath(workDir, provider string) string {
 	switch provider {
 	case "claude", "codebuddy":
 		return filepath.Join(workDir, "CLAUDE.md")
-	case "codex", "copilot", "opencode", "openclaw", "hermes", "pi", "cursor", "kimi", "kiro", "antigravity", "dirge", "qoder", "traecli":
+case "codex", "copilot", "opencode", "openclaw", "hermes", "pi", "cursor", "kimi", "kiro", "antigravity", "dirge", "qoder", "traecli":, "deveco"
 		return filepath.Join(workDir, "AGENTS.md")
 	default:
 		return ""
