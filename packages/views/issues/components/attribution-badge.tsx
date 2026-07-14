@@ -23,8 +23,13 @@ function initialsOf(name: string): string {
 
 /**
  * AttributionBadge renders who an agent run is accountable to (MUL-4302 §9):
- * the "on behalf of <member>" provenance, with the resolution source and a
- * distinct warning tone for degraded (non-precise) attribution.
+ * the "on behalf of <member>" provenance, with the resolution source in a
+ * tooltip and a cautionary tone ONLY when the named human may not be the real
+ * responsible person — a fallback guess (owner_fallback). A backfilled
+ * attribution is a historical, after-the-fact record (non-realtime, not
+ * compliance-grade), but that does not make the displayed name wrong, so it
+ * earns no warning tone; its historical origin still shows in the tooltip and
+ * the raw `source` field (MUL-4768).
  *
  * Two shapes, both silent when no responsible member resolved (MUL-4765):
  *  - `variant="badge"` (default): the full "on behalf of <name>" chip. Renders
@@ -82,9 +87,21 @@ export function AttributionBadge({
       sourceLabel = attribution.source;
   }
 
-  // Degraded attribution (owner_fallback / backfill / unattributed) is marked
-  // distinctly so it never reads as a compliance-grade "who is responsible".
-  const degraded = attribution.precise === false;
+  // The backend's `precise` flag is an attribution-*coverage* health bit:
+  // owner_fallback, backfill, and unattributed all fail it. But coverage is an
+  // ops metric, not a reader-facing signal. The only thing a viewer of "on
+  // behalf of <name>" cares about is whether that named human might NOT actually
+  // be who's responsible — true only for a fallback guess (owner_fallback:
+  // nothing resolved, so we defaulted to the agent owner). Backfill is a
+  // historical, after-the-fact record (non-realtime, not compliance-grade), but
+  // that does not make the displayed name wrong — so it warrants no warning tone;
+  // its historical origin stays visible in the tooltip and the raw `source` field
+  // (MUL-4768). The cautionary tone therefore fires for any non-precise source
+  // EXCEPT backfill; keeping the `precise === false` base means a future unknown
+  // degraded source still warns (fail-safe) instead of silently reading as
+  // confident.
+  const uncertain =
+    attribution.precise === false && attribution.source !== "backfill";
   const initiator = attribution.initiator;
 
   // Avatar-only shape: just the accountable member's face, with the name +
@@ -99,9 +116,9 @@ export function AttributionBadge({
             <span
               className={cn(
                 "inline-flex shrink-0",
-                // A subtle ring flags degraded attribution so an owner-fallback
-                // face never silently reads as a precise responsible member.
-                degraded && "rounded-full ring-1 ring-warning/60",
+                // A subtle ring flags a fallback guess so an owner-fallback face
+                // never silently reads as a confidently resolved responsible member.
+                uncertain && "rounded-full ring-1 ring-warning/60",
                 className
               )}
             >
@@ -122,7 +139,7 @@ export function AttributionBadge({
             <span
               className={cn(
                 "text-[11px]",
-                degraded ? "text-warning" : "text-muted-foreground"
+                uncertain ? "text-warning" : "text-muted-foreground"
               )}
             >
               {sourceLabel}
@@ -145,7 +162,7 @@ export function AttributionBadge({
       variant="outline"
       className={cn(
         "max-w-40 min-w-0 gap-1 font-normal",
-        degraded ? "text-warning" : "text-muted-foreground",
+        uncertain ? "text-warning" : "text-muted-foreground",
         className
       )}
       title={sourceLabel}
