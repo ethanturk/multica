@@ -417,7 +417,7 @@ describe("AgentCreatePanel", () => {
     await user.clear(editor);
     await user.type(editor, "Create this even on an old daemon");
 
-    const createButton = screen.getByRole("button", { name: /^Create \(/i });
+    const createButton = screen.getByRole("button", { name: /^Create$/i });
     expect(createButton).not.toBeDisabled();
     await user.click(createButton);
 

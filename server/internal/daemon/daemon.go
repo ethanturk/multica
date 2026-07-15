@@ -4234,6 +4234,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		runtimeBrief += "- **diff_summarize** — stable machine-readable diff. USE instead of `git diff`.\n"
 		runtimeBrief += "- **artifact_emit** — write structured artifacts. USE instead of `echo > file`.\n\n"
 		runtimeBrief += "When a skill or workflow tells you to use one of these tools, call it through MCP. Do NOT replicate its behavior with shell commands — shell output lacks audit logging, policy enforcement, and typed results.\n"
+	}
 	if provider == "hermes" {
 		customArgs = hermesLaunchArgs(customArgs, env != nil && env.HermesHome != "")
 	}

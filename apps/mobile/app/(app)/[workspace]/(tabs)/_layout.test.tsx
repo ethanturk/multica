@@ -58,7 +58,7 @@ vi.mock("@/lib/theme", () => ({
 
 vi.mock("@/lib/unread-counts", () => ({
   useInboxUnreadCount: () => mocks.inboxUnread,
-  useChatUnreadSessionCount: () => mocks.chatUnread,
+  useChatUnreadMessageCount: () => mocks.chatUnread,
 }));
 
 vi.mock("@/components/nav/more-tab-dropdown", () => ({
@@ -102,7 +102,7 @@ describe("TabsLayout", () => {
     const myIssues = mocks.tabsScreens.find((screen) => screen.name === "my-issues");
     const more = mocks.tabsScreens.find((screen) => screen.name === "more");
     expect(inbox?.options.tabBarBadge).toBe("99+");
-    expect(chat?.options.tabBarBadge).toBe("9+");
+    expect(chat?.options.tabBarBadge).toBe("12");
     expect(more?.options.title).toBe("More");
     expect(mocks.anchorProps).toHaveLength(1);
 

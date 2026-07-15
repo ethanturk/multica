@@ -65,7 +65,7 @@ const (
 	DefaultGCArtifactTTL                  = 12 * time.Hour      // 12h — drop regenerable artifacts on completed but still-open issues
 	DefaultGCCodexSessionTTL              = 14 * 24 * time.Hour // 14 days — reclaim per-issue Codex session stores untouched this long
 	DefaultAutoUpdateCheckInterval        = 6 * time.Hour       // how often the daemon polls GitHub for a newer CLI release
-	DefaultDetToolsTimeout                = 90 * time.Second // per-invocation cap for a deterministic tool
+	DefaultDetToolsTimeout                = 90 * time.Second    // per-invocation cap for a deterministic tool
 	DefaultDetToolsArtifactDir            = ".multica/artifacts"
 	// DefaultPiConfigRelPath is where the daemon writes the pi-mcp-adapter config,
 	// relative to the task work dir. pi-mcp-adapter discovers `.pi/mcp.json` as
@@ -108,7 +108,7 @@ type Config struct {
 	CLIVersion                     string                // multica CLI version (e.g. "0.1.13")
 	LaunchedBy                     string                // "desktop" when spawned by the Electron app, empty for standalone
 	Profile                        string                // profile name (empty = default)
-Agents                         map[string]AgentEntry // keyed by provider: claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, cursor, kimi, kiro, antigravity, dirge, qoder, traecli, grok
+	Agents                         map[string]AgentEntry // keyed by provider: claude, codebuddy, codex, copilot, opencode, deveco, openclaw, hermes, pi, cursor, kimi, kiro, antigravity, dirge, qoder, traecli, grok
 	WorkspacesRoot                 string                // base path for execution envs (default: ~/multica_workspaces)
 	KeepEnvAfterTask               bool                  // preserve env after task for debugging
 	HealthPort                     int                   // local HTTP port for health checks (default: 19514)
@@ -380,7 +380,7 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		agents["grok"] = e
 	}
 	if len(agents) == 0 {
-return Config{}, fmt.Errorf("no agent CLI found: install claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, cursor-agent, kimi, kiro-cli, agy, dirge, qodercli, or traecli and ensure it is on PATH"), deveco, traecli, or grok and ensure it is on PATH")
+		return Config{}, fmt.Errorf("no agent CLI found: install claude, codebuddy, codex, copilot, opencode, deveco, openclaw, hermes, pi, cursor-agent, kimi, kiro-cli, agy, dirge, qodercli, traecli, or grok and ensure it is on PATH")
 	}
 
 	claudeArgs, err := shellArgsFromEnv("MULTICA_CLAUDE_ARGS")
@@ -909,11 +909,9 @@ func isExecutableFile(path string) bool {
 // list to pre-fetch canonical paths for every known agent in a single shell
 // invocation, instead of paying the cost-per-miss.
 var defaultAgentCommandNames = []string{
-"claude", "codex", "opencode", "openclaw", "hermes",
-	"pi", "cursor-agent", "copilot", "kimi", "kiro-cli", "codebuddy", "agy", "dirge", "traecli",
-"claude", "codex", "opencode", "deveco", "openclaw", "hermes",
-	"pi", "cursor-agent", "copilot", "kimi", "kiro-cli", "codebuddy", "agy", "traecli",
-	"pi", "cursor-agent", "copilot", "kimi", "kiro-cli", "codebuddy", "agy", "traecli", "grok",
+	"claude", "codex", "opencode", "deveco", "openclaw", "hermes",
+	"pi", "cursor-agent", "copilot", "kimi", "kiro-cli", "codebuddy",
+	"agy", "dirge", "qodercli", "traecli", "grok",
 }
 
 // codexDesktopAppBundlePaths returns candidate macOS app-bundle locations for
