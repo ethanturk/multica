@@ -458,6 +458,29 @@ func (h *Handler) DeleteRuntimeProfile(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to clean up agent invocation targets")
 			return
 		}
+		// Same app-layer cleanup for channel installations: channel_* has no
+		// workspace/agent FK (MUL-3515 §4), so an archived agent's bot
+		// installations would otherwise survive the hard-delete as orphans and
+		// keep occupying their (channel_type, app_id) routing slots, making those
+		// bots un-rebindable (#4810).
+		if err := qtx.DeleteChannelInstallationsByArchivedRuntimeAgents(r.Context(), rid); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to clean up channel installations")
+			return
+		}
+		// agent_to_label has no agent_id FK; clear the runtime's agents' label
+		// links before the archived agents are hard-deleted so they don't leak
+		// as orphan rows once resource labels are enabled.
+		if err := qtx.DeleteAgentLabelAssignmentsByRuntime(r.Context(), rid); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to clean up agent label assignments")
+			return
+		}
+		// chat_session cascades from agent, and chat_draft_restore has no FK to
+		// follow it (#5219). This path deletes only archived agents, so the prune
+		// is scoped to them too — system agents keep their sessions here.
+		if err := pruneRuntimeAgentChatDraftRestores(r.Context(), qtx, rid, false); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to clean up chat draft restores")
+			return
+		}
 		if err := qtx.DeleteArchivedAgentsByRuntime(r.Context(), rid); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to clean up archived agents")
 			return

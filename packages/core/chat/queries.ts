@@ -1,6 +1,7 @@
 import { infiniteQueryOptions, queryOptions } from "@tanstack/react-query";
 import { api } from "../api";
 import type { TaskMessagePayload } from "../types/events";
+import type { ChatSession } from "../types/chat";
 
 // NOTE on workspace scoping:
 // `wsId` is used only as part of queryKey for cache isolation per workspace.
@@ -20,8 +21,13 @@ export const chatKeys = {
   messagesPage: (sessionId: string) => [...chatKeys.messagesPageAll(), sessionId] as const,
   pendingTaskAll: () => ["chat", "pending-task"] as const,
   pendingTask: (sessionId: string) => [...chatKeys.pendingTaskAll(), sessionId] as const,
+  draftRestoresAll: () => ["chat", "draft-restores"] as const,
+  /** Durable deferred-cancellation draft restores for a session (#5219). */
+  draftRestores: (sessionId: string) => [...chatKeys.draftRestoresAll(), sessionId] as const,
   /** Aggregate of in-flight chat tasks for the current user — FAB reads this. */
   pendingTasks: (wsId: string) => [...chatKeys.all(wsId), "pending-tasks"] as const,
+  /** Per-user pinned agents for the quick-agent bar. */
+  pinnedAgents: (wsId: string) => [...chatKeys.all(wsId), "pinned-agents"] as const,
   /**
    * Boolean "does the user have any in-flight chat task" — the FAB's cheap
    * running indicator. Separate cache from the detailed `pendingTasks` list so
@@ -44,6 +50,50 @@ export function chatSessionsOptions(wsId: string) {
   return queryOptions({
     queryKey: chatKeys.sessions(wsId),
     queryFn: () => api.listChatSessions({ status: "all" }),
+    staleTime: Infinity,
+  });
+}
+
+/** Last-activity timestamp used to rank the IM list (newest first). */
+function sessionActivityTime(s: ChatSession): number {
+  return new Date(s.last_message?.created_at ?? s.updated_at).getTime();
+}
+
+/**
+ * Orders the chat list the same way the server does: pinned chats first, then
+ * everyone else by most-recent activity. Used both to render the list and to
+ * re-sort the cache after an optimistic pin/unpin or a WS patch, so a mutated
+ * flat cache never renders out of order. Returns a new array; stable for equal
+ * keys (Array.prototype.sort is stable), so pinned rows keep their server
+ * order when pin timestamps aren't carried in the list payload.
+ */
+export function sortChatSessions(sessions: ChatSession[]): ChatSession[] {
+  return [...sessions].sort((a, b) => {
+    const ap = a.pinned ? 1 : 0;
+    const bp = b.pinned ? 1 : 0;
+    if (ap !== bp) return bp - ap;
+    return sessionActivityTime(b) - sessionActivityTime(a);
+  });
+}
+
+/**
+ * Number of sessions that should light up the quick-chat FAB unread badge.
+ * `chatSessionsOptions` fetches `status=all` (active + archived) so the thread
+ * list can render an Archived view, but archived sessions must NOT contribute
+ * to the badge: they are read-only and hidden from the default history list, so
+ * a badge sourced from one is uncleared-able — the user can't open it to mark it
+ * read. Archiving now also drops the external-channel binding server-side, so no
+ * new unread should land on an archived session; this filter is the front-end
+ * half of that guarantee (MUL-4372).
+ */
+export function countUnreadChatSessions(sessions: ChatSession[]): number {
+  return sessions.filter((s) => s.has_unread && s.status !== "archived").length;
+}
+
+export function chatPinnedAgentsOptions(wsId: string) {
+  return queryOptions({
+    queryKey: chatKeys.pinnedAgents(wsId),
+    queryFn: () => api.listChatPinnedAgents(),
     staleTime: Infinity,
   });
 }
@@ -90,6 +140,26 @@ export function pendingChatTaskOptions(sessionId: string) {
     queryFn: () => api.getPendingChatTask(sessionId),
     enabled: !!sessionId,
     staleTime: Infinity,
+  });
+}
+
+/**
+ * Durable deferred-cancellation draft restores for a session (#5219).
+ * staleTime 0 deliberately overrides the app-wide Infinity default: this is
+ * the recovery path for a client that MISSED the chat:cancel_finalized
+ * broadcast, so it must actually refetch on every composer mount (an
+ * Infinity-fresh cache would pin the first result forever). WS reconnects
+ * additionally invalidate chatKeys.draftRestoresAll() in useRealtimeSync,
+ * and the initiator's realtime handler invalidates this key when the event
+ * does arrive. The response is tiny (usually empty), so the extra fetches
+ * are negligible.
+ */
+export function chatDraftRestoresOptions(sessionId: string) {
+  return queryOptions({
+    queryKey: chatKeys.draftRestores(sessionId),
+    queryFn: () => api.listChatDraftRestores(sessionId),
+    enabled: !!sessionId,
+    staleTime: 0,
   });
 }
 

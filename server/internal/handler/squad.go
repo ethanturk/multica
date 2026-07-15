@@ -1039,13 +1039,21 @@ func (h *Handler) enqueueSquadLeaderTask(ctx context.Context, issue db.Issue, tr
 		return false
 	}
 
-	// Member authors are their own originator; agent-authored triggers have no
-	// request context here, so the originator is left empty (canInvokeAgent
-	// then fails closed for member/team targets — a workspace target still
-	// admits the agent as a workspace principal).
+	// The gate must judge the SAME top-of-chain human the enqueue path will
+	// persist on the leader task row, or it drifts: an agent-created issue that
+	// correctly inherits its originator (MUL-4305) would still be denied here
+	// if the gate used an empty originator. Member authors are their own
+	// originator; for agent/system-triggered assigns we resolve the originator
+	// exactly like EnqueueTaskForSquadLeader* does (via the issue's origin
+	// link). triggerCommentID is always empty on the assign/promote path, so we
+	// pass an invalid UUID to match. A still-unresolved originator leaves
+	// leaderOriginator empty, which correctly fails closed for member/team
+	// targets while a workspace target still admits the agent principal.
 	leaderOriginator := ""
 	if authorType == "member" {
 		leaderOriginator = authorID
+	} else {
+		leaderOriginator = uuidToString(h.TaskService.OriginatorForIssueTask(ctx, issue, pgtype.UUID{}))
 	}
 	if !h.canEnqueueSquadLeader(ctx, squad.LeaderID, authorType, authorID, leaderOriginator, uuidToString(issue.WorkspaceID)) {
 		return false
@@ -1064,7 +1072,10 @@ func (h *Handler) enqueueSquadLeaderTask(ctx context.Context, issue db.Issue, tr
 	// triggerCommentID is always empty on the assign/promote path; the handoff
 	// note rides its own task column, never trigger_comment_id.
 	_ = triggerCommentID
-	if _, err := h.TaskService.EnqueueTaskForSquadLeaderWithHandoff(ctx, issue, squad.LeaderID, squad.ID, handoffNote); err != nil {
+	// The member who performed the assign/promote is the accountable human for the
+	// leader run (MUL-4302 §4) — the same principal the gate above judged. An agent
+	// author is not a human, so only a member actor is threaded.
+	if _, err := h.TaskService.EnqueueTaskForSquadLeaderWithHandoff(ctx, issue, squad.LeaderID, squad.ID, handoffNote, memberActorUserID(authorType, authorID)); err != nil {
 		slog.Warn("enqueue squad leader task failed",
 			"issue_id", uuidToString(issue.ID),
 			"squad_id", uuidToString(squad.ID),
