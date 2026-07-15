@@ -5,9 +5,13 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@multica/ui/components/ui/dropdown-menu";
 import { useModalStore } from "@multica/core/modals";
+import { useConfigStore } from "@multica/core/config";
+import { DISCORD_URL, DiscordIcon } from "./discord";
 import { useT } from "../i18n";
 
 const DOCS_URL = "https://multica.ai/docs";
@@ -15,6 +19,7 @@ const CHANGELOG_URL = "https://multica.ai/changelog";
 
 export function HelpLauncher() {
   const { t } = useT("layout");
+  const serverVersion = useConfigStore((state) => state.serverVersion);
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
@@ -53,11 +58,28 @@ export function HelpLauncher() {
           <ArrowUpRight className="size-3 translate-y-px text-muted-foreground/50" />
         </DropdownMenuItem>
         <DropdownMenuItem
+          render={
+            <a href={DISCORD_URL} target="_blank" rel="noopener noreferrer" />
+          }
+        >
+          <DiscordIcon className="h-3.5 w-3.5" />
+          {t(($) => $.help.discord)}
+          <ArrowUpRight className="size-3 translate-y-px text-muted-foreground/50" />
+        </DropdownMenuItem>
+        <DropdownMenuItem
           onClick={() => useModalStore.getState().open("feedback")}
         >
           <MessageCircle className="h-3.5 w-3.5" />
           {t(($) => $.help.feedback)}
         </DropdownMenuItem>
+        {serverVersion && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel className="font-normal">
+              {t(($) => $.help.server_version, { version: serverVersion })}
+            </DropdownMenuLabel>
+          </>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );

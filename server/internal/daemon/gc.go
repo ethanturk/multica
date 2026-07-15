@@ -54,6 +54,7 @@ type gcStats struct {
 	skipped         int            // task dirs left untouched
 	artifactDirs    int            // task dirs that had at least one artifact reclaimed
 	artifactRemoved int            // count of removed artifact subdirs
+	storesReclaimed int            // per-issue Codex session stores reclaimed past their TTL
 	bytesReclaimed  int64          // total bytes freed in this cycle
 	byPattern       map[string]int // basename -> reclaim count, for visibility
 }
@@ -82,13 +83,22 @@ func (d *Daemon) runGC(ctx context.Context) {
 	// Prune stale worktree references from all bare repo caches.
 	d.pruneRepoWorktrees(root)
 
-	if stats.cleaned > 0 || stats.orphaned > 0 || stats.artifactDirs > 0 {
+	// Reclaim per-issue Codex session stores idle past their TTL. These live
+	// under the shared ~/.codex home (outside WorkspacesRoot) so resume survives
+	// the task GC, which means they need their own bounded lifecycle (MUL-4424).
+	if storesRemoved, storeBytes := execenv.PruneCodexSessionStores(d.cfg.Profile, d.cfg.GCCodexSessionTTL, time.Now(), d.reserveCodexStoreForDeletion, d.logger); storesRemoved > 0 {
+		stats.storesReclaimed += storesRemoved
+		stats.bytesReclaimed += storeBytes
+	}
+
+	if stats.cleaned > 0 || stats.orphaned > 0 || stats.artifactDirs > 0 || stats.storesReclaimed > 0 {
 		d.logger.Info("gc: cycle complete",
 			"cleaned", stats.cleaned,
 			"orphaned", stats.orphaned,
 			"skipped", stats.skipped,
 			"artifact_dirs", stats.artifactDirs,
 			"artifact_removed", stats.artifactRemoved,
+			"codex_session_stores_reclaimed", stats.storesReclaimed,
 			"bytes_reclaimed", stats.bytesReclaimed,
 			"by_pattern", stats.byPattern,
 		)
@@ -366,24 +376,24 @@ func (d *Daemon) gcDecisionAutopilotRun(ctx context.Context, taskDir string, met
 	//                              dead weight from here on.
 	// Non-terminal: pending, running. Skip until they reach a terminal state
 	// rather than trying to bound them by mtime — long autopilots are real.
+	//
+	// An autopilot run's workdir is never reused: unlike issue/chat tasks there
+	// is no PriorWorkDir path that hands a later run the same directory, so every
+	// run gets a fresh one. Whatever the run produced already lives server-side
+	// (and an issue_created run handed its work to an issue task that owns its own
+	// envRoot). So the moment the run reaches a terminal state the directory is
+	// dead weight and we reclaim it immediately, without waiting out GCTTL — the
+	// same reasoning gcDecisionQuickCreate applies to quick-create dirs. The
+	// active-env-root short-circuit in shouldCleanTaskDir still protects a run
+	// that is mid-flight, so this can't pull the rug from under live work.
 	if isAutopilotRunTerminal(status.Status) {
-		anchor := status.CompletedAt
-		if anchor.IsZero() {
-			// Defensive: terminal status without completed_at means the
-			// run finished but the column wasn't stamped (older code path).
-			// Fall back to the meta's CompletedAt so we still GC eventually.
-			anchor = meta.CompletedAt
-		}
-		if !anchor.IsZero() && time.Since(anchor) > d.cfg.GCTTL {
-			d.logger.Info("gc: eligible for cleanup",
-				"dir", filepath.Base(taskDir),
-				"kind", "autopilot_run",
-				"autopilot_run", meta.AutopilotRunID,
-				"status", status.Status,
-				"completed_at", anchor.Format(time.RFC3339),
-			)
-			return gcActionClean
-		}
+		d.logger.Info("gc: eligible for cleanup",
+			"dir", filepath.Base(taskDir),
+			"kind", "autopilot_run",
+			"autopilot_run", meta.AutopilotRunID,
+			"status", status.Status,
+		)
+		return gcActionClean
 	}
 	return gcActionSkip
 }

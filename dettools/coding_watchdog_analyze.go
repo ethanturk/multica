@@ -14,7 +14,7 @@ import (
 //   - state: coding-team state object with tasks[].
 //   - task_comments: object keyed by task_issue_id, each value an array of comments.
 //   - master_comments: array of master issue comments.
-//   - agent_ids: object keyed by planner, implementer, test_writer, reviewer, orchestrator.
+//   - agent_ids: object keyed by guided_planner, planner, implementer, test_writer, reviewer, refiner, orchestrator.
 //   - now: RFC3339 time used for the 5-minute stale-comment check.
 //   - assume_stale_without_timestamps: optional bool, default false.
 //
@@ -36,6 +36,33 @@ func Run(input map[string]any) map[string]any {
 	patches := []any{}
 	skips := []any{}
 	scanned := 0
+
+	// If the master pipeline is waiting for human action (push/pause), no agent
+	// handoffs are expected — all task work is complete and the user is the
+	// bottleneck. Skip every task to avoid noise (agents getting mentioned for a
+	// handoff that can't be fulfilled).
+	masterStage := str(state["stage"])
+	if masterStage == "push" || masterStage == "pause" {
+		for _, rawTask := range tasks {
+			taskID := str(object(rawTask)["task_issue_id"])
+			skips = append(skips, skip(taskID, "master pipeline is in human-gate stage: "+masterStage))
+		}
+		return map[string]any{
+			"status":  "ok",
+			"summary": fmt.Sprintf("master pipeline is in %s stage (human gate): no handoff recovery needed", masterStage),
+			"machine_data": map[string]any{
+				"actions":       actions,
+				"state_patches": patches,
+				"skipped":       len(skips),
+				"scanned":       0,
+				"recovered":     0,
+				"skips":         skips,
+			},
+		}
+	}
+	if masterStage == "guided_planning" {
+		return analyzeGuidedPlanning(masterIssueID, state, masterComments, agentIDs, now, assumeStale, actions, patches, skips)
+	}
 
 	for _, rawTask := range tasks {
 		task := object(rawTask)
@@ -74,7 +101,7 @@ func Run(input map[string]any) map[string]any {
 			skips = append(skips, skip(taskID, "expected task notification already exists"))
 			continue
 		}
-		if stage == "review_passed" && hasMasterTaskComplete(masterComments, taskID, agentID) {
+		if stage == "review_passed" && hasMasterTaskComplete(masterComments, taskID, "") {
 			skips = append(skips, skip(taskID, "expected master TASK_COMPLETE notification already exists"))
 			patches = append(patches, map[string]any{"task_issue_id": taskID, "status": "committed"})
 			continue
@@ -91,6 +118,53 @@ func Run(input map[string]any) map[string]any {
 	return map[string]any{
 		"status":  "ok",
 		"summary": fmt.Sprintf("Analyzed %d active task(s); found %d recovery action(s)", scanned, len(actions)),
+		"machine_data": map[string]any{
+			"actions":       actions,
+			"state_patches": patches,
+			"skips":         skips,
+			"scanned":       scanned,
+			"recovered":     len(actions),
+			"skipped":       len(skips),
+		},
+	}
+}
+
+func analyzeGuidedPlanning(masterIssueID string, state map[string]any, masterComments []any, agentIDs map[string]any, now time.Time, assumeStale bool, actions, patches, skips []any) map[string]any {
+	const scanned = 1
+	guidedPlan := object(state["guided_plan"])
+	if len(object(guidedPlan["current_question"])) > 0 {
+		skips = append(skips, skip(masterIssueID, "guided planning is waiting on a user answer"))
+		return guidedResult(actions, patches, skips, scanned)
+	}
+	agentID := str(agentIDs["guided_planner"])
+	if agentID == "" {
+		skips = append(skips, skip(masterIssueID, "missing agent id for guided_planner"))
+		return guidedResult(actions, patches, skips, scanned)
+	}
+	if !latestCommentIsStale(masterComments, now, assumeStale) {
+		skips = append(skips, skip(masterIssueID, "latest master comment is not at least 5 minutes old"))
+		return guidedResult(actions, patches, skips, scanned)
+	}
+	if hasExpectedNotification(masterComments, 0, agentID) {
+		skips = append(skips, skip(masterIssueID, "expected guided planner notification already exists"))
+		return guidedResult(actions, patches, skips, scanned)
+	}
+	actions = append(actions, map[string]any{
+		"type":            "master_handoff_comment",
+		"target_issue_id": masterIssueID,
+		"task_issue_id":   "",
+		"stage":           "guided_planning",
+		"role":            "guided_planner",
+		"agent_id":        agentID,
+		"content":         "Watchdog re-issuing handoff - original notification appears to have been lost.\n\n" + mention("guided_planner", agentID) + "\n\nPlease continue guided planning for this master issue.",
+	})
+	return guidedResult(actions, patches, skips, scanned)
+}
+
+func guidedResult(actions, patches, skips []any, scanned int) map[string]any {
+	return map[string]any{
+		"status":  "ok",
+		"summary": fmt.Sprintf("Analyzed guided planning; found %d recovery action(s)", len(actions)),
 		"machine_data": map[string]any{
 			"actions":       actions,
 			"state_patches": patches,
@@ -139,7 +213,7 @@ func nextRoleForStage(stage string) string {
 	case "tests_done":
 		return "reviewer"
 	case "review_passed":
-		return "orchestrator"
+		return "refiner"
 	default:
 		return ""
 	}
@@ -150,9 +224,7 @@ func recoveryAction(masterID, taskID, stage, role, agentID string) map[string]an
 	actionType := "task_handoff_comment"
 	content := "Watchdog re-issuing handoff - original notification appears to have been lost.\n\n" + mention(role, agentID)
 	if stage == "review_passed" {
-		target = masterID
-		actionType = "master_task_complete_comment"
-		content = mention(role, agentID) + "\n\nTASK_COMPLETE\ntask_issue_id: " + taskID + "\nstatus: committed"
+		content = "Watchdog re-issuing handoff - original notification appears to have been lost.\n\n" + mention(role, agentID) + "\n\nReview passed. Please run the post-review refinement pass."
 	}
 	action := map[string]any{
 		"type":            actionType,
@@ -199,7 +271,7 @@ func hasMasterTaskComplete(comments []any, taskID, agentID string) bool {
 	mentionNeedle := "mention://agent/" + agentID
 	for _, raw := range comments {
 		body := commentBody(raw)
-		if strings.Contains(body, mentionNeedle) &&
+		if (agentID == "" || strings.Contains(body, mentionNeedle)) &&
 			strings.Contains(body, "TASK_COMPLETE") &&
 			strings.Contains(body, "task_issue_id: "+taskID) &&
 			(strings.Contains(body, "status: committed") || strings.Contains(body, "status: done")) {
@@ -239,11 +311,13 @@ func parseNow(raw string) time.Time {
 
 func mention(role, id string) string {
 	name := map[string]string{
-		"planner":      "Coding Team Planner",
-		"implementer":  "Coding Team Implementer",
-		"test_writer":  "Coding Team Test Writer",
-		"reviewer":     "Coding Team Reviewer",
-		"orchestrator": "Coding Team Orchestrator",
+		"guided_planner": "Coding Team Guided Planner",
+		"planner":        "Coding Team Planner",
+		"implementer":    "Coding Team Implementer",
+		"test_writer":    "Coding Team Test Writer",
+		"reviewer":       "Coding Team Reviewer",
+		"refiner":        "Coding Team Refiner",
+		"orchestrator":   "Coding Team Orchestrator",
 	}[role]
 	return "[@" + name + "](mention://agent/" + id + ")"
 }

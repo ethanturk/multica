@@ -43,10 +43,12 @@ Call shape:
   "task_comments": {"task issue id": []},
   "master_comments": [],
   "agent_ids": {
+    "guided_planner": "...",
     "planner": "...",
     "implementer": "...",
     "test_writer": "...",
     "reviewer": "...",
+    "refiner": "...",
     "orchestrator": "..."
   },
   "now": "2026-06-09T10:06:00Z"
@@ -79,7 +81,7 @@ multica issue update "$MULTICA_ISSUE_ID" --title "Coding Team Watchdog Scan"
 
 ### 2. Find Active Master Issues First
 
-This step comes before resolving pipeline handoff agent IDs. If there are no active master issues, do not resolve Planner/Implementer/Test Writer/Reviewer/Orchestrator IDs and do not run any additional issue-list queries.
+This step comes before resolving pipeline handoff agent IDs. If there are no active master issues, do not resolve Guided Planner/Planner/Implementer/Test Writer/Reviewer/Refiner/Orchestrator IDs and do not run any additional issue-list queries.
 
 Use only Orchestrator-assigned in-progress issues:
 
@@ -132,21 +134,24 @@ Exact names:
 
 | Role | Agent name |
 | --- | --- |
+| Guided Planner | `Coding Team Guided Planner` |
 | Planner | `Coding Team Planner` |
 | Implementer | `Coding Team Implementer` |
 | Test Writer | `Coding Team Test Writer` |
 | Reviewer | `Coding Team Reviewer` |
+| Refiner | `Coding Team Refiner` |
 | Orchestrator | `Coding Team Orchestrator` |
 
 ### 4. Analyze Active Masters With `coding_watchdog_analyze`
 
 For each active master issue:
 
-1. Iterate `state.tasks[]`; task issues come only from `task_issue_id` in master state.
-2. Skip tasks whose state is `committed`, `done`, `failed`, or `awaiting_clarification`, or whose `task_issue_id` is empty.
-3. Fetch each remaining task's comments with `multica issue comment list "$TASK_ISSUE_ID" --output json`.
-4. Fetch master comments once when any task may need review-pass recovery.
-5. Call `coding_watchdog_analyze` with the state, task comments, master comments, resolved agent IDs, and current time.
+1. If `stage == "guided_planning"` and `guided_plan.current_question` is empty, the deterministic tool may return a master-level handoff recovery action for Coding Team Guided Planner. Execute it like any other returned action.
+2. Iterate `state.tasks[]`; task issues come only from `task_issue_id` in master state.
+3. Skip tasks whose state is `committed`, `done`, `failed`, or `awaiting_clarification`, or whose `task_issue_id` is empty. Also skip the entire master issue when its pipeline stage is `push` or `pause` — these are intentional human-gate states where all task work is complete and no agent handoff is expected. Re-issuing notifications in these states creates noise (agents get mentioned for a handoff that can't be fulfilled until the user acts).
+4. Fetch each remaining task's comments with `multica issue comment list "$TASK_ISSUE_ID" --output json`.
+5. Fetch master comments once when any task may need review-pass recovery or when the master is in `guided_planning`.
+6. Call `coding_watchdog_analyze` with the state, task comments, master comments, resolved agent IDs, and current time.
 
 Do not reimplement marker ordering, dropped-handoff detection, or state-patch calculation in the skill. If `coding_watchdog_analyze` is unavailable, stop and report that the deterministic tool plane is not enabled.
 

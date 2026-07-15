@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,7 +27,7 @@ func runWatchdog(t *testing.T, input map[string]any) dettools.Result {
 	return RunSubprocess(context.Background(), os.Args[0], src, input, 3*time.Second)
 }
 
-func TestCodingWatchdogAnalyze_ReviewPassedRecoveryIncludesIssueDoneStatus(t *testing.T) {
+func TestCodingWatchdogAnalyze_ReviewPassedRecoveryRoutesToRefiner(t *testing.T) {
 	res := runWatchdog(t, map[string]any{
 		"master_issue_id": "master-1",
 		"state": map[string]any{
@@ -42,7 +43,7 @@ func TestCodingWatchdogAnalyze_ReviewPassedRecoveryIncludesIssueDoneStatus(t *te
 		},
 		"master_comments": []any{},
 		"agent_ids": map[string]any{
-			"orchestrator": "orch-1",
+			"refiner": "ref-1",
 		},
 		"now":                             "2026-06-14T10:06:00Z",
 		"assume_stale_without_timestamps": true,
@@ -62,29 +63,90 @@ func TestCodingWatchdogAnalyze_ReviewPassedRecoveryIncludesIssueDoneStatus(t *te
 	if !ok {
 		t.Fatalf("action wrong type: %#v", actions[0])
 	}
-	if action["type"] != "master_task_complete_comment" {
-		t.Fatalf("expected master_task_complete_comment, got %#v", action["type"])
+	if action["type"] != "task_handoff_comment" {
+		t.Fatalf("expected task_handoff_comment, got %#v", action["type"])
 	}
-	if action["issue_status"] != "done" {
-		t.Fatalf("expected watchdog to request done task status, got %#v", action["issue_status"])
+	if action["target_issue_id"] != "task-1" {
+		t.Fatalf("expected task target, got %#v", action["target_issue_id"])
 	}
+	content, _ := action["content"].(string)
+	if !strings.Contains(content, "mention://agent/ref-1") {
+		t.Fatalf("expected refiner mention, got %#v", content)
+	}
+}
 
-	patches, ok := res.MachineData["state_patches"].([]any)
+func TestCodingWatchdogAnalyze_GuidedPlanningRecoveryRoutesToGuidedPlanner(t *testing.T) {
+	res := runWatchdog(t, map[string]any{
+		"master_issue_id": "master-1",
+		"state": map[string]any{
+			"stage": "guided_planning",
+			"guided_plan": map[string]any{
+				"current_question": map[string]any{},
+			},
+			"tasks": []any{},
+		},
+		"task_comments":   map[string]any{},
+		"master_comments": []any{},
+		"agent_ids": map[string]any{
+			"guided_planner": "gp-1",
+		},
+		"now":                             "2026-06-14T10:06:00Z",
+		"assume_stale_without_timestamps": true,
+	})
+
+	if res.Status != dettools.StatusOK {
+		t.Fatalf("status=%q summary=%q", res.Status, res.Summary)
+	}
+	actions, ok := res.MachineData["actions"].([]any)
 	if !ok {
-		t.Fatalf("state_patches missing or wrong type: %#v", res.MachineData["state_patches"])
+		t.Fatalf("actions missing or wrong type: %#v", res.MachineData["actions"])
 	}
-	if len(patches) != 1 {
-		t.Fatalf("expected 1 patch, got %d: %#v", len(patches), patches)
+	if len(actions) != 1 {
+		t.Fatalf("expected 1 action, got %d: %#v", len(actions), actions)
 	}
-	first, ok := patches[0].(map[string]any)
+	action, ok := actions[0].(map[string]any)
 	if !ok {
-		t.Fatalf("patch wrong type: %#v", patches[0])
+		t.Fatalf("action wrong type: %#v", actions[0])
 	}
-	if first["task_issue_id"] != "task-1" {
-		t.Fatalf("expected task-1 patch, got %#v", first["task_issue_id"])
+	if action["type"] != "master_handoff_comment" {
+		t.Fatalf("expected master_handoff_comment, got %#v", action["type"])
 	}
-	if first["status"] != "committed" {
-		t.Fatalf("expected committed patch status, got %#v", first["status"])
+	if action["target_issue_id"] != "master-1" {
+		t.Fatalf("expected master target, got %#v", action["target_issue_id"])
+	}
+	content, _ := action["content"].(string)
+	if !strings.Contains(content, "mention://agent/gp-1") {
+		t.Fatalf("expected guided planner mention, got %#v", content)
+	}
+}
+
+func TestCodingWatchdogAnalyze_GuidedPlanningWithCurrentQuestionDoesNotRecover(t *testing.T) {
+	res := runWatchdog(t, map[string]any{
+		"master_issue_id": "master-1",
+		"state": map[string]any{
+			"stage": "guided_planning",
+			"guided_plan": map[string]any{
+				"current_question": map[string]any{"question": "Which scope?"},
+			},
+			"tasks": []any{},
+		},
+		"task_comments":   map[string]any{},
+		"master_comments": []any{},
+		"agent_ids": map[string]any{
+			"guided_planner": "gp-1",
+		},
+		"now": "2026-06-14T10:06:00Z",
+	})
+
+	if res.Status != dettools.StatusOK {
+		t.Fatalf("status=%q summary=%q", res.Status, res.Summary)
+	}
+	actions, ok := res.MachineData["actions"].([]any)
+	if !ok {
+		t.Fatalf("actions missing or wrong type: %#v", res.MachineData["actions"])
+	}
+	if len(actions) != 0 {
+		t.Fatalf("expected 0 actions, got %d: %#v", len(actions), actions)
 	}
 }
 
@@ -105,6 +167,7 @@ func TestCodingWatchdogAnalyze_SkipsDoneStatusTasks(t *testing.T) {
 		"master_comments": []any{},
 		"agent_ids": map[string]any{
 			"orchestrator": "orch-1",
+			"refiner":      "ref-1",
 		},
 		"now": "2026-06-14T10:06:00Z",
 	})
@@ -147,6 +210,7 @@ func TestCodingWatchdogAnalyze_ReviewCompleteMasterCommentWithDoneStatusIsIdempo
 		},
 		"agent_ids": map[string]any{
 			"orchestrator": "orch-1",
+			"refiner":      "ref-1",
 		},
 		"now": "2026-06-14T10:06:00Z",
 	})

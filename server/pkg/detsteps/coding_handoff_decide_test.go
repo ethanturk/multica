@@ -38,6 +38,7 @@ func agentIDsForTest() map[string]any {
 		"reviewer":     "rev-1",
 		"orchestrator": "orch-1",
 		"pr_writer":    "prw-1",
+		"refiner":      "ref-1",
 	}
 }
 
@@ -247,6 +248,36 @@ func TestCodingHandoffDecide_ReviewerPassPrefersPRWriter(t *testing.T) {
 	dec := decisionData(res)
 	if got := dec["next_role"]; got != "pr_writer" {
 		t.Fatalf("next_role=%v, want pr_writer", got)
+	}
+}
+
+func TestCodingHandoffDecide_ReviewerPassPrefersRefiner(t *testing.T) {
+	res := runDecision(t, map[string]any{
+		"current_role":    "reviewer",
+		"task_issue_id":   "task-9b",
+		"master_issue_id": "master-9b",
+		"task_comments": []any{
+			comment("## Implementation Complete"),
+			comment("## Tests Written"),
+			comment("## Review: PASS"),
+		},
+		"agent_ids": agentIDsForTest(),
+		"options": map[string]any{
+			"prefer_refiner_after_review_pass": true,
+		},
+	})
+	if res.Status != dettools.StatusOK {
+		t.Fatalf("status=%q summary=%q", res.Status, res.Summary)
+	}
+	dec := decisionData(res)
+	if got := dec["next_role"]; got != "refiner" {
+		t.Fatalf("next_role=%v, want refiner", got)
+	}
+	if got := dec["target_issue_id"]; got != "task-9b" {
+		t.Fatalf("target_issue_id=%v, want task-9b", got)
+	}
+	if got := dec["target_status"]; got != "refining" {
+		t.Fatalf("target_status=%v, want refining", got)
 	}
 }
 

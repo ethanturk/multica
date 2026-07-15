@@ -74,7 +74,7 @@ execution path to JSONL by default:
 - default path: `~/.multica/agent-improvement-loop/stage1-events.jsonl`
 - env override: `MULTICA_AIL_STAGE1_EVENTS_PATH`
 - toggle: `MULTICA_AIL_STAGE1_ENABLED=false` (opt-out, only for incidents)
-- emit-category override: `MULTICA_AIL_STAGE1_EMIT_CATEGORIES` (comma or space separated) 
+- emit-category override: `MULTICA_AIL_STAGE1_EMIT_CATEGORIES` (comma or space separated)
   defaults to `agent_event,attempt_event,failure_event`
 
 Canonical event categories:

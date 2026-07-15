@@ -40,6 +40,7 @@ const mockDraftStore = {
     assigneeId: undefined as string | undefined,
     startDate: null,
     dueDate: null,
+    labelIds: [] as string[],
     attachments: [] as Array<{
       id: string;
       workspace_id: string;
@@ -90,6 +91,33 @@ vi.mock("@multica/core/issues/queries", () => ({
     queryKey: ["issues", wsId, "detail", id],
     queryFn: () => Promise.resolve(null),
   }),
+  childIssuesOptions: (wsId: string, id: string) => ({
+    queryKey: ["issues", wsId, "children", id],
+    queryFn: () => Promise.resolve([]),
+  }),
+}));
+
+// CreateRunHint's pre-trigger preview + actor-name lookup are exercised in
+// their own suites; here we only need the create form to render without query
+// infra, so stub them to the inert "no run will start" state.
+vi.mock("../issues/hooks/use-issue-trigger-preview", () => ({
+  useIssueTriggerPreview: () => ({
+    triggers: [],
+    totalCount: 0,
+    isLoading: false,
+    handoffSupported: false,
+  }),
+}));
+
+vi.mock("@multica/core/workspace/hooks", () => ({
+  useActorName: () => ({ getActorName: () => "Agent" }),
+}));
+
+// CreateRunHint now renders an ActorAvatar for agent/squad assignees. This
+// suite is about the create form, not the avatar (whose own workspace/presence/
+// navigation hook tree is exercised elsewhere), so stub it inert.
+vi.mock("../common/actor-avatar", () => ({
+  ActorAvatar: () => null,
 }));
 
 vi.mock("@multica/core/issues/stores/draft-store", () => ({
@@ -210,6 +238,7 @@ vi.mock("../issues/components", () => ({
   StatusIcon: ({ status }: { status: string }) => <span data-testid="status-icon">{status}</span>,
   StatusPicker: () => <div data-testid="status-picker" />,
   PriorityPicker: () => <div data-testid="priority-picker" />,
+  StagePicker: () => <div data-testid="stage-picker" />,
   AssigneePicker: () => <div data-testid="assignee-picker" />,
   // Surface open/onOpenChange so tests can assert progressive-disclosure
   // behavior (mounted only when the user has opted in or has a value).
@@ -220,7 +249,16 @@ vi.mock("../issues/components", () => ({
       onClick={() => onOpenChange?.(false)}
     />
   ),
-  DueDatePicker: () => <div data-testid="due-date-picker" />,
+  // Due date now shares the start-date overflow pattern, so surface
+  // open/onOpenChange to assert it too.
+  DueDatePicker: ({ open, onOpenChange }: { open?: boolean; onOpenChange?: (v: boolean) => void }) => (
+    <div
+      data-testid="due-date-picker"
+      data-open={open ? "true" : "false"}
+      onClick={() => onOpenChange?.(false)}
+    />
+  ),
+  LabelPicker: () => <div data-testid="label-picker" />,
 }));
 
 vi.mock("../projects/components/project-picker", () => ({
@@ -343,6 +381,7 @@ describe("CreateIssueModal", () => {
     mockDraftStore.draft.assigneeId = undefined;
     mockDraftStore.draft.startDate = null;
     mockDraftStore.draft.dueDate = null;
+    mockDraftStore.draft.labelIds = [];
     mockDraftStore.draft.attachments = [];
     mockSetDraft.mockImplementation((patch: Partial<typeof mockDraftStore.draft>) => {
       mockDraftStore.draft = { ...mockDraftStore.draft, ...patch };
@@ -357,6 +396,7 @@ describe("CreateIssueModal", () => {
         assigneeId: mockDraftStore.lastAssigneeId,
         startDate: null,
         dueDate: null,
+        labelIds: [],
         attachments: [],
       };
     });
@@ -473,6 +513,7 @@ describe("CreateIssueModal", () => {
       assigneeId: undefined,
       startDate: null,
       dueDate: null,
+      labelIds: [],
       attachments: [],
     });
   });
@@ -596,8 +637,6 @@ describe("CreateIssueModal", () => {
         onSwitchMode={onSwitchMode}
         isExpanded={false}
         setIsExpanded={vi.fn()}
-        backlogHintIssueId={null}
-        setBacklogHintIssueId={vi.fn()}
       />,
     );
 
@@ -714,8 +753,6 @@ describe("CreateIssueModal", () => {
         data={{ project_id: "proj-1" }}
         isExpanded={false}
         setIsExpanded={vi.fn()}
-        backlogHintIssueId={null}
-        setBacklogHintIssueId={vi.fn()}
       />,
     );
 
@@ -758,8 +795,6 @@ describe("CreateIssueModal", () => {
         }}
         isExpanded={false}
         setIsExpanded={vi.fn()}
-        backlogHintIssueId={null}
-        setBacklogHintIssueId={vi.fn()}
       />,
     );
 
@@ -797,6 +832,35 @@ describe("CreateIssueModal", () => {
     expect(screen.queryByTestId("start-date-picker")).not.toBeInTheDocument();
   });
 
+  it("exposes the label picker on the toolbar and keeps due date in the overflow menu", async () => {
+    renderModal(<CreateIssueModal onClose={vi.fn()} />);
+
+    // Label entry is now surfaced directly on the dialog...
+    expect(screen.getByTestId("label-picker")).toBeInTheDocument();
+    // ...while due date is collapsed into the ⋯ menu (no inline pill yet).
+    expect(screen.queryByTestId("due-date-picker")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Set due date/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("hides due date behind the overflow menu and reveals it on demand", async () => {
+    const user = userEvent.setup();
+
+    renderModal(<CreateIssueModal onClose={vi.fn()} />);
+
+    expect(screen.queryByTestId("due-date-picker")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Set due date/i }));
+
+    const picker = await screen.findByTestId("due-date-picker");
+    expect(picker).toHaveAttribute("data-open", "true");
+
+    await user.click(picker);
+
+    expect(screen.queryByTestId("due-date-picker")).not.toBeInTheDocument();
+  });
+
   // Title + description are packed into the agent prompt on switch; if we
   // leave them in the shared draft store, the next agent→manual switch
   // surfaces the stale manual draft on top of the prompt-as-description,
@@ -810,8 +874,6 @@ describe("CreateIssueModal", () => {
         onSwitchMode={vi.fn()}
         isExpanded={false}
         setIsExpanded={vi.fn()}
-        backlogHintIssueId={null}
-        setBacklogHintIssueId={vi.fn()}
       />,
     );
 

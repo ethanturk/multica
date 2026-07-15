@@ -1,7 +1,9 @@
 // Package agent provides a unified interface for executing prompts via
 // coding agents (Claude Code, CodeBuddy, Codex, Copilot, OpenCode, OpenClaw,
-// Hermes, Gemini, Pi, Cursor, Kimi, Kiro, Antigravity). It mirrors the happy-cli
-// AgentBackend pattern, translated to idiomatic Go.
+// Hermes, Pi, Cursor, Kimi, Kiro, Antigravity, Dirge, Qoder). It mirrors the
+// coding agents (Claude Code, CodeBuddy, Codex, Copilot, OpenCode, DevEco Code,
+// OpenClaw, Hermes, Pi, Cursor, Kimi, Kiro, Antigravity, Qoder, Trae, Grok). It
+// mirrors the happy-cli AgentBackend pattern, translated to idiomatic Go.
 package agent
 
 import (
@@ -32,18 +34,30 @@ type ExecOptions struct {
 	MaxTurns                  int
 	Timeout                   time.Duration
 	SemanticInactivityTimeout time.Duration
-	ResumeSessionID           string          // if non-empty, resume a previous agent session
-	ExtraArgs                 []string        // daemon-wide default CLI arguments appended before CustomArgs; currently read by claude and codex backends only
-	CustomArgs                []string        // per-agent CLI arguments appended after ExtraArgs
-	McpConfig                 json.RawMessage // if non-nil, MCP server config to pass via --mcp-config
+	// HandshakeTimeout bounds startup RPCs for providers with a long-lived
+	// protocol transport. It is currently consumed by Codex app-server;
+	// zero uses the provider default rather than disabling the bound.
+	HandshakeTimeout time.Duration
+	ResumeSessionID  string // if non-empty, resume a previous agent session
+	// ResumeExpected records that this task intended to continue a prior
+	// conversation, independent of ResumeSessionID (which a fallback retry may
+	// clear). When it is true but the backend ends up on a fresh thread — the
+	// live resume RPC was rejected, or a transport failure forced a fresh retry —
+	// the backend surfaces a continuity notice to the user instead of silently
+	// restarting. Currently honoured by the codex backend (MUL-4424).
+	ResumeExpected bool
+	ExtraArgs      []string        // daemon-wide default CLI arguments appended before CustomArgs; currently read by claude and codex backends only
+	CustomArgs     []string        // per-agent CLI arguments appended after ExtraArgs
+	McpConfig      json.RawMessage // if non-nil, MCP server config to pass via --mcp-config
 	// ThinkingLevel is the runtime-native reasoning/effort value (e.g.
 	// Claude's "low|medium|high|xhigh|max", Codex's "none|minimal|low|
 	// medium|high|xhigh", OpenCode's model variant names). Empty means
 	// "use the runtime/model default" —
 	// every backend that consumes this skips its --effort / reasoning_effort
 	// injection so the upstream CLI's own default applies. Currently honoured
-	// by the claude, codex, and opencode backends; other backends ignore the
-	// field rather than fail (so MUL-2339 can grow runtime support
+	// by the claude, codex, opencode, codebuddy, and grok (ACP
+	// `--effort` on `grok agent`) backends; other backends ignore
+	// the field rather than fail (so MUL-2339 can grow runtime support
 	// incrementally without breaking unrelated agents).
 	ThinkingLevel string
 	// OpenclawMode chooses between local (embedded) and gateway routing for
@@ -127,13 +141,58 @@ type Result struct {
 
 // Config configures a Backend instance.
 type Config struct {
-	ExecutablePath string            // path to CLI binary (claude, codebuddy, codex, copilot, opencode, openclaw, hermes, gemini, pi, cursor, kimi, kiro-cli, agy)
+ExecutablePath string            // path to CLI binary (claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, cursor, kimi, kiro-cli, agy, dirge, qodercli), qodercli, traecli, grok)
 	Env            map[string]string // extra environment variables
 	Logger         *slog.Logger
 }
 
 // New creates a Backend for the given agent type.
-// Supported types: "claude", "codebuddy", "codex", "copilot", "opencode", "openclaw", "hermes", "gemini", "pi", "omp", "cursor", "kimi", "kiro", "antigravity".
+// Supported types: "claude", "codebuddy", "codex", "copilot", "opencode", "openclaw", "hermes", "pi", "cursor", "kimi", "kiro", "antigravity", "dirge", "qoder", "traecli"., "deveco", "traecli", "grok".
+//
+// SupportedTypes is the canonical whitelist of agent types eligible to back a
+// custom runtime profile. It MUST stay in lockstep with the
+// runtime_profile.protocol_family CHECK constraint (migration 120, widened by
+// migration 134 to add qoder, migration 136 to add traecli, migration 175 to
+// add deveco, and migration 179 to add grok): a custom runtime profile may only
+// be based on a backend Multica officially supports.
+// qoder is exposed here so Qoder CN (`qoderclicn`) users can point the Qoder
+// backend at a non-default binary instead of misrouting through Kiro/ACP with
+// incompatible arguments (#4883). traecli (Trae) has a New backend, launch
+// header and provider branding but was previously missing from this whitelist,
+// so the family picker rejected it (#4945). grok is the xAI Grok Build CLI
+// ACP backend (`grok agent --always-approve stdio`).
+var SupportedTypes = []string{
+	"claude",
+	"codebuddy",
+	"codex",
+	"copilot",
+	"opencode",
+	"deveco",
+	"openclaw",
+	"hermes",
+	"pi",
+	"cursor",
+	"kimi",
+	"kiro",
+	"antigravity",
+	"dirge",
+	"qoder",
+	"traecli",
+	"grok",
+}
+
+// IsSupportedType reports whether agentType is in the SupportedTypes whitelist.
+// Used to validate a custom runtime profile's protocol_family before it is
+// persisted or registered.
+func IsSupportedType(agentType string) bool {
+	for _, t := range SupportedTypes {
+		if t == agentType {
+			return true
+		}
+	}
+	return false
+}
+
 func New(agentType string, cfg Config) (Backend, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -150,12 +209,12 @@ func New(agentType string, cfg Config) (Backend, error) {
 		return &copilotBackend{cfg: cfg}, nil
 	case "opencode":
 		return &opencodeBackend{cfg: cfg}, nil
+	case "deveco":
+		return &devecoBackend{cfg: cfg}, nil
 	case "openclaw":
 		return &openclawBackend{cfg: cfg}, nil
 	case "hermes":
 		return &hermesBackend{cfg: cfg}, nil
-	case "gemini":
-		return &geminiBackend{cfg: cfg}, nil
 	case "pi":
 		return &piBackend{cfg: cfg}, nil
 	case "omp":
@@ -168,8 +227,16 @@ func New(agentType string, cfg Config) (Backend, error) {
 		return &kiroBackend{cfg: cfg}, nil
 	case "antigravity":
 		return &antigravityBackend{cfg: cfg}, nil
+	case "dirge":
+		return &dirgeBackend{cfg: cfg}, nil
+	case "qoder":
+		return &qoderBackend{cfg: cfg}, nil
+	case "traecli":
+		return &traecliBackend{cfg: cfg}, nil
+	case "grok":
+		return &grokBackend{cfg: cfg}, nil
 	default:
-		return nil, fmt.Errorf("unknown agent type: %q (supported: claude, codebuddy, codex, copilot, opencode, openclaw, hermes, gemini, pi, omp, cursor, kimi, kiro, antigravity)", agentType)
+return nil, fmt.Errorf("unknown agent type: %q (supported: claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, omp, cursor, kimi, kiro, antigravity, dirge, qoder, traecli)", agentType), deveco, traecli, grok)"
 	}
 }
 
@@ -185,13 +252,13 @@ func DetectVersion(ctx context.Context, executablePath string) (string, error) {
 // environment variables are deliberately omitted so the string is a hint
 // about *what* users are extending, not a dump of the full command line.
 var launchHeaders = map[string]string{
-"antigravity": "agy -p (print mode)",
+	"antigravity": "agy -p (non-interactive)",
 	"claude":      "claude (stream-json)",
 	"codebuddy":   "codebuddy (stream-json)",
 	"codex":       "codex app-server",
 	"copilot":     "copilot (json)",
 	"cursor":      "cursor-agent (stream-json)",
-	"gemini":      "gemini (stream-json)",
+"dirge":       "dirge --print (json)",, "deveco":      "deveco run (json)",
 	"hermes":      "hermes acp",
 	"kimi":        "kimi acp",
 	"kiro":        "kiro-cli acp",
@@ -199,6 +266,9 @@ var launchHeaders = map[string]string{
 	"openclaw":    "openclaw agent (json)",
 	"opencode":    "opencode run (json)",
 	"pi":          "pi (json mode)",
+	"qoder":       "qodercli --acp",
+	"traecli":     "traecli acp serve",
+	"grok":        "grok agent stdio",
 }
 
 // LaunchHeader returns the user-visible launch skeleton for agentType, or an

@@ -58,8 +58,8 @@ multica agent create --name <name> --runtime-id <runtime-id> \
 `runAgentCreate` builds a JSON body and posts it to `/api/agents`. It only
 adds a key when its flag was provided — `description`/`instructions` on a
 non-empty value, the rest (`runtime-config`, `custom-args`, `model`,
-`visibility`, …) on the flag being `Changed` — so omitted flags fall through
-to server defaults rather than sending empty strings.
+`thinking-level`, `visibility`, …) on the flag being `Changed` — so omitted
+flags fall through to server defaults rather than sending empty strings.
 
 The HTTP body (`CreateAgentRequest`) accepts: `name`, `description`,
 `instructions`, `runtime_id`, `runtime_config`, `custom_env`, `custom_args`,
@@ -88,10 +88,22 @@ Defaults when omitted: `runtime_config` → `{}`, `custom_env` → `{}`,
 are typed `[]string`/`any` and marshaled as-is — the JSON-shape rejection
 happens in the CLI, not the create handler.
 
-`thinking_level` is validated only at the provider level: an unrecognized
-literal returns 400, but a value that is valid for the provider yet
-unsupported for the chosen model is NOT rejected here — that gap surfaces as a
-daemon-side task error at execution time.
+`thinking_level` is validated only at the provider level: fixed-catalog
+providers reject an unrecognized literal, while dynamic-catalog providers such
+as Codex/OpenCode accept a syntactically safe token. A value unsupported for
+the chosen model is NOT rejected here — the daemon checks its local model
+catalog at execution time, logs a warning, and omits the incompatible override.
+
+Set it from the CLI with `--thinking-level` on `agent create` and `agent
+update`, mirroring `--model`: the flag is a thin pass-through to the top-level
+`thinking_level` field, and on update an empty string (`--thinking-level ""`)
+clears it back to the runtime default. The CLI deliberately does not enumerate
+the valid levels — they are runtime/model-specific (Claude currently uses
+`low|medium|high|xhigh|max`; Codex values are discovered from the runtime's
+model catalog). It forwards the token, the server applies the provider's
+fixed-enum or safe-token gate, and the daemon performs the exact model/level
+check. A runtime whose provider has no thinking concept rejects any non-empty
+value with a 400.
 
 ### model vs custom_args
 

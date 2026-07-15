@@ -18,14 +18,9 @@ import {
 } from "@multica/core/issues/stores/quick-create-store";
 import { useIssueDraftStore } from "@multica/core/issues/stores/draft-store";
 import { useCreateModeStore } from "@multica/core/issues/stores/create-mode-store";
-import {
-  runtimeListOptions,
-  checkQuickCreateCliVersion,
-  readRuntimeCliVersion,
-  MIN_QUICK_CREATE_CLI_VERSION,
-} from "@multica/core/runtimes";
 import { useFileUpload } from "@multica/core/hooks/use-file-upload";
-import { formatShortcut, modKey, enterKey } from "@multica/core/platform";
+import { useShortcut } from "@multica/core/shortcuts";
+import { ShortcutKeycaps } from "../common/shortcut-keycaps";
 import { contentReferencesAttachment, type Agent, type Attachment, type Squad } from "@multica/core/types";
 import { ActorAvatar } from "../common/actor-avatar";
 import { PillButton } from "../common/pill-button";
@@ -82,6 +77,7 @@ export function AgentCreatePanel({
   setIsExpanded: (v: boolean) => void;
 }) {
   const { t } = useT("modals");
+  const sendShortcut = useShortcut("send");
   const workspaceName = useCurrentWorkspace()?.name;
   const wsId = useWorkspaceId();
   const userId = useAuthStore((s) => s.user?.id);
@@ -224,29 +220,6 @@ export function AgentCreatePanel({
     if (lastProjectId === projectId) setLastProjectId(null);
   }, [projectsLoaded, projects, projectId, lastProjectId, setLastProjectId]);
 
-  // Daemon CLI version gate. The agent-create flow needs the runtime's
-  // bundled multica CLI to be ≥ MIN_QUICK_CREATE_CLI_VERSION; older
-  // daemons handle attachments and partial-failure retries incorrectly
-  // (see PR #1851 / MUL-1496). Pre-check on the picker so the user gets
-  // immediate feedback instead of waiting for the inbox failure; the
-  // server re-validates as the trust boundary. Dev-built daemons
-  // (git-describe shape) are exempted inside checkQuickCreateCliVersion
-  // — frontend and server share the same signal there, so they agree by
-  // construction across web/desktop/staging without comparing env flags.
-  const { data: runtimes = [] } = useQuery(runtimeListOptions(wsId));
-  const selectedRuntime = useMemo(
-    () =>
-      selectedAgent?.runtime_id
-        ? runtimes.find((r) => r.id === selectedAgent.runtime_id)
-        : undefined,
-    [runtimes, selectedAgent?.runtime_id],
-  );
-  const versionCheck = useMemo(
-    () => checkQuickCreateCliVersion(readRuntimeCliVersion(selectedRuntime?.metadata)),
-    [selectedRuntime?.metadata],
-  );
-  const versionBlocked = versionCheck.state !== "ok";
-
   const initialPrompt = (data?.prompt as string) || promptDraft;
   // The editor is uncontrolled — we read the latest markdown via the ref at
   // submit/switch time. `hasContent` mirrors emptiness so the Create button
@@ -286,7 +259,15 @@ export function AgentCreatePanel({
 
   const submit = async () => {
     const md = editorRef.current?.getMarkdown()?.trim() ?? "";
-    if (!md || !actor || submitting || versionBlocked || uploading) return;
+    if (!md || !actor || submitting || uploading) return;
+    // Belt-and-suspenders against the multi-file upload race fixed in
+    // useFileUpload (MUL-3339): `uploading` already tracks an in-flight
+    // counter now, but the editor's per-node `uploading` attr is the most
+    // direct truth — if any image node is still mid-upload, blocking submit
+    // here guarantees `getMarkdown()`'s blob-url strip never erases a
+    // pasted/dropped image whose attachment id hasn't reached
+    // `pendingAttachments` yet.
+    if (editorRef.current?.hasActiveUploads()) return;
     const activeAttachmentIds = pendingAttachments
       .filter((a) => contentReferencesAttachment(md, a))
       .map((a) => a.id);
@@ -331,26 +312,9 @@ export function AgentCreatePanel({
         const body = e.body as {
           code?: string;
           reason?: string;
-          current_version?: string;
-          min_version?: string;
         };
         if (body.code === "agent_unavailable") {
           setError(body.reason || t(($) => $.create_issue.agent.error_agent_unavailable_fallback));
-          setSubmitting(false);
-          return;
-        }
-        if (body.code === "daemon_version_unsupported") {
-          // Race fallback: the picker pre-check should normally catch this,
-          // but a runtime can silently re-register with an older CLI between
-          // pre-check and submit. Same wording as the inline notice for
-          // consistency.
-          const cur = body.current_version || "unknown";
-          setError(
-            t(($) => $.create_issue.agent.error_daemon_version, {
-              current: cur,
-              min: body.min_version || MIN_QUICK_CREATE_CLI_VERSION,
-            }),
-          );
           setSubmitting(false);
           return;
         }
@@ -449,17 +413,6 @@ export function AgentCreatePanel({
           />
         </div>
 
-        {selectedAgent && versionBlocked && (
-          <div className="mx-5 mb-2 shrink-0 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
-            {versionCheck.state === "missing"
-              ? t(($) => $.create_issue.agent.version_missing, { min: versionCheck.min })
-              : t(($) => $.create_issue.agent.version_below, {
-                  current: versionCheck.current,
-                  min: versionCheck.min,
-                })}
-          </div>
-        )}
-
         {/* Prompt — same rich editor Advanced uses, so paste/drop images,
             mentions, and formatting all work. The dropZone wrapper enables
             drag-and-drop file uploads alongside paste. */}
@@ -531,6 +484,7 @@ export function AgentCreatePanel({
           <div className="flex min-h-7 items-center gap-2">
             <FileUploadButton
               size="sm"
+              multiple
               disabled={uploading}
               onSelect={(file) => editorRef.current?.uploadFile(file)}
             />
@@ -561,17 +515,24 @@ export function AgentCreatePanel({
             <Button
               size="sm"
               onClick={submit}
-              disabled={!hasContent || !actor || submitting || versionBlocked || uploading}
-              title={
-                versionBlocked
-                  ? t(($) => $.create_issue.agent.version_blocked_tooltip, { min: versionCheck.min })
-                  : undefined
-              }
+              disabled={!hasContent || !actor || submitting || uploading}
               className={justSent ? "min-w-28 !bg-emerald-600 !text-white" : "min-w-28"}
             >
               {submitting ? t(($) => $.create_issue.agent.sending) : uploading ? t(($) => $.create_issue.agent.uploading) : justSent ? (
                 <span className="flex items-center gap-1"><Check className="size-3.5" />{t(($) => $.create_issue.agent.sent_label)}</span>
-              ) : `${t(($) => $.create_issue.agent.submit)} (${formatShortcut(modKey, enterKey)})`}
+              ) : (
+                <>
+                  {t(($) => $.create_issue.agent.submit)}
+                  {sendShortcut ? (
+                    <ShortcutKeycaps
+                      shortcut={sendShortcut}
+                      decorative
+                      className="ml-1"
+                      keyClassName="border-background/30 bg-background/15 text-primary-foreground shadow-none"
+                    />
+                  ) : null}
+                </>
+              )}
             </Button>
           </div>
         </div>
@@ -641,7 +602,7 @@ function ActorPicker({
               <ActorAvatar
                 actorType={displayActor.type}
                 actorId={displayActor.id}
-                size={16}
+                size="sm"
               />
               {displayLabel}
             </span>
@@ -672,7 +633,7 @@ function ActorPicker({
                     setOpen(false);
                   }}
                 >
-                  <ActorAvatar actorType="agent" actorId={a.id} size={18} />
+                  <ActorAvatar actorType="agent" actorId={a.id} size="sm" />
                   <span className="truncate">{a.name}</span>
                 </PickerItem>
               ))}
@@ -689,7 +650,7 @@ function ActorPicker({
                     setOpen(false);
                   }}
                 >
-                  <ActorAvatar actorType="squad" actorId={s.id} size={18} />
+                  <ActorAvatar actorType="squad" actorId={s.id} size="sm" />
                   <span className="truncate">{s.name}</span>
                 </PickerItem>
               ))}

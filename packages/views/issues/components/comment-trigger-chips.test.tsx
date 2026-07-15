@@ -45,7 +45,7 @@ describe("CommentTriggerChips", () => {
     );
 
     const chip = screen.getByRole("button");
-    expect(chip).toHaveTextContent("Starts working when sent");
+    expect(chip).toHaveTextContent("Will start when sent");
     expect(chip).toHaveAttribute("aria-pressed", "false");
 
     fireEvent.click(chip);
@@ -62,7 +62,7 @@ describe("CommentTriggerChips", () => {
     );
 
     const chip = screen.getByRole("button");
-    expect(chip).toHaveTextContent("Won't be triggered");
+    expect(chip).toHaveTextContent("Won't start this time");
     expect(chip).toHaveAttribute("aria-pressed", "true");
   });
 
@@ -75,7 +75,7 @@ describe("CommentTriggerChips", () => {
       />,
     );
 
-    expect(screen.getByRole("button")).toHaveTextContent("2 agents start working when sent");
+    expect(screen.getByRole("button")).toHaveTextContent("2 agents will start when sent");
   });
 
   it("counts only non-suppressed agents in the sentence", () => {
@@ -87,7 +87,7 @@ describe("CommentTriggerChips", () => {
       />,
     );
 
-    expect(screen.getByRole("button")).toHaveTextContent("1 agent starts working when sent");
+    expect(screen.getByRole("button")).toHaveTextContent("1 agent will start when sent");
   });
 
   it("switches to the none-will-trigger state when every agent is suppressed", () => {
@@ -99,7 +99,7 @@ describe("CommentTriggerChips", () => {
       />,
     );
 
-    expect(screen.getByRole("button")).toHaveTextContent("No agents will be triggered");
+    expect(screen.getByRole("button")).toHaveTextContent("No agents will start");
   });
 
   it("opens the popover on click and toggles a row", () => {
@@ -118,5 +118,73 @@ describe("CommentTriggerChips", () => {
     expect(row).toHaveTextContent("Bob");
     fireEvent.click(row);
     expect(onToggle).toHaveBeenCalledWith("agent-2");
+  });
+
+  it("names a blocked mention with an error reason instead of a count", () => {
+    renderWithI18n(
+      <CommentTriggerChips
+        agents={[]}
+        blocked={[
+          {
+            target_type: "agent",
+            target_id: "deadbeef-0001",
+            status: "blocked",
+            reason_code: "invocation_not_allowed",
+          },
+        ]}
+        draftContent="[@Go](mention://agent/deadbeef-0001) hi"
+        suppressedAgentIds={new Set()}
+        onToggle={vi.fn()}
+      />,
+    );
+
+    // The name the user typed (not a "1 mention won't trigger" count) plus the
+    // short no-permission reason.
+    expect(screen.getByText("Go")).toBeInTheDocument();
+    expect(screen.getByText("No permission")).toBeInTheDocument();
+    expect(screen.queryByText(/won't trigger/i)).not.toBeInTheDocument();
+  });
+
+  it("falls back to the reason alone when the label can't be correlated", () => {
+    renderWithI18n(
+      <CommentTriggerChips
+        agents={[]}
+        blocked={[
+          {
+            target_type: "agent",
+            target_id: "deadbeef-0001",
+            status: "blocked",
+            reason_code: "invocation_not_allowed",
+          },
+        ]}
+        // No matching mention markup for the blocked target → no label available.
+        draftContent="plain text"
+        suppressedAgentIds={new Set()}
+        onToggle={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("No permission")).toBeInTheDocument();
+    expect(screen.queryByText("Go")).not.toBeInTheDocument();
+  });
+
+  it("renders one named chip per blocked mention", () => {
+    renderWithI18n(
+      <CommentTriggerChips
+        agents={[]}
+        blocked={[
+          { target_type: "agent", target_id: "deadbeef-0001", status: "blocked", reason_code: "invocation_not_allowed" },
+          { target_type: "squad", target_id: "cafef00d-0002", status: "blocked", reason_code: "runtime_offline" },
+        ]}
+        draftContent="[@Go](mention://agent/deadbeef-0001) [@Ops](mention://squad/cafef00d-0002)"
+        suppressedAgentIds={new Set()}
+        onToggle={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Go")).toBeInTheDocument();
+    expect(screen.getByText("No permission")).toBeInTheDocument();
+    expect(screen.getByText("Ops")).toBeInTheDocument();
+    expect(screen.getByText("Runtime offline")).toBeInTheDocument();
   });
 });

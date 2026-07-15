@@ -60,10 +60,10 @@ func TestCheckMinCLIVersion(t *testing.T) {
 	}{
 		{"tagged release at minimum", "v0.2.21", nil},
 		{"tagged release above minimum", "0.3.1", nil},
-		{"previous tagged release below minimum", "v0.2.20", ErrCLIVersionTooOld},
-		{"tagged release below minimum", "v0.2.15", ErrCLIVersionTooOld},
-		{"empty string", "", ErrCLIVersionMissing},
-		{"unparsable", "not-a-version", ErrCLIVersionMissing},
+		{"previous tagged release below minimum", "v0.2.20", nil},
+		{"tagged release below minimum", "v0.2.15", nil},
+		{"empty string", "", nil},
+		{"unparsable", "not-a-version", nil},
 		{"git-describe dev build past old tag", "v0.2.15-235-gdaf0e935", nil},
 		{"git-describe dirty dev build", "v0.2.15-235-gdaf0e935-dirty", nil},
 		{"git-describe dev build past current tag", "v0.2.21-3-gabc1234", nil},
@@ -159,6 +159,10 @@ func TestCheckMinVersion(t *testing.T) {
 		{"codex", "codex-cli 0.100.0", false},
 		{"codex", "codex-cli 0.99.0", true},
 		{"codex", "codex-cli 0.50.0", true},
+		{"grok", "grok 0.2.93 (f00f96316d4b) [stable]", false},
+		{"grok", "0.2.89", false},
+		{"grok", "0.2.0", true},
+		{"grok", "0.1.9", true},
 		{"unknown", "1.0.0", false},
 	}
 	for _, tt := range tests {

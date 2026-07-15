@@ -14,20 +14,48 @@ var MinVersions = map[string]string{
 	"claude":  "2.0.0",
 	"codex":   "0.100.0", // app-server --listen stdio:// added in 0.100.0
 	"copilot": "1.0.0",   // --output-format json envelope stable from 1.0.x
+	"grok":    "0.2.89",  // ACP + authenticate/session-load/set_model/MCP and --effort thinking flag
 }
 
-// MinQuickCreateCLIVersion gates the agent-create (quick-create) flow against
-// the multica CLI version reported by the daemon at registration time. The
-// quick-create prompt that the agent runs depends on CLI behavior introduced
-// after this version (attachment URL handling, quick-create attachment
-// binding, no-retry semantics on `multica issue create` failure — see PR
-// #1851); older daemons would either double-create issues or mishandle pasted
-// screenshot URLs. Treated as a hard requirement: missing / unparsable / below
-// this threshold all fail closed.
+// MinQuickCreateCLIVersion is retained for compatibility in API responses and
+// shared tests, but agent-mode issue creation no longer rejects daemon-reported
+// CLI versions based on this threshold.
 const MinQuickCreateCLIVersion = "0.2.21"
 
-// Errors returned by CheckMinCLIVersion. Callers branch on these to surface
-// "needs upgrade" vs "version not reported" with the right user message.
+// MinHandoffCLIVersion is the lowest multica CLI version whose daemon renders
+// the assignment handoff note into the run's opening prompt + issue_context.md
+// (MUL-3375). Unlike quick-create this is a SOFT gate: assigning an issue with
+// a note never fails on an old daemon — the assignment still takes effect, the
+// note is simply dropped. The frontend reads HandoffSupported to gray out the
+// note box and warn the user, so they aren't surprised by a silently ignored
+// note. Bump this to the release that actually ships the daemon rendering.
+const MinHandoffCLIVersion = "0.3.28"
+
+// HandoffSupported reports whether a daemon reporting cliVersion is new enough
+// to render handoff notes. Reuses the CheckMinCLIVersion parsing (including the
+// git-describe dev-build exemption) but never errors — a missing/old/unparsable
+// version simply means "not supported", which the soft gate degrades gracefully.
+func HandoffSupported(cliVersion string) bool {
+	d := strings.TrimSpace(cliVersion)
+	if d == "" {
+		return false
+	}
+	if devDescribeRe.MatchString(d) {
+		return true
+	}
+	parsed, err := parseSemver(d)
+	if err != nil {
+		return false
+	}
+	min, err := parseSemver(MinHandoffCLIVersion)
+	if err != nil {
+		return false
+	}
+	return !parsed.lessThan(min)
+}
+
+// Errors retained for compatibility with older callers/tests; quick-create no
+// longer returns them from CheckMinCLIVersion.
 var (
 	ErrCLIVersionMissing = errors.New("multica CLI version not reported by daemon")
 	ErrCLIVersionTooOld  = errors.New("multica CLI version is below required minimum")
@@ -35,42 +63,15 @@ var (
 
 // devDescribeRe matches the `git describe --tags --always --dirty` output for
 // a build past the latest tag, e.g. `v0.2.15-235-gdaf0e935` (optionally with a
-// trailing `-dirty`). Daemons built from source (Makefile `make build` / `make
-// daemon`) report this shape. It is treated as valid, matching the frontend's
-// equivalent logic.
+// trailing `-dirty`). HandoffSupported treats this shape as supported so forked
+// or source-built daemons are not rejected just because they are not exact tags.
 var devDescribeRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+-\d+-g[0-9a-fA-F]+`)
 
-// devBuildRe treats common non-semver local/dev build version strings as
-// acceptable for quick-create gating. The CLI may expose commit hashes (for
-// forked/clean-clone environments without tags), or `dev`/`development` when
-// built without version injection. For these, we avoid a false-negative where
-// forked daemons are blocked despite having the same runtime behavior.
-var devBuildRe = regexp.MustCompile(`^(?i)(?:v?g?[0-9a-f]{7,40}(?:-dirty)?|dev(?:elopment)?)$`)
-
-// CheckMinCLIVersion returns nil when `detected` parses as ≥ minimum. Returns
-// ErrCLIVersionMissing for empty or unparsable input, and ErrCLIVersionTooOld
-// when parsable but below the minimum. The caller can check for these sentinel
-// errors with errors.Is to drive the response shape.
+// CheckMinCLIVersion no longer gates quick-create issue creation on daemon CLI
+// version strings. It accepts tagged releases, dev builds, missing values, and
+// unparsable values alike so agent-mode issue creation depends on runtime
+// capability rather than version metadata.
 func CheckMinCLIVersion(detected string) error {
-	d := strings.TrimSpace(detected)
-	if d == "" {
-		return ErrCLIVersionMissing
-	}
-	if devDescribeRe.MatchString(d) || devBuildRe.MatchString(d) {
-		return nil
-	}
-	parsed, err := parseSemver(d)
-	if err != nil {
-		return ErrCLIVersionMissing
-	}
-	min, err := parseSemver(MinQuickCreateCLIVersion)
-	if err != nil {
-		// Misconfiguration in the constant itself — fail closed as missing.
-		return ErrCLIVersionMissing
-	}
-	if parsed.lessThan(min) {
-		return ErrCLIVersionTooOld
-	}
 	return nil
 }
 

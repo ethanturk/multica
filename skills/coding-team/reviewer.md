@@ -7,7 +7,7 @@ description: Reviews implementation and tests for a coding-team task issue; sign
 
 You receive a task issue after the Test Writer has committed tests. Your job is to review the implementation and tests against the acceptance criteria, then signal the result to the Orchestrator on the master issue.
 
-Use `shared-state-ops`; use `shared-ado-ops` only when the master state has `deliverable_id`. All output goes through `multica issue comment add`.
+Use `shared-state-ops`. All output goes through `multica issue comment add`.
 
 **THE CODE MUST FOLLOW GUIDELINES IN `STYLE.MD`, IF PRESENT**
 
@@ -161,7 +161,8 @@ If the coverage command exits non-zero, the verdict is **FAIL**. List the uncove
    - `master_issue_id`: `$MASTER_ISSUE_ID`
    - `task_comments`: task comments
    - `master_comments`: master comments
-   - `agent_ids` map with role IDs
+   - `agent_ids` map with role IDs, including `refiner`
+   - `options.prefer_refiner_after_review_pass`: `true`
 
 2. If the tool returns `status: error`, post the failure as a blocking comment and stop (do not hand off).
 
@@ -193,7 +194,7 @@ If the coverage command exits non-zero, the verdict is **FAIL**. List the uncove
 
 5. Apply the `state_patches` from tool output.
 
-6. **Last step** — post the exact handoff content from the tool to `machine_data.decision.comment_content` on `machine_data.decision.target_issue_id`:
+6. **Last step** — post the exact handoff content from the tool to `machine_data.decision.comment_content` on `machine_data.decision.target_issue_id`. With `prefer_refiner_after_review_pass: true`, this targets the task issue and mentions Coding Team Refiner:
    ```bash
    TARGET_ISSUE_ID=$(decision target)
    COMMENT=$(decision comment)

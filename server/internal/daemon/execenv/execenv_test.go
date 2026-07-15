@@ -134,6 +134,24 @@ func TestPrepareDirectoryMode(t *testing.T) {
 		}
 	}
 
+	markerContent, err := os.ReadFile(filepath.Join(env.WorkDir, TaskContextMarkerRelPath))
+	if err != nil {
+		t.Fatalf("failed to read task context marker: %v", err)
+	}
+	var marker struct {
+		ManagedBy string `json:"managed_by"`
+		IssueID   string `json:"issue_id"`
+	}
+	if err := json.Unmarshal(markerContent, &marker); err != nil {
+		t.Fatalf("task context marker unmarshal: %v\n%s", err, string(markerContent))
+	}
+	if marker.ManagedBy != TaskContextMarkerManagedBy {
+		t.Fatalf("marker managed_by = %q, want %q", marker.ManagedBy, TaskContextMarkerManagedBy)
+	}
+	if marker.IssueID != "a1b2c3d4-e5f6-7890-abcd-ef1234567890" {
+		t.Fatalf("marker issue_id = %q, want issue id", marker.IssueID)
+	}
+
 	// Verify skill files.
 	skillContent, err := os.ReadFile(filepath.Join(env.WorkDir, ".agent_context", "skills", "code-review", "SKILL.md"))
 	if err != nil {
@@ -149,14 +167,15 @@ func TestPrepareWithProjectResources(t *testing.T) {
 	workspacesRoot := t.TempDir()
 
 	taskCtx := TaskContextForEnv{
-		IssueID:      "11111111-2222-3333-4444-555555555555",
-		ProjectID:    "22222222-3333-4444-5555-666666666666",
-		ProjectTitle: "Agent UX 2026",
+		IssueID:            "11111111-2222-3333-4444-555555555555",
+		ProjectID:          "22222222-3333-4444-5555-666666666666",
+		ProjectTitle:       "Agent UX 2026",
+		ProjectDescription: "Always write copy in British English. Ship behind a feature flag.",
 		ProjectResources: []ProjectResourceForEnv{
 			{
 				ID:           "33333333-4444-5555-6666-777777777777",
 				ResourceType: "github_repo",
-				ResourceRef:  json.RawMessage(`{"url":"https://github.com/multica-ai/multica","default_branch_hint":"main"}`),
+				ResourceRef:  json.RawMessage(`{"url":"https://github.com/multica-ai/multica","ref":"release/v2","default_branch_hint":"main"}`),
 			},
 		},
 	}
@@ -180,9 +199,10 @@ func TestPrepareWithProjectResources(t *testing.T) {
 		t.Fatalf("failed to read resources.json: %v", err)
 	}
 	var got struct {
-		ProjectID    string `json:"project_id"`
-		ProjectTitle string `json:"project_title"`
-		Resources    []struct {
+		ProjectID          string `json:"project_id"`
+		ProjectTitle       string `json:"project_title"`
+		ProjectDescription string `json:"project_description"`
+		Resources          []struct {
 			ID           string          `json:"id"`
 			ResourceType string          `json:"resource_type"`
 			ResourceRef  json.RawMessage `json:"resource_ref"`
@@ -196,6 +216,9 @@ func TestPrepareWithProjectResources(t *testing.T) {
 	}
 	if got.ProjectTitle != taskCtx.ProjectTitle {
 		t.Errorf("resources.json project_title = %q, want %q", got.ProjectTitle, taskCtx.ProjectTitle)
+	}
+	if got.ProjectDescription != taskCtx.ProjectDescription {
+		t.Errorf("resources.json project_description = %q, want %q", got.ProjectDescription, taskCtx.ProjectDescription)
 	}
 	if len(got.Resources) != 1 || got.Resources[0].ResourceType != "github_repo" {
 		t.Fatalf("resources.json resources mismatch: %+v", got.Resources)
@@ -213,9 +236,11 @@ func TestPrepareWithProjectResources(t *testing.T) {
 	for _, want := range []string{
 		"## Project Context",
 		"Agent UX 2026",
+		"Always write copy in British English. Ship behind a feature flag.",
 		"GitHub repo",
 		"https://github.com/multica-ai/multica",
-		"default branch: `main`",
+		"checkout ref: `release/v2`",
+		"default branch hint: `main`",
 		".multica/project/resources.json",
 	} {
 		if !strings.Contains(s, want) {
@@ -284,7 +309,7 @@ func TestPrepareWithRepoContext(t *testing.T) {
 	taskCtx := TaskContextForEnv{
 		IssueID: "b2c3d4e5-f6a7-8901-bcde-f12345678901",
 		Repos: []RepoContextForEnv{
-			{URL: "https://github.com/org/backend"},
+			{URL: "https://github.com/org/backend", Ref: "release/v2"},
 			{URL: "https://github.com/org/frontend"},
 		},
 	}
@@ -313,7 +338,7 @@ func TestPrepareWithRepoContext(t *testing.T) {
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if name != ".agent_context" && name != "CLAUDE.md" && name != ".claude" {
+		if name != ".agent_context" && name != ".multica" && name != "CLAUDE.md" && name != ".claude" {
 			t.Errorf("unexpected entry in workdir: %s", name)
 		}
 	}
@@ -327,6 +352,7 @@ func TestPrepareWithRepoContext(t *testing.T) {
 	for _, want := range []string{
 		"multica repo checkout",
 		"https://github.com/org/backend",
+		"[--ref <branch-or-sha>]",
 		"https://github.com/org/frontend",
 	} {
 		if !strings.Contains(s, want) {
@@ -512,6 +538,70 @@ func TestWriteContextFilesClaudeNativeSkills(t *testing.T) {
 	}
 }
 
+// TestWriteContextFilesCodebuddyNativeSkills is the regression guard for a
+// bug where CodeBuddy was treated as a drop-in alias for Claude and skills
+// were written to .claude/skills/. CodeBuddy Code is a Claude Code fork but
+// ships its own native config directory (~/.codebuddy, .codebuddy/) and does
+// NOT read .claude/skills/ by default — see
+// https://www.codebuddy.ai/docs/cli/skills ("Project-level Skills:
+// .codebuddy/skills/"). Skills must land under .codebuddy/skills/ instead.
+func TestWriteContextFilesCodebuddyNativeSkills(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	ctx := TaskContextForEnv{
+		IssueID: "codebuddy-skill-test",
+		AgentSkills: []SkillContextForEnv{
+			{
+				Name:    "Go Conventions",
+				Content: "Follow Go conventions.",
+				Files: []SkillFileContextForEnv{
+					{Path: "templates/example.go", Content: "package main"},
+				},
+			},
+		},
+	}
+
+	if err := writeContextFiles(dir, "codebuddy", ctx, nil); err != nil {
+		t.Fatalf("writeContextFiles failed: %v", err)
+	}
+
+	// Skills should be in .codebuddy/skills/ (native discovery), NOT
+	// .claude/skills/ and NOT .agent_context/skills/.
+	skillMd, err := os.ReadFile(filepath.Join(dir, ".codebuddy", "skills", "go-conventions", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("failed to read .codebuddy/skills/go-conventions/SKILL.md: %v", err)
+	}
+	if !strings.Contains(string(skillMd), "Follow Go conventions.") {
+		t.Error("SKILL.md missing content")
+	}
+
+	// Supporting files should also be under .codebuddy/skills/.
+	supportFile, err := os.ReadFile(filepath.Join(dir, ".codebuddy", "skills", "go-conventions", "templates", "example.go"))
+	if err != nil {
+		t.Fatalf("failed to read supporting file: %v", err)
+	}
+	if string(supportFile) != "package main" {
+		t.Errorf("supporting file content = %q, want %q", string(supportFile), "package main")
+	}
+
+	// .claude/skills/ must NOT exist — this is the exact regression this
+	// test guards against.
+	if _, err := os.Stat(filepath.Join(dir, ".claude", "skills")); !os.IsNotExist(err) {
+		t.Error("expected .claude/skills/ to NOT exist for codebuddy provider")
+	}
+
+	// .agent_context/skills/ should NOT exist for CodeBuddy either.
+	if _, err := os.Stat(filepath.Join(dir, ".agent_context", "skills")); !os.IsNotExist(err) {
+		t.Error("expected .agent_context/skills/ to NOT exist for codebuddy provider")
+	}
+
+	// issue_context.md should still be in .agent_context/.
+	if _, err := os.Stat(filepath.Join(dir, ".agent_context", "issue_context.md")); os.IsNotExist(err) {
+		t.Error("expected .agent_context/issue_context.md to exist")
+	}
+}
+
 // TestReuseRefreshesSkillsWithoutDuplicating is the regression guard for
 // GitHub #3684: re-dispatching the same agent on the same issue goes through
 // the Reuse path, which must refresh skills in place rather than pile up
@@ -655,7 +745,7 @@ func TestReuseReclaimsManagedSkillDirWithStrayAgentFile(t *testing.T) {
 func TestReuseSkillRefreshIsCanonicalAcrossProviders(t *testing.T) {
 	t.Parallel()
 
-	for _, provider := range []string{"claude", "openclaw", "copilot", ""} {
+	for _, provider := range []string{"claude", "codebuddy", "openclaw", "copilot", ""} {
 		provider := provider
 		name := provider
 		if name == "" {
@@ -801,6 +891,56 @@ func TestInjectRuntimeConfigClaude(t *testing.T) {
 	}
 }
 
+func TestInjectRuntimeConfigBackgroundTaskSafetyProviderAgnostic(t *testing.T) {
+	t.Parallel()
+
+	providers := []struct {
+		name string
+		file string
+	}{
+		{"claude", "CLAUDE.md"},
+		{"codex", "AGENTS.md"},
+		{"opencode", "AGENTS.md"},
+		{"hermes", "AGENTS.md"},
+		{"dirge", "AGENTS.md"},
+	}
+
+	for _, tc := range providers {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			if _, err := InjectRuntimeConfig(dir, tc.name, TaskContextForEnv{IssueID: "issue-1"}); err != nil {
+				t.Fatalf("InjectRuntimeConfig failed: %v", err)
+			}
+			data, err := os.ReadFile(filepath.Join(dir, tc.file))
+			if err != nil {
+				t.Fatalf("read %s: %v", tc.file, err)
+			}
+			s := string(data)
+			for _, want := range []string{
+				"## Background Task Safety",
+				"Do NOT end your turn while background tasks",
+				"wait for a future notification/reminder",
+				"run the work synchronously instead",
+				// Hardened pins (MUL-4140): the mechanism that slipped
+				// through in MUL-4091 was a turn ending cleanly with a
+				// "standing by, I'll report when CI finishes" message and
+				// no follow-up wakeup. These pins forbid that shape.
+				"Never background-and-yield",
+				"foreground tool call that blocks",
+				"gh run watch",
+				"running in the background so you can keep working",
+				"standing by",
+			} {
+				if !strings.Contains(s, want) {
+					t.Errorf("%s missing background task safety text %q\n---\n%s", tc.file, want, s)
+				}
+			}
+		})
+	}
+}
+
 func TestInjectRuntimeConfigAvailableCommandsCoreOnly(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -865,44 +1005,6 @@ func TestInjectRuntimeConfigAvailableCommandsCoreOnly(t *testing.T) {
 		if strings.Contains(s, banned) {
 			t.Errorf("AGENTS.md should not inject non-core command %q\n---\n%s", banned, s)
 		}
-	}
-}
-
-func TestInjectRuntimeConfigGemini(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-
-	ctx := TaskContextForEnv{
-		IssueID:     "test-issue-id",
-		AgentSkills: []SkillContextForEnv{{Name: "Writing", Content: "Write clearly."}},
-	}
-
-	if _, err := InjectRuntimeConfig(dir, "gemini", ctx); err != nil {
-		t.Fatalf("InjectRuntimeConfig failed: %v", err)
-	}
-
-	content, err := os.ReadFile(filepath.Join(dir, "GEMINI.md"))
-	if err != nil {
-		t.Fatalf("failed to read GEMINI.md: %v", err)
-	}
-
-	s := string(content)
-	for _, want := range []string{
-		"Multica Agent Runtime",
-		"multica issue get",
-		"Writing",
-	} {
-		if !strings.Contains(s, want) {
-			t.Errorf("GEMINI.md missing %q", want)
-		}
-	}
-
-	// Should not write CLAUDE.md or AGENTS.md for gemini provider.
-	if _, err := os.Stat(filepath.Join(dir, "CLAUDE.md")); !os.IsNotExist(err) {
-		t.Error("gemini provider should not create CLAUDE.md")
-	}
-	if _, err := os.Stat(filepath.Join(dir, "AGENTS.md")); !os.IsNotExist(err) {
-		t.Error("gemini provider should not create AGENTS.md")
 	}
 }
 
@@ -1226,6 +1328,33 @@ func TestWriteContextFilesKiroNativeSkills(t *testing.T) {
 	}
 }
 
+func TestWriteContextFilesQoderNativeSkills(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	ctx := TaskContextForEnv{
+		IssueID: "qoder-skill-test",
+		AgentSkills: []SkillContextForEnv{
+			{Name: "Go Conventions", Content: "Follow Go conventions."},
+		},
+	}
+
+	if err := writeContextFiles(dir, "qoder", ctx, nil); err != nil {
+		t.Fatalf("writeContextFiles failed: %v", err)
+	}
+
+	skillMd, err := os.ReadFile(filepath.Join(dir, ".qoder", "skills", "go-conventions", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("failed to read .qoder/skills/go-conventions/SKILL.md: %v", err)
+	}
+	if !strings.Contains(string(skillMd), "Follow Go conventions.") {
+		t.Error("SKILL.md missing content")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".agent_context", "skills")); !os.IsNotExist(err) {
+		t.Error("expected .agent_context/skills/ to NOT exist for Qoder provider")
+	}
+}
+
 func TestInjectRuntimeConfigOpencode(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -1292,6 +1421,36 @@ func TestInjectRuntimeConfigKiro(t *testing.T) {
 	}
 }
 
+func TestInjectRuntimeConfigQoder(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	ctx := TaskContextForEnv{
+		IssueID:     "test-issue-id",
+		AgentSkills: []SkillContextForEnv{{Name: "Coding", Content: "Write good code."}},
+	}
+
+	if _, err := InjectRuntimeConfig(dir, "qoder", ctx); err != nil {
+		t.Fatalf("InjectRuntimeConfig failed: %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("failed to read AGENTS.md: %v", err)
+	}
+
+	s := string(content)
+	if !strings.Contains(s, "Multica Agent Runtime") {
+		t.Error("AGENTS.md missing meta skill header")
+	}
+	if !strings.Contains(s, "Coding") {
+		t.Error("AGENTS.md missing skill name")
+	}
+	if !strings.Contains(s, "discovered automatically") {
+		t.Error("AGENTS.md missing native skill discovery hint")
+	}
+}
+
 // TestInjectRuntimeConfigAntigravity pins that AGENTS.md for Antigravity
 // advertises native skill discovery (rather than the .agent_context fallback)
 // — the CLI inherits Gemini CLI's workspace skill layout at .agents/skills/.
@@ -1328,6 +1487,39 @@ func TestInjectRuntimeConfigAntigravity(t *testing.T) {
 	}
 }
 
+func TestInjectRuntimeConfigDirge(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	ctx := TaskContextForEnv{
+		IssueID:     "test-issue-id",
+		AgentSkills: []SkillContextForEnv{{Name: "Coding", Content: "Write good code."}},
+	}
+
+	if _, err := InjectRuntimeConfig(dir, "dirge", ctx); err != nil {
+		t.Fatalf("InjectRuntimeConfig failed: %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("failed to read AGENTS.md: %v", err)
+	}
+
+	s := string(content)
+	if !strings.Contains(s, "Multica Agent Runtime") {
+		t.Error("AGENTS.md missing meta skill header")
+	}
+	if !strings.Contains(s, "Coding") {
+		t.Error("AGENTS.md missing skill name")
+	}
+	if !strings.Contains(s, "discovered automatically") {
+		t.Error("AGENTS.md for Dirge should advertise native skill discovery")
+	}
+	if strings.Contains(s, ".agent_context/skills/") {
+		t.Error("AGENTS.md for Dirge must not reference the .agent_context/skills/ fallback")
+	}
+}
+
 // TestWriteContextFilesAntigravityNativeSkills pins that skills for the
 // antigravity provider land in {workDir}/.agents/skills/<slug>/, matching the
 // CLI's native workspace discovery path (Gemini CLI lineage).
@@ -1357,6 +1549,33 @@ func TestWriteContextFilesAntigravityNativeSkills(t *testing.T) {
 	// .agents/skills/, not .agent_context/skills/.
 	if _, err := os.Stat(filepath.Join(dir, ".agent_context", "skills")); !os.IsNotExist(err) {
 		t.Error(".agent_context/skills/ MUST NOT be written for antigravity — its scanner does not read that path")
+	}
+}
+
+func TestWriteContextFilesDirgeNativeSkills(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	ctx := TaskContextForEnv{
+		IssueID: "dirge-skill-test",
+		AgentSkills: []SkillContextForEnv{
+			{Name: "Go Conventions", Content: "Follow Go conventions."},
+		},
+	}
+
+	if err := writeContextFiles(dir, "dirge", ctx, nil); err != nil {
+		t.Fatalf("writeContextFiles failed: %v", err)
+	}
+
+	skillMd, err := os.ReadFile(filepath.Join(dir, ".dirge", "skills", "go-conventions", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("failed to read .dirge/skills/go-conventions/SKILL.md: %v", err)
+	}
+	if !strings.Contains(string(skillMd), "Follow Go conventions.") {
+		t.Error("SKILL.md missing content")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".agent_context", "skills")); !os.IsNotExist(err) {
+		t.Error(".agent_context/skills/ MUST NOT be written for dirge")
 	}
 }
 
@@ -1394,7 +1613,7 @@ func TestPrepareWithRepoContextOpencode(t *testing.T) {
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if name != ".agent_context" && name != "AGENTS.md" {
+		if name != ".agent_context" && name != ".multica" && name != "AGENTS.md" {
 			t.Errorf("unexpected entry in workdir: %s", name)
 		}
 	}
@@ -1489,7 +1708,7 @@ func TestInjectRuntimeConfigCommentGuardrailIsProviderAgnostic(t *testing.T) {
 	t.Cleanup(func() { runtimeGOOS = saved })
 
 	for _, host := range []string{"linux", "darwin", "windows"} {
-		for _, provider := range []string{"claude", "opencode", "openclaw", "hermes", "kimi", "kiro", "cursor", "gemini"} {
+		for _, provider := range []string{"claude", "opencode", "openclaw", "hermes", "kimi", "kiro", "cursor", "dirge"} {
 			t.Run(provider+"/"+host, func(t *testing.T) {
 				runtimeGOOS = host
 				dir := t.TempDir()
@@ -1500,9 +1719,6 @@ func TestInjectRuntimeConfigCommentGuardrailIsProviderAgnostic(t *testing.T) {
 				configFile := "CLAUDE.md"
 				if provider != "claude" {
 					configFile = "AGENTS.md"
-				}
-				if provider == "gemini" {
-					configFile = "GEMINI.md"
 				}
 				data, err := os.ReadFile(filepath.Join(dir, configFile))
 				if err != nil {
@@ -1550,19 +1766,24 @@ func TestInjectRuntimeConfigCommentGuardrailIsProviderAgnostic(t *testing.T) {
 	}
 }
 
-// TestInjectRuntimeConfigLinuxCommentFormattingEmphasizesStdin pins that the
-// "## Comment Formatting" section emits the quoted-HEREDOC stdin mandate on
-// non-Windows hosts for EVERY provider, not just Codex. Post-MUL-2904 the
-// guardrail is provider-agnostic because the corruption is shell-driven; the
-// quoted delimiter is what blocks backtick / `$()` substitution in the body.
+// TestInjectRuntimeConfigLinuxCommentFormattingEmphasizesFile pins that the
+// "## Comment Formatting" section emits the file-first mandate on non-Windows
+// hosts for EVERY provider (post-#4182). The previous quoted-HEREDOC
+// `--content-stdin` rule was kept for years to defend against backtick / `$()`
+// substitution in the body (MUL-2904), but the heredoc/flag boundary turned out
+// to be its own structural bug: when a model wrapped extra flags around the
+// heredoc on `multica issue create`, the flags were silently swallowed into
+// stdin (OXY-78, OXY-76). The file path defeats both classes — the body never
+// reaches the shell, and all flags live on one shell-token line — and converges
+// the Linux/macOS template with the long-standing Windows file-only path.
 //
 // Not parallel: mutates the package-level runtimeGOOS.
-func TestInjectRuntimeConfigLinuxCommentFormattingEmphasizesStdin(t *testing.T) {
+func TestInjectRuntimeConfigLinuxCommentFormattingEmphasizesFile(t *testing.T) {
 	saved := runtimeGOOS
 	t.Cleanup(func() { runtimeGOOS = saved })
 	runtimeGOOS = "linux"
 
-	for _, provider := range []string{"codex", "claude", "opencode"} {
+	for _, provider := range []string{"codex", "claude", "opencode", "dirge"} {
 		t.Run(provider, func(t *testing.T) {
 			dir := t.TempDir()
 			if _, err := InjectRuntimeConfig(dir, provider, TaskContextForEnv{
@@ -1583,20 +1804,27 @@ func TestInjectRuntimeConfigLinuxCommentFormattingEmphasizesStdin(t *testing.T) 
 
 			for _, want := range []string{
 				"## Comment Formatting",
-				"always use `--content-stdin` with a HEREDOC",
-				"even for short single-line replies",
-				"<<'COMMENT'",
+				"always write the comment body to a UTF-8 file with your file-write tool first, then post it with `--content-file <path>`",
+				"#4182",
 				"Never use inline `--content` for agent-authored comments",
 				"Keep the same `--parent` value",
+				"rm ./reply.md",
 				"do not rely on `\\n` escapes",
 			} {
 				if !strings.Contains(s, want) {
 					t.Errorf("%s missing comment-formatting guidance %q\n---\n%s", fileName, want, s)
 				}
 			}
-			// The heading is no longer Codex-scoped.
-			if strings.Contains(s, "Codex-Specific Comment Formatting") {
-				t.Errorf("%s still carries the old Codex-scoped heading\n---\n%s", fileName, s)
+
+			// The previous mandate (#1795 / #1851 / MUL-2904) must NOT remain.
+			for _, banned := range []string{
+				"always use `--content-stdin` with a HEREDOC, even for short single-line replies",
+				"<<'COMMENT'",
+				"Codex-Specific Comment Formatting",
+			} {
+				if strings.Contains(s, banned) {
+					t.Errorf("%s still carries pre-#4182 stdin mandate %q\n---\n%s", fileName, banned, s)
+				}
 			}
 		})
 	}
@@ -1760,14 +1988,15 @@ func TestInjectRuntimeConfigHermes(t *testing.T) {
 	if !strings.Contains(s, "Coding") {
 		t.Error("AGENTS.md missing skill name")
 	}
-	// Hermes has no native skill discovery path wired up, so AGENTS.md must
-	// point the agent at the .agent_context/skills/ fallback — NOT claim that
-	// skills are "discovered automatically".
-	if strings.Contains(s, "discovered automatically") {
-		t.Error("AGENTS.md for Hermes should not claim native skill discovery")
+	// Hermes now discovers skills from the daemon-seeded per-task
+	// HERMES_HOME/skills (see hermes_home.go), so AGENTS.md must use the
+	// "discovered automatically" framing and must NOT point the agent at the
+	// old .agent_context/skills/ fallback it never read (issue #5242).
+	if !strings.Contains(s, "discovered automatically") {
+		t.Error("AGENTS.md for Hermes should describe skills as discovered automatically")
 	}
-	if !strings.Contains(s, ".agent_context/skills/") {
-		t.Error("AGENTS.md for Hermes should reference .agent_context/skills/ fallback path")
+	if strings.Contains(s, ".agent_context/skills/") {
+		t.Error("AGENTS.md for Hermes should not reference the .agent_context/skills/ fallback path")
 	}
 
 	// CLAUDE.md should NOT exist.
@@ -1776,7 +2005,13 @@ func TestInjectRuntimeConfigHermes(t *testing.T) {
 	}
 }
 
-func TestWriteContextFilesHermesFallbackSkills(t *testing.T) {
+// TestWriteContextFilesHermesSkipsWorkdirSkills asserts that Hermes skills are
+// NOT materialized into the workdir. Hermes has no workspace-relative skill
+// discovery; the daemon seeds them into a per-task HERMES_HOME/skills instead
+// (see prepareHermesHome / TestPrepareHermesHome). Writing the old
+// .agent_context/skills/ fallback was pure dead weight the CLI never read
+// (issue #5242).
+func TestWriteContextFilesHermesSkipsWorkdirSkills(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
@@ -1791,14 +2026,15 @@ func TestWriteContextFilesHermesFallbackSkills(t *testing.T) {
 		t.Fatalf("writeContextFiles failed: %v", err)
 	}
 
-	// Skills should be in the fallback .agent_context/skills/ path since
-	// Hermes has no native skills discovery directory.
-	skillMd, err := os.ReadFile(filepath.Join(dir, ".agent_context", "skills", "go-conventions", "SKILL.md"))
-	if err != nil {
-		t.Fatalf("failed to read .agent_context/skills/go-conventions/SKILL.md: %v", err)
+	// No skills dir should be created in the workdir for Hermes — not the old
+	// fallback, and not an empty leftover directory either.
+	if _, err := os.Stat(filepath.Join(dir, ".agent_context", "skills")); !os.IsNotExist(err) {
+		t.Errorf("expected no .agent_context/skills/ for Hermes, got err=%v", err)
 	}
-	if !strings.Contains(string(skillMd), "Follow Go conventions.") {
-		t.Error("SKILL.md missing content")
+
+	// issue_context.md should still be written under .agent_context/.
+	if _, err := os.Stat(filepath.Join(dir, ".agent_context", "issue_context.md")); err != nil {
+		t.Errorf("expected .agent_context/issue_context.md to exist: %v", err)
 	}
 }
 
@@ -1827,25 +2063,18 @@ func TestPrepareCodexHomeSeedsFromShared(t *testing.T) {
 		t.Fatalf("prepareCodexHome failed: %v", err)
 	}
 
-	// sessions should be a symlink to the shared sessions dir.
+	// sessions should be a real, task-local directory — NOT a symlink into the
+	// shared home (MUL-4424). A fresh home gets an empty local dir.
 	sessionsPath := filepath.Join(codexHome, "sessions")
 	fi, err := os.Lstat(sessionsPath)
 	if err != nil {
 		t.Fatalf("sessions not found: %v", err)
 	}
-	sessionsIsLink := fi.Mode()&os.ModeSymlink != 0
-	if !sessionsIsLink && runtime.GOOS != "windows" {
-		t.Error("sessions should be a symlink")
+	if fi.Mode()&os.ModeSymlink != 0 {
+		t.Error("sessions should be a task-local directory, not a symlink into the shared home")
 	}
-	if sessionsIsLink {
-		sessTarget, _ := os.Readlink(sessionsPath)
-		if sessTarget != filepath.Join(sharedHome, "sessions") {
-			t.Errorf("sessions symlink target = %q, want %q", sessTarget, filepath.Join(sharedHome, "sessions"))
-		}
-	} else if fi.IsDir() {
-		if _, err := os.Stat(sessionsPath); err != nil {
-			t.Fatalf("sessions link target should be accessible: %v", err)
-		}
+	if !fi.IsDir() {
+		t.Error("sessions should be a directory")
 	}
 
 	// auth.json should be a symlink.
@@ -1908,6 +2137,53 @@ func TestPrepareCodexHomeSeedsFromShared(t *testing.T) {
 	}
 	if string(data) != "Use superpowers." {
 		t.Errorf("plugin cache skill content = %q", data)
+	}
+}
+
+func TestPrepareCodexHomeCopiesRelativeModelCatalog(t *testing.T) {
+	// Cannot use t.Parallel() with t.Setenv.
+
+	sharedHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(sharedHome, "config.toml"), []byte(`model_catalog_json = "cc-switch-model-catalog.json"`), 0o644); err != nil {
+		t.Fatalf("write shared config.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sharedHome, "cc-switch-model-catalog.json"), []byte(`{"models":[{"model":"deepseek-v4-flash"}]}`), 0o644); err != nil {
+		t.Fatalf("write shared model catalog: %v", err)
+	}
+	t.Setenv("CODEX_HOME", sharedHome)
+
+	codexHome := filepath.Join(t.TempDir(), "codex-home")
+	if err := prepareCodexHome(codexHome, testLogger()); err != nil {
+		t.Fatalf("prepareCodexHome failed: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(codexHome, "cc-switch-model-catalog.json"))
+	if err != nil {
+		t.Fatalf("read per-task model catalog: %v", err)
+	}
+	if string(data) != `{"models":[{"model":"deepseek-v4-flash"}]}` {
+		t.Errorf("per-task model catalog = %q", data)
+	}
+}
+
+func TestPrepareCodexHomeReportsMissingModelCatalogPath(t *testing.T) {
+	// Cannot use t.Parallel() with t.Setenv.
+
+	sharedHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(sharedHome, "config.toml"), []byte(`model_catalog_json = "missing-catalog.json"`), 0o644); err != nil {
+		t.Fatalf("write shared config.toml: %v", err)
+	}
+	t.Setenv("CODEX_HOME", sharedHome)
+
+	codexHome := filepath.Join(t.TempDir(), "codex-home")
+	err := prepareCodexHome(codexHome, testLogger())
+	if err == nil {
+		t.Fatal("expected prepareCodexHome to fail for missing model catalog")
+	}
+	for _, want := range []string{"model_catalog_json", "missing-catalog.json", filepath.Join(sharedHome, "missing-catalog.json")} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q missing %q", err, want)
+		}
 	}
 }
 
@@ -1974,7 +2250,7 @@ func TestPrepareCodexHomeSkipsMissingFiles(t *testing.T) {
 		t.Fatalf("prepareCodexHome failed: %v", err)
 	}
 
-	// Directory should contain sessions symlink + auto-generated config.toml.
+	// Directory should contain a task-local sessions dir + auto-generated config.toml.
 	entries, err := os.ReadDir(codexHome)
 	if err != nil {
 		t.Fatalf("failed to read codex-home: %v", err)
@@ -1984,7 +2260,7 @@ func TestPrepareCodexHomeSkipsMissingFiles(t *testing.T) {
 		entryNames[e.Name()] = true
 	}
 	if !entryNames["sessions"] {
-		t.Error("expected sessions symlink")
+		t.Error("expected sessions directory")
 	}
 	if !entryNames["config.toml"] {
 		t.Error("expected config.toml (auto-generated for network access)")
@@ -1997,14 +2273,18 @@ func TestPrepareCodexHomeSkipsMissingFiles(t *testing.T) {
 			t.Errorf("unexpected entry: %s", name)
 		}
 	}
-	// sessions should be a symlink to the shared sessions dir.
+	// sessions should be a real, task-local directory — not a symlink into the
+	// shared home (MUL-4424).
 	sessionsPath := filepath.Join(codexHome, "sessions")
 	fi, err := os.Lstat(sessionsPath)
 	if err != nil {
 		t.Fatalf("sessions not found: %v", err)
 	}
-	if fi.Mode()&os.ModeSymlink == 0 && runtime.GOOS != "windows" {
-		t.Error("sessions should be a symlink")
+	if fi.Mode()&os.ModeSymlink != 0 {
+		t.Error("sessions should be a task-local directory, not a symlink")
+	}
+	if !fi.IsDir() {
+		t.Error("sessions should be a directory")
 	}
 	if _, err := os.Stat(filepath.Join(codexHome, "plugins", "cache")); err != nil {
 		t.Fatalf("missing shared plugin cache exposure should still be tolerated and created: %v", err)
@@ -3737,10 +4017,14 @@ func TestInjectRuntimeConfigCommentTriggerColdStartRead(t *testing.T) {
 	for _, want := range []string{
 		"Read the triggering conversation first",
 		"multica issue comment list " + issueID + " --thread " + triggerID + " --tail 30 --output json",
+		"multica issue comment list " + issueID + " --recent 10 --output json",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("comment-triggered Workflow missing cold-start read %q\n---\n%s", want, s)
 		}
+	}
+	if strings.Contains(s, "--recent 20") {
+		t.Errorf("comment-triggered Workflow still uses recent 20\n---\n%s", s)
 	}
 	if strings.Contains(s, "new comment(s) since your last run") {
 		t.Errorf("cold-start workflow must not render the since-delta hint\n---\n%s", s)
@@ -3820,11 +4104,9 @@ func TestInjectRuntimeConfigCommentTriggerResumedNoDeltaRead(t *testing.T) {
 }
 
 // TestInjectRuntimeConfigAssignmentTriggerMentionsRecent pins that the
-// assignment-triggered Workflow keeps full-history reading as the mandatory
-// default (the agent must still ingest earlier comments — that rule was
-// added in MUL-1124) but ALSO points at `--recent N` as the long-issue
-// alternative. Without this, the prompt would still be the only place
-// telling the agent about --recent on busy issues.
+// assignment-triggered Workflow keeps comment catch-up mandatory while bounding
+// the mandatory first read to the recent active-thread window. Older context
+// stays reachable through explicit pagination.
 func TestInjectRuntimeConfigAssignmentTriggerMentionsRecent(t *testing.T) {
 	t.Parallel()
 
@@ -3838,29 +4120,37 @@ func TestInjectRuntimeConfigAssignmentTriggerMentionsRecent(t *testing.T) {
 	}
 	s := string(data)
 
-	// Mandatory full-history rule (MUL-1124) must stay.
+	// Mandatory comment catch-up must stay, but the required first read is
+	// bounded to recent active threads instead of the full flat timeline.
 	for _, want := range []string{
-		"multica issue comment list issue-1 --output json",
+		"multica issue comment list issue-1 --recent 10 --output json",
 		"this is mandatory, not optional",
 		"Skipping this step is the most common cause",
 	} {
 		if !strings.Contains(s, want) {
-			t.Errorf("assignment Workflow regressed mandatory-history rule, missing %q\n---\n%s", want, s)
+			t.Errorf("assignment Workflow regressed mandatory recent-first catch-up, missing %q\n---\n%s", want, s)
 		}
 	}
-	// AND --recent must be offered as the long-issue alternative.
+	// Older context must remain reachable through pagination.
 	for _, want := range []string{
-		"--recent 20 --output json",
 		"Next thread cursor:",
+		"--before",
+		"--before-id",
 	} {
 		if !strings.Contains(s, want) {
-			t.Errorf("assignment Workflow missing --recent guidance %q\n---\n%s", want, s)
+			t.Errorf("assignment Workflow missing older-history pagination guidance %q\n---\n%s", want, s)
 		}
 	}
-	// The previous wording framed `--recent` as a replacement ("you may
-	// switch to ..."), which conflicts with the mandatory full-history
-	// rule. Pin that the replacement semantics never reappears — `--recent`
-	// is a paging strategy, not a shortcut.
+	for _, banned := range []string{
+		"multica issue comment list issue-1 --output json",
+		"read the full comment history",
+		"read the full history page-by-page",
+		"`--recent` is a way to read the full history",
+	} {
+		if strings.Contains(s, banned) {
+			t.Errorf("assignment Workflow still carries full-flat mandatory phrasing %q\n---\n%s", banned, s)
+		}
+	}
 	for _, banned := range []string{
 		"you may switch to",
 		"switch to `--recent",
@@ -3883,10 +4173,11 @@ func TestInjectRuntimeConfigAssignmentTriggerMentionsRecent(t *testing.T) {
 func TestInjectRuntimeConfigIssueMetadataSectionScope(t *testing.T) {
 	t.Parallel()
 
-	// Discovery lines in Available Commands → Core must appear in EVERY
-	// runtime config, regardless of trigger type. These are the single
-	// discovery point for the CLI when an agent decides to read or write
-	// metadata outside the numbered workflow.
+	// Discovery lines in Available Commands → Core appear in every runtime
+	// config except quick-create (whose minimal Available Commands lists
+	// only `issue create`). These are the single discovery point for the
+	// CLI when an agent decides to read or write metadata outside the
+	// numbered workflow.
 	coreDiscoveryLines := []string{
 		"multica issue metadata list <issue-id>",
 		"multica issue metadata set <issue-id> --key <k> --value <v> [--type string|number|bool]",
@@ -4039,10 +4330,15 @@ func TestInjectRuntimeConfigIssueMetadataSectionScope(t *testing.T) {
 			}
 			s := string(data)
 
-			// Global Core discovery lines apply everywhere.
-			for _, want := range coreDiscoveryLines {
-				if !strings.Contains(s, want) {
-					t.Errorf("Available Commands → Core missing %q\n---\n%s", want, s)
+			// Global Core discovery lines apply everywhere EXCEPT
+			// quick-create, whose minimal Available Commands
+			// intentionally advertises only `issue create` — the hard
+			// guardrails forbid every other CLI call for that kind.
+			if tc.ctx.QuickCreatePrompt == "" {
+				for _, want := range coreDiscoveryLines {
+					if !strings.Contains(s, want) {
+						t.Errorf("Available Commands → Core missing %q\n---\n%s", want, s)
+					}
 				}
 			}
 
@@ -4072,17 +4368,16 @@ func TestInjectRuntimeConfigIssueMetadataSectionScope(t *testing.T) {
 
 // TestInjectRuntimeConfigIssueMetadataCodexFormattingUnchanged guarantees
 // that the new metadata wiring does not break the codex-specific comment
-// formatting rules (HEREDOC on Linux, --content-file on Windows). The
+// formatting rules (--content-file on every host, post-#4182). The
 // comment-formatting block lives below the metadata write step in the
 // workflow, so any reordering or accidental absorption of the codex
 // section would surface here.
 func TestInjectRuntimeConfigIssueMetadataCodexFormattingUnchanged(t *testing.T) {
-	t.Parallel()
-
+	// Not parallel: mutates the package-level runtimeGOOS.
 	oldGOOS := runtimeGOOS
 	t.Cleanup(func() { runtimeGOOS = oldGOOS })
 
-	t.Run("linux_heredoc", func(t *testing.T) {
+	t.Run("linux_content_file", func(t *testing.T) {
 		runtimeGOOS = "linux"
 		dir := t.TempDir()
 		ctx := TaskContextForEnv{
@@ -4105,9 +4400,9 @@ func TestInjectRuntimeConfigIssueMetadataCodexFormattingUnchanged(t *testing.T) 
 		if !strings.Contains(s, "multica issue metadata list issue-md-codex --output json") {
 			t.Fatalf("metadata list step missing\n---\n%s", s)
 		}
-		// ...AND the codex-specific stdin-only rule is still emitted.
-		if !strings.Contains(s, "always use `--content-stdin` with a HEREDOC") {
-			t.Fatalf("codex linux HEREDOC rule missing\n---\n%s", s)
+		// ...AND the post-#4182 file-first rule is still emitted on Linux.
+		if !strings.Contains(s, "always write the comment body to a UTF-8 file with your file-write tool first, then post it with `--content-file <path>`") {
+			t.Fatalf("codex linux --content-file rule missing\n---\n%s", s)
 		}
 		// ...AND the per-turn reply instruction still points at this
 		// turn's trigger comment id.

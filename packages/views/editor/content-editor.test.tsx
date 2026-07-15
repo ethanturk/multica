@@ -1,15 +1,27 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/react";
+import { createRef } from "react";
 import type { Attachment } from "@multica/core/types";
 import type { UploadResult } from "@multica/core/hooks/use-file-upload";
 
 const mockFocus = vi.hoisted(() => vi.fn());
 const mockSetContent = vi.hoisted(() => vi.fn());
 const mockSetTextSelection = vi.hoisted(() => vi.fn());
+const mockDispatch = vi.hoisted(() => vi.fn());
+const emptyTr = vi.hoisted(() => ({ __emptyTransaction: true }));
+// Captures the options ContentEditor hands to createEditorExtensions on its
+// most recent render — lets the placeholder tests assert the getter it wires
+// into the Placeholder extension reads the live value.
+const capturedExtOptions = vi.hoisted<{
+  current: { placeholder?: string | (() => string) } | undefined;
+}>(() => ({ current: undefined }));
 const editorState = vi.hoisted(() => ({
   isFocused: false,
   isDestroyed: false,
   markdown: "",
+  // Nodes the mocked doc reports via `descendants`. The content-sync effect
+  // walks these to detect in-flight uploads; default empty = nothing uploading.
+  uploadingNodes: [] as Array<{ attrs: { uploading?: boolean } }>,
 }));
 
 // Records the attachments[] prop the provider received on its most recent
@@ -27,7 +39,12 @@ vi.mock("@tanstack/react-query", () => ({
 }));
 
 vi.mock("./extensions", () => ({
-  createEditorExtensions: () => [],
+  createEditorExtensions: (options: {
+    placeholder?: string | (() => string);
+  }) => {
+    capturedExtOptions.current = options;
+    return [];
+  },
 }));
 
 vi.mock("./extensions/file-upload", () => ({
@@ -36,6 +53,13 @@ vi.mock("./extensions/file-upload", () => ({
 
 vi.mock("./utils/preprocess", () => ({
   preprocessMarkdown: (value: string) => value,
+}));
+
+// Empty-list repair needs a live ProseMirror doc (covered by
+// repair-list-items.test.ts against the real editor). Here it is a no-op so the
+// mocked editor's sync path exercises the normal (non-repair) branch.
+vi.mock("./utils/repair-list-items", () => ({
+  repairEmptyListItems: vi.fn(() => false),
 }));
 
 vi.mock("./bubble-menu", () => ({
@@ -82,8 +106,19 @@ vi.mock("@tiptap/react", () => ({
           setTextSelection: mockSetTextSelection,
         },
         getMarkdown: () => editorState.markdown,
+        view: { dispatch: mockDispatch },
         state: {
-          doc: { content: { size: 0 } },
+          get tr() {
+            return emptyTr;
+          },
+          doc: {
+            content: { size: 0 },
+            descendants: (cb: (node: { attrs: { uploading?: boolean } }) => boolean | void) => {
+              for (const node of editorState.uploadingNodes) {
+                if (cb(node) === false) break;
+              }
+            },
+          },
           selection: { empty: true, from: 0, to: 0 },
         },
       };
@@ -101,7 +136,7 @@ vi.mock("@tiptap/react", () => ({
   ),
 }));
 
-import { ContentEditor } from "./content-editor";
+import { ContentEditor, type ContentEditorRef } from "./content-editor";
 
 describe("ContentEditor", () => {
   beforeEach(() => {
@@ -109,10 +144,12 @@ describe("ContentEditor", () => {
     editorState.isFocused = false;
     editorState.isDestroyed = false;
     editorState.markdown = "";
+    editorState.uploadingNodes = [];
     editorRef.current = null;
     onCreateFired.value = false;
     latestEditorOptions.current = undefined;
     providerProps.attachments = undefined;
+    capturedExtOptions.current = undefined;
   });
 
   afterEach(() => {
@@ -153,6 +190,38 @@ describe("ContentEditor", () => {
       "new content from server",
       expect.objectContaining({ emitUpdate: false, contentType: "markdown" }),
     );
+  });
+
+  it("does not parse the initial defaultValue twice when markdown round-trip canonicalizes it", () => {
+    // useEditor already parsed defaultValue through its `content` option. The
+    // editor's canonical Markdown can legitimately differ from the source, so
+    // that difference alone must not trigger an immediate second setContent.
+    editorState.markdown = "- [ ] canonical task";
+
+    render(
+      <ContentEditor defaultValue={"- [ ] source task\n\ncontinuation"} />,
+    );
+
+    expect(mockSetContent).not.toHaveBeenCalled();
+  });
+
+  it("does not sync while a file upload is in flight (in-flight upload node must survive external defaultValue changes)", () => {
+    editorState.markdown = "old content";
+    const { rerender } = render(<ContentEditor defaultValue="old content" />);
+
+    // A file is uploading: the doc holds a node with attrs.uploading. An
+    // external defaultValue change (e.g. chat lazy-creating a session mid-upload
+    // flips the draft key → defaultValue) must NOT setContent over it, or the
+    // uploading node is wiped and the upload's finalize can't find it.
+    editorState.uploadingNodes = [{ attrs: { uploading: true } }];
+    rerender(<ContentEditor defaultValue="" />);
+
+    expect(mockSetContent).not.toHaveBeenCalled();
+
+    // Once the upload settles (no uploading node), a later external change syncs.
+    editorState.uploadingNodes = [];
+    rerender(<ContentEditor defaultValue="new content from server" />);
+    expect(mockSetContent).toHaveBeenCalledTimes(1);
   });
 
   it("does not sync when editor is focused and has unsaved local edits", () => {
@@ -221,6 +290,22 @@ describe("ContentEditor", () => {
     rerender(<ContentEditor defaultValue={"same content\n"} />);
 
     expect(mockSetContent).not.toHaveBeenCalled();
+  });
+
+  it("refactor safety net: imperative getMarkdown() stays untrimmed, keeping its exact current return value", () => {
+    // The imperative `getMarkdown()` is deliberately NOT routed through
+    // `normalizeMarkdown` (which would `trimEnd()`). This pins down that the
+    // F2a/F3 dedupe refactor preserved the method's exact return value —
+    // trailing blank lines included — instead of folding it into the trimming
+    // helper. `stripBlobUrls` (unmocked here) only strips blob image markdown,
+    // so the trailing newlines survive untouched.
+    editorState.markdown = "kept body\n\n";
+
+    const ref = createRef<ContentEditorRef>();
+    render(<ContentEditor ref={ref} />);
+
+    expect(ref.current).not.toBeNull();
+    expect(ref.current?.getMarkdown()).toBe("kept body\n\n");
   });
 
   it("flushes a pending debounced update on unmount when flushPendingOnUnmount is set", () => {
@@ -313,6 +398,41 @@ describe("ContentEditor", () => {
     unmount();
 
     expect(onUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes the live placeholder getter and repaints when the placeholder prop changes", () => {
+    // Repro for MUL-4276: Tiptap's Placeholder snapshots a *string* option at
+    // mount, so switching between an archived and an active chat session under
+    // the SAME agent (no editor remount) left the input frozen on the archived
+    // copy. The fix wires a *getter* over a live ref into the extension and, on
+    // change, dispatches an empty transaction to force a decoration recompute.
+    const { rerender } = render(
+      <ContentEditor placeholder="This session is archived" />,
+    );
+    // What reaches the Placeholder extension is a getter, not a static string.
+    const getter = capturedExtOptions.current?.placeholder;
+    expect(typeof getter).toBe("function");
+    expect((getter as () => string)()).toBe("This session is archived");
+
+    mockDispatch.mockClear();
+
+    rerender(<ContentEditor placeholder="Message agent…" />);
+
+    // Same getter identity now returns the new text (reads the live ref)…
+    expect((getter as () => string)()).toBe("Message agent…");
+    // …and a repaint was nudged so the mounted decoration re-reads it.
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    expect(mockDispatch).toHaveBeenCalledWith(emptyTr);
+  });
+
+  it("does not repaint when the placeholder prop is unchanged", () => {
+    const { rerender } = render(<ContentEditor placeholder="Message agent…" />);
+
+    mockDispatch.mockClear();
+
+    rerender(<ContentEditor placeholder="Message agent…" />);
+
+    expect(mockDispatch).not.toHaveBeenCalled();
   });
 });
 
