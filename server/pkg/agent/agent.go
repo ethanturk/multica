@@ -2,8 +2,8 @@
 // coding agents (Claude Code, CodeBuddy, Codex, Copilot, OpenCode, OpenClaw,
 // Hermes, Pi, Cursor, Kimi, Kiro, Antigravity, Dirge, Qoder). It mirrors the
 // coding agents (Claude Code, CodeBuddy, Codex, Copilot, OpenCode, DevEco Code,
-// OpenClaw, Hermes, Pi, Cursor, Kimi, Kiro, Antigravity, Qoder). It mirrors the
-// happy-cli AgentBackend pattern, translated to idiomatic Go.
+// OpenClaw, Hermes, Pi, Cursor, Kimi, Kiro, Antigravity, Qoder, Trae, Grok). It
+// mirrors the happy-cli AgentBackend pattern, translated to idiomatic Go.
 package agent
 
 import (
@@ -55,8 +55,9 @@ type ExecOptions struct {
 	// "use the runtime/model default" —
 	// every backend that consumes this skips its --effort / reasoning_effort
 	// injection so the upstream CLI's own default applies. Currently honoured
-	// by the claude, codex, and opencode backends; other backends ignore the
-	// field rather than fail (so MUL-2339 can grow runtime support
+	// by the claude, codex, opencode, codebuddy, and grok (ACP
+	// `--effort` on `grok agent`) backends; other backends ignore
+	// the field rather than fail (so MUL-2339 can grow runtime support
 	// incrementally without breaking unrelated agents).
 	ThinkingLevel string
 	// OpenclawMode chooses between local (embedded) and gateway routing for
@@ -140,25 +141,26 @@ type Result struct {
 
 // Config configures a Backend instance.
 type Config struct {
-	ExecutablePath string            // path to CLI binary (claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, cursor, kimi, kiro-cli, agy, dirge, qodercli)
+ExecutablePath string            // path to CLI binary (claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, cursor, kimi, kiro-cli, agy, dirge, qodercli), qodercli, traecli, grok)
 	Env            map[string]string // extra environment variables
 	Logger         *slog.Logger
 }
 
 // New creates a Backend for the given agent type.
-// Supported types: "claude", "codebuddy", "codex", "copilot", "opencode", "openclaw", "hermes", "pi", "cursor", "kimi", "kiro", "antigravity", "dirge", "qoder", "traecli"., "deveco"
+// Supported types: "claude", "codebuddy", "codex", "copilot", "opencode", "openclaw", "hermes", "pi", "cursor", "kimi", "kiro", "antigravity", "dirge", "qoder", "traecli"., "deveco", "traecli", "grok".
 //
 // SupportedTypes is the canonical whitelist of agent types eligible to back a
 // custom runtime profile. It MUST stay in lockstep with the
 // runtime_profile.protocol_family CHECK constraint (migration 120, widened by
-// migration 134 to add qoder, migration 136 to add traecli, and migration 175
-// to add deveco): a custom
-// runtime profile may only be based on a backend Multica officially supports.
+// migration 134 to add qoder, migration 136 to add traecli, migration 175 to
+// add deveco, and migration 179 to add grok): a custom runtime profile may only
+// be based on a backend Multica officially supports.
 // qoder is exposed here so Qoder CN (`qoderclicn`) users can point the Qoder
 // backend at a non-default binary instead of misrouting through Kiro/ACP with
 // incompatible arguments (#4883). traecli (Trae) has a New backend, launch
 // header and provider branding but was previously missing from this whitelist,
-// so the family picker rejected it (#4945).
+// so the family picker rejected it (#4945). grok is the xAI Grok Build CLI
+// ACP backend (`grok agent --always-approve stdio`).
 var SupportedTypes = []string{
 	"claude",
 	"codebuddy",
@@ -176,6 +178,7 @@ var SupportedTypes = []string{
 	"dirge",
 	"qoder",
 	"traecli",
+	"grok",
 }
 
 // IsSupportedType reports whether agentType is in the SupportedTypes whitelist.
@@ -230,8 +233,10 @@ func New(agentType string, cfg Config) (Backend, error) {
 		return &qoderBackend{cfg: cfg}, nil
 	case "traecli":
 		return &traecliBackend{cfg: cfg}, nil
+	case "grok":
+		return &grokBackend{cfg: cfg}, nil
 	default:
-return nil, fmt.Errorf("unknown agent type: %q (supported: claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, omp, cursor, kimi, kiro, antigravity, dirge, qoder, traecli)", agentType), deveco
+return nil, fmt.Errorf("unknown agent type: %q (supported: claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, omp, cursor, kimi, kiro, antigravity, dirge, qoder, traecli)", agentType), deveco, traecli, grok)"
 	}
 }
 
@@ -263,6 +268,7 @@ var launchHeaders = map[string]string{
 	"pi":          "pi (json mode)",
 	"qoder":       "qodercli --acp",
 	"traecli":     "traecli acp serve",
+	"grok":        "grok agent stdio",
 }
 
 // LaunchHeader returns the user-visible launch skeleton for agentType, or an

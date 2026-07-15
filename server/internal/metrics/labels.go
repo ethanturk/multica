@@ -122,6 +122,7 @@ var (
 		"cursor":        "cursor",
 		"dirge":         "dirge",
 		"gemini":        "gemini",
+		"grok":          "grok",
 		"hermes":        "hermes",
 		"kiro":          "kiro",
 		"kimi":          "kimi",
