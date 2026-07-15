@@ -163,6 +163,8 @@ const mockViewState: {
   projectFilters?: string[];
   includeNoProject?: boolean;
   labelFilters?: string[];
+  propertyFilters?: Record<string, string[]>;
+  cardPropertyIds?: string[];
   agentRunningFilter?: boolean;
 } = {
   sortBy: "position",
@@ -183,6 +185,8 @@ const mockViewState: {
   projectFilters: [],
   includeNoProject: false,
   labelFilters: [],
+  propertyFilters: {},
+  cardPropertyIds: [],
   agentRunningFilter: false,
 };
 const mockSetSwimlaneOrder = mockViewState.setSwimlaneOrder as ReturnType<typeof vi.fn>;
@@ -269,6 +273,7 @@ const mockIssues: Issue[] = [
     start_date: null,
     due_date: null,
     metadata: {},
+    properties: {},
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
   },
@@ -292,6 +297,7 @@ const mockIssues: Issue[] = [
     start_date: null,
     due_date: null,
     metadata: {},
+    properties: {},
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
   },
@@ -315,6 +321,7 @@ const mockIssues: Issue[] = [
     start_date: null,
     due_date: null,
     metadata: {},
+    properties: {},
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
   },
@@ -395,6 +402,7 @@ describe("SwimLaneView", () => {
     start_date: null,
     due_date: null,
     metadata: {},
+    properties: {},
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
   };
@@ -542,6 +550,7 @@ describe("SwimLaneView", () => {
     start_date: null,
     due_date: null,
     metadata: {},
+    properties: {},
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
   };
@@ -840,6 +849,7 @@ describe("SwimLaneView", () => {
       start_date: null,
       due_date: null,
       metadata: {},
+      properties: {},
       created_at: "2026-01-01T00:00:00Z",
       updated_at: "2026-01-01T00:00:00Z",
     },
@@ -863,6 +873,7 @@ describe("SwimLaneView", () => {
       start_date: null,
       due_date: null,
       metadata: {},
+      properties: {},
       created_at: "2026-01-01T00:00:00Z",
       updated_at: "2026-01-01T00:00:00Z",
     },
@@ -886,6 +897,7 @@ describe("SwimLaneView", () => {
       start_date: null,
       due_date: null,
       metadata: {},
+      properties: {},
       created_at: "2026-01-01T00:00:00Z",
       updated_at: "2026-01-01T00:00:00Z",
     },
@@ -909,6 +921,7 @@ describe("SwimLaneView", () => {
       start_date: null,
       due_date: null,
       metadata: {},
+      properties: {},
       created_at: "2026-01-01T00:00:00Z",
       updated_at: "2026-01-01T00:00:00Z",
     },
@@ -1365,6 +1378,7 @@ describe("SwimLaneView", () => {
       start_date: null,
       due_date: null,
       metadata: {},
+      properties: {},
       created_at: "2026-01-01T00:00:00Z",
       updated_at: "2026-01-01T00:00:00Z",
     };
@@ -1439,6 +1453,7 @@ describe("SwimLaneView", () => {
       start_date: null,
       due_date: null,
       metadata: {},
+      properties: {},
       created_at: "2026-01-01T00:00:00Z",
       updated_at: "2026-01-01T00:00:00Z",
     };
@@ -1520,6 +1535,7 @@ describe("SwimLaneView", () => {
       start_date: null,
       due_date: null,
       metadata: {},
+      properties: {},
       created_at: "2026-01-01T00:00:00Z",
       updated_at: "2026-01-01T00:00:00Z",
     };
@@ -1614,6 +1630,7 @@ describe("SwimLaneView", () => {
       start_date: null,
       due_date: null,
       metadata: {},
+      properties: {},
       created_at: "2026-01-01T00:00:00Z",
       updated_at: "2026-01-01T00:00:00Z",
     };
@@ -1710,6 +1727,7 @@ describe("SwimLaneView", () => {
       start_date: null,
       due_date: null,
       metadata: {},
+      properties: {},
       created_at: "2026-01-01T00:00:00Z",
       updated_at: "2026-01-01T00:00:00Z",
     };

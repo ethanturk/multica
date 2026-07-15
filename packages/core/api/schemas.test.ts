@@ -19,6 +19,7 @@ import {
   InboxUnreadSummarySchema,
   IssueTriggerPreviewSchema,
   ListIssuesResponseSchema,
+  ListPropertiesResponseSchema,
   SearchProjectsResponseSchema,
   RuntimeHourlyActivityListSchema,
   RuntimeUsageByAgentListSchema,
@@ -100,6 +101,90 @@ describe("IssueSchema (via ListIssuesResponseSchema)", () => {
     const payload = { issues: [issueWithoutStage], total: 1 };
     const parsed = ListIssuesResponseSchema.parse(payload);
     expect(parsed.issues[0]?.stage).toBeNull();
+  });
+
+  it("accepts custom property values including multi_select arrays", () => {
+    const payload = {
+      issues: [
+        {
+          ...baseIssue,
+          properties: { "def-1": "opt-a", "def-2": ["opt-x", "opt-y"], "def-3": 3.5, "def-4": true },
+        },
+      ],
+      total: 1,
+    };
+    const parsed = ListIssuesResponseSchema.parse(payload);
+    expect(parsed.issues[0]?.properties).toEqual({
+      "def-1": "opt-a",
+      "def-2": ["opt-x", "opt-y"],
+      "def-3": 3.5,
+      "def-4": true,
+    });
+  });
+
+  it("defaults properties to {} when the server omits it (older backend)", () => {
+    const parsed = ListIssuesResponseSchema.parse({ issues: [baseIssue], total: 1 });
+    expect(parsed.issues[0]?.properties).toEqual({});
+  });
+
+  it("drops unknown-shaped property values instead of failing the issue parse", () => {
+    // Forward compat: a future server type (actor/relation) may ship object
+    // values. That one entry must disappear; the issue and its other
+    // properties must survive — a full parse failure would blank the whole
+    // list through parseWithFallback on installed desktop builds.
+    const payload = {
+      issues: [
+        {
+          ...baseIssue,
+          properties: { "def-1": { nested: 1 }, "def-2": "opt-a" },
+        },
+      ],
+      total: 1,
+    };
+    const parsed = ListIssuesResponseSchema.parse(payload);
+    expect(parsed.issues[0]?.properties).toEqual({ "def-2": "opt-a" });
+  });
+});
+
+describe("IssuePropertySchema (via ListPropertiesResponseSchema)", () => {
+  const baseProperty = {
+    id: "22222222-2222-2222-2222-222222222222",
+    workspace_id: "ws-1",
+    name: "Severity",
+    type: "select",
+    description: "",
+    config: { options: [{ id: "opt-1", name: "Critical", color: "#ef4444" }] },
+    position: 1,
+    archived: false,
+    archived_at: null,
+    usage_count: 2,
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+  };
+
+  it("parses a full definition", () => {
+    const parsed = ListPropertiesResponseSchema.parse({ properties: [baseProperty], total: 1 });
+    expect(parsed.properties[0]?.config.options?.[0]?.name).toBe("Critical");
+  });
+
+  it("survives a malformed response by defaulting the list", () => {
+    const parsed = ListPropertiesResponseSchema.parse({});
+    expect(parsed.properties).toEqual([]);
+    expect(parsed.total).toBe(0);
+  });
+
+  it("keeps unknown property types as strings (forward compat)", () => {
+    const parsed = ListPropertiesResponseSchema.parse({
+      properties: [{ ...baseProperty, type: "relation", config: {} }],
+      total: 1,
+    });
+    expect(parsed.properties[0]?.type).toBe("relation");
+  });
+
+  it("defaults config when the server sends none", () => {
+    const { config: _omit, ...withoutConfig } = baseProperty;
+    const parsed = ListPropertiesResponseSchema.parse({ properties: [withoutConfig], total: 1 });
+    expect(parsed.properties[0]?.config).toEqual({});
   });
 });
 
