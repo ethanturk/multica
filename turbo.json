@@ -17,7 +17,7 @@
   ],
   "tasks": {
     "build": {
-      "dependsOn": ["^build"],
+      "dependsOn": ["^build", "typecheck"],
       "inputs": ["src/**", "app/**", "**/*.ts", "**/*.tsx", "**/*.css"],
       "outputs": [".next/**", "!.next/cache/**", "dist/**", "out/**"]
     },

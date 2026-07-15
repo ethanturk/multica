@@ -829,7 +829,9 @@ func pinNonCodexAgentsToMissingPaths(t *testing.T) {
 	missingDir := t.TempDir()
 	for _, name := range []string{
 		"MULTICA_CLAUDE_PATH",
+		"MULTICA_CODEBUDDY_PATH",
 		"MULTICA_OPENCODE_PATH",
+		"MULTICA_DEVECO_PATH",
 		"MULTICA_OPENCLAW_PATH",
 		"MULTICA_HERMES_PATH",
 		"MULTICA_PI_PATH",
@@ -837,7 +839,11 @@ func pinNonCodexAgentsToMissingPaths(t *testing.T) {
 		"MULTICA_COPILOT_PATH",
 		"MULTICA_KIMI_PATH",
 		"MULTICA_KIRO_PATH",
-"MULTICA_DIRGE_PATH",, "MULTICA_GROK_PATH",
+		"MULTICA_ANTIGRAVITY_PATH",
+		"MULTICA_DIRGE_PATH",
+		"MULTICA_QODER_PATH",
+		"MULTICA_TRAECLI_PATH",
+		"MULTICA_GROK_PATH",
 	} {
 		t.Setenv(name, filepath.Join(missingDir, strings.ToLower(name)))
 	}

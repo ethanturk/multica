@@ -27,6 +27,24 @@ Use these dettools where available:
 If any required dettool is unavailable, stop and report that automated evaluation
 is blocked.
 
+## Stage 4 evaluation (required)
+
+Stage 4 is performed by the default-allowlisted `agent_improvement_evaluate` dettool. It is not a `multica ail stage4` CLI command.
+
+Use the Stage 3 outputs as the evaluator inputs:
+- `candidate_dettools` from `diagnostics/stage3/stage3_digest.json`
+- `repeat_signatures` from `diagnostics/stage3/stage3_signatures.jsonl`
+
+The Stage 4 decision set is closed. The evaluator returns only:
+- `ready_for_candidate`
+- `ready_for_review`
+- `defer`
+
+Consume those decisions as follows:
+- `ready_for_candidate` -> continue into Stage 6 once a human approval reference exists
+- `ready_for_review` -> post the recommendation for human review; do not scaffold yet
+- `defer` -> stop without scaffolding and wait for stronger evidence in a later loop
+
 ## Stage 7 rerun controls (hard requirement)
 
 All evaluation runs must support rerun filters and a determinism profile:
@@ -41,7 +59,7 @@ All evaluation runs must support rerun filters and a determinism profile:
 
 ## Stage 6 candidate generation
 
-When a Stage 5 digest recommendation has explicit human approval, generate the prospect scaffold before replay evaluation:
+When Stage 4 returns `ready_for_candidate` and the corresponding recommendation has explicit human approval, generate the prospect scaffold before replay evaluation:
 
 ```bash
 multica ail stage6 \
