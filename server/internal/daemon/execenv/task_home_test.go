@@ -15,8 +15,11 @@ import (
 // table — is valid TOML.
 func TestRenderManagedBlockWritableRoots(t *testing.T) {
 	t.Parallel()
-	policy := codexSandboxPolicyFor("linux", "0.121.0")
-	policy.WritableRoots = []string{"/home/u/multica_workspaces/ws/abc/home", "/home/u/multica_workspaces/.repos/ws"}
+	policy := codexSandboxPolicy{
+		Mode:          "workspace-write",
+		NetworkAccess: true,
+		WritableRoots: []string{"/home/u/multica_workspaces/ws/abc/home", "/home/u/multica_workspaces/.repos/ws"},
+	}
 
 	block := renderMulticaManagedBlock(policy)
 
@@ -48,9 +51,9 @@ func TestRenderManagedBlockWritableRoots(t *testing.T) {
 func TestRenderManagedBlockNoWritableRoots(t *testing.T) {
 	t.Parallel()
 
-	linux := renderMulticaManagedBlock(codexSandboxPolicyFor("linux", "0.121.0"))
-	if strings.Contains(linux, "writable_roots") {
-		t.Errorf("workspace-write with no roots must omit writable_roots, got:\n%s", linux)
+	workspaceWrite := renderMulticaManagedBlock(codexSandboxPolicy{Mode: "workspace-write", NetworkAccess: true})
+	if strings.Contains(workspaceWrite, "writable_roots") {
+		t.Errorf("workspace-write with no roots must omit writable_roots, got:\n%s", workspaceWrite)
 	}
 
 	// danger-full-access must never emit workspace-write keys even if roots set.
@@ -69,8 +72,11 @@ func TestEnsureCodexSandboxConfigWritableRoots(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 
-	policy := codexSandboxPolicyFor("linux", "0.121.0")
-	policy.WritableRoots = []string{filepath.Join(dir, "home"), filepath.Join(dir, "repos")}
+	policy := codexSandboxPolicy{
+		Mode:          "workspace-write",
+		NetworkAccess: true,
+		WritableRoots: []string{filepath.Join(dir, "home"), filepath.Join(dir, "repos")},
+	}
 	if err := ensureCodexSandboxConfig(configPath, policy, "0.121.0", testLogger()); err != nil {
 		t.Fatalf("ensureCodexSandboxConfig failed: %v", err)
 	}
@@ -90,10 +96,9 @@ func TestEnsureCodexSandboxConfigWritableRoots(t *testing.T) {
 	}
 }
 
-// TestPrepareCodexSandboxHomeLinux verifies the Linux path creates a writable
-// home and returns exactly that home as the only writable root (no repo cache —
-// Codex re-protects resolved gitdirs, so writable_roots can't unblock git; see
-// task_home.go / #2925).
+// TestPrepareCodexSandboxHomeLinux verifies Linux skips the redirected home
+// when danger-full-access is active. The real HOME and resolved worktree gitdir
+// are both writable without extra roots.
 func TestPrepareCodexSandboxHomeLinux(t *testing.T) {
 	// Not parallel: mutates HOME via os.UserHomeDir seeding in prepareTaskHome.
 	fakeHome := t.TempDir()
@@ -105,15 +110,11 @@ func TestPrepareCodexSandboxHomeLinux(t *testing.T) {
 		t.Fatalf("prepareCodexSandboxHome: %v", err)
 	}
 
-	wantHome := filepath.Join(envRoot, "home")
-	if home != wantHome {
-		t.Errorf("home = %q, want %q", home, wantHome)
+	if home != "" || roots != nil {
+		t.Fatalf("linux danger-full-access should skip writable home, got home=%q roots=%v", home, roots)
 	}
-	if fi, err := os.Stat(home); err != nil || !fi.IsDir() {
-		t.Errorf("task home dir not created: err=%v", err)
-	}
-	if len(roots) != 1 || roots[0] != wantHome {
-		t.Errorf("writable roots = %v, want [%q]", roots, wantHome)
+	if _, err := os.Stat(filepath.Join(envRoot, "home")); !os.IsNotExist(err) {
+		t.Errorf("linux must not create a task home dir, stat err=%v", err)
 	}
 }
 

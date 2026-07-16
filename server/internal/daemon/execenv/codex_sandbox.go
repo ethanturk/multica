@@ -12,17 +12,19 @@ import (
 
 // Background
 //
-// On macOS, Codex's Seatbelt sandbox in the `workspace-write` mode silently
-// ignores `[sandbox_workspace_write] network_access = true`. DNS resolution is
-// blocked at the syscall layer, so processes inside the sandbox see
-// `no such host` errors when calling out (for example, `multica issue get`
-// hitting the Multica API). See upstream issue openai/codex#10390.
+// Codex's `workspace-write` sandbox intentionally protects Git metadata, even
+// when the resolved gitdir is inside an explicit writable root. Multica repo
+// checkouts are linked worktrees whose gitdir lives under the shared .repos
+// cache, so Linux Landlock makes normal git add/commit/branch operations fail
+// with EROFS. Codex currently offers no narrower metadata-write grant; upstream
+// recommends disabling its sandbox when Git writes are required. Multica tasks
+// already run inside the daemon-managed runtime boundary, so Linux uses
+// danger-full-access to preserve the required coding-agent workflow. See
+// openai/codex#5034 and multica-ai/multica#2925.
 //
-// Until a fixed Codex release ships, the per-task Codex config on macOS needs
-// to fall back to `sandbox_mode = "danger-full-access"` so the agent can
-// actually reach the Multica API. On Linux (and on macOS once the upstream
-// fix is released), the normal `workspace-write` + `network_access = true`
-// combo is preferred because it keeps the filesystem sandbox intact.
+// macOS also uses danger-full-access because Seatbelt currently ignores
+// `[sandbox_workspace_write] network_access = true`, blocking the Multica API.
+// Windows keeps workspace-write because it does not use Linux Landlock.
 //
 // CodexDarwinNetworkAccessFixedVersion is the earliest Codex CLI version in
 // which `network_access = true` is honored under Seatbelt on macOS. Bump this
@@ -54,8 +56,8 @@ type codexSandboxPolicy struct {
 // codexSandboxPolicyFor picks the right policy for the given platform and
 // detected Codex CLI version.
 //
-//   - Non-darwin: always workspace-write with network access (Landlock is not
-//     affected by the macOS Seatbelt bug).
+//   - Linux: danger-full-access so linked-worktree Git metadata stays writable.
+//   - Windows: workspace-write with network access.
 //   - darwin with a version at or above CodexDarwinNetworkAccessFixedVersion:
 //     workspace-write with network access (upstream bug fixed).
 //   - darwin otherwise (including when the version is unknown): fall back to
@@ -64,11 +66,18 @@ func codexSandboxPolicyFor(goos, detectedVersion string) codexSandboxPolicy {
 	if goos == "" {
 		goos = runtime.GOOS
 	}
+	if goos == "linux" {
+		return codexSandboxPolicy{
+			Mode:          "danger-full-access",
+			NetworkAccess: false,
+			Reason:        "codex workspace-write protects git metadata and blocks required git operations (openai/codex#5034)",
+		}
+	}
 	if goos != "darwin" {
 		return codexSandboxPolicy{
 			Mode:          "workspace-write",
 			NetworkAccess: true,
-			Reason:        "non-darwin platform — seatbelt bug does not apply",
+			Reason:        "platform does not use linux landlock or macos seatbelt",
 		}
 	}
 	if codexDarwinNetworkAccessFixed(detectedVersion) {
@@ -104,12 +113,6 @@ func codexDarwinNetworkAccessFixed(detectedVersion string) bool {
 		return false
 	}
 	return !got.lessThan(fixed)
-}
-
-// codexUpgradeHint returns a short, actionable hint for users running a Codex
-// version that suffers from the macOS network_access bug.
-func codexUpgradeHint() string {
-	return "upgrade Codex CLI (e.g. `brew upgrade codex` or `npm i -g @openai/codex`) once a release including openai/codex#10390 is available to restore workspace-write + network_access"
 }
 
 // multicaManagedBeginMarker / multicaManagedEndMarker delimit the block the
@@ -237,8 +240,8 @@ func stripLegacySandboxDirectives(content string) string {
 // twice produces the same file contents. The file is created if it doesn't
 // exist.
 //
-// The function logs (at warn level) when it falls back to danger-full-access
-// on macOS so the incident is visible in daemon logs.
+// The function logs (at warn level) when danger-full-access is selected so the
+// reduced inner-sandbox boundary is visible in daemon logs.
 func ensureCodexSandboxConfig(configPath string, policy codexSandboxPolicy, detectedVersion string, logger *slog.Logger) error {
 	data, err := os.ReadFile(configPath)
 	if err != nil && !os.IsNotExist(err) {
@@ -262,10 +265,9 @@ func ensureCodexSandboxConfig(configPath string, policy codexSandboxPolicy, dete
 		if version == "" {
 			version = "unknown"
 		}
-		logger.Warn("codex sandbox: falling back to danger-full-access on macOS",
+		logger.Warn("codex sandbox: using danger-full-access",
 			"reason", policy.Reason,
 			"codex_version", version,
-			"hint", codexUpgradeHint(),
 			"config_path", configPath,
 		)
 	}
