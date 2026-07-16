@@ -294,6 +294,43 @@ export function createEnDict(allowSignup: boolean): LandingDict {
     },
     entries: [
       {
+        version: "0.4.2",
+        date: "2026-07-15",
+        title: "Custom issue fields, human attribution, and Grok agents",
+        changes: [],
+        features: [
+          "You can now add your own custom fields to issues, and see them right in the list.",
+          "You can now see which teammate is behind each agent run.",
+          "You can now build agents on Grok.",
+          "The agents list now shows each agent's access scope, with filtering and bulk editing.",
+          "Issue links now open in a new tab by default — you can change this in preferences.",
+          "You can now create a workspace right from the command line.",
+          "You can now pick a random color for labels and custom fields.",
+          "Fold or unfold all comments on an issue at once from the command palette.",
+          "The Help menu now shows the version of the server you are on.",
+          "The desktop app now supports Intel-based Macs.",
+        ],
+        improvements: [
+          "Switching tabs and loading pages is now noticeably faster and smoother.",
+          "Your machine's updates and CLI status now live together on the machine page.",
+          "The Recent work list now shows a placeholder as it loads, instead of a blank.",
+        ],
+        fixes: [
+          "CodeBuddy agents now use the skills and memory you assign them.",
+          "opencode agent runs no longer hang when they end unexpectedly.",
+          "More kinds of credentials are now hidden from logs.",
+          "Queued tasks are now picked up reliably and start without getting stuck.",
+          "The buttons on the landing page now take you to your workspace correctly.",
+          "Fetching recent context from Lark is fast and reliable again.",
+          "Dropdown selections now show proper names instead of internal values.",
+          "With the sidebar collapsed, page content is now evenly aligned.",
+          "Cancelling a task no longer scrambles the agent's transcript.",
+          "Running several Codex tasks at once no longer makes them block each other.",
+          "Your scroll position is now reliably kept as you move around an issue.",
+          "Pasting content with unusual characters into a comment no longer breaks it.",
+        ],
+      },
+      {
         version: "0.4.1",
         date: "2026-07-14",
         title: "DevEco Code agents, desktop auto-update, and reliability fixes",
@@ -2234,10 +2271,9 @@ export function createEnDict(allowSignup: boolean): LandingDict {
       },
       macIntel: {
         title: "Multica for macOS",
-        sub: "Apple Silicon required — Intel Macs not yet supported.",
-        disabledCta: "Apple Silicon required",
-        intelHint:
-          "On an Intel Mac? Use the CLI below — it runs the same daemon.",
+        sub: "Intel · bundled daemon, zero setup",
+        primary: "Download (.dmg)",
+        altZip: "or download .zip",
       },
       winX64: {
         title: "Multica for Windows",
@@ -2259,12 +2295,13 @@ export function createEnDict(allowSignup: boolean): LandingDict {
         title: "Choose your platform",
         sub: "All installers are listed below.",
       },
-      safariMacHint: "On an Intel Mac? Use the CLI below.",
+      safariMacHint: "On an Intel Mac? Choose the Intel download below.",
       archFallbackHint: "Wrong architecture? See all formats below.",
     },
     allPlatforms: {
       title: "All platforms",
-      macLabel: "macOS · Apple Silicon",
+      macArm64Label: "macOS · Apple Silicon",
+      macX64Label: "macOS · Intel",
       winX64Label: "Windows · x64",
       winArm64Label: "Windows · ARM64",
       linuxX64Label: "Linux · x64",
@@ -2275,8 +2312,6 @@ export function createEnDict(allowSignup: boolean): LandingDict {
       formatAppImage: ".AppImage",
       formatDeb: ".deb",
       formatRpm: ".rpm",
-      intelNote:
-        "Apple Silicon only — Intel Macs not supported in this release.",
       unavailable: "Not available",
     },
     cli: {

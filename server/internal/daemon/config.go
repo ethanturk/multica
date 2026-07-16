@@ -29,6 +29,12 @@ const (
 	DefaultAgentTimeout                   = 0
 	DefaultCodexSemanticInactivityTimeout = 10 * time.Minute
 	DefaultCodexHandshakeTimeout          = 30 * time.Second
+	// DefaultOpenCodeIdleWatchdog shortens the no-message budget for OpenCode
+	// runs while they are not executing a tool. OpenCode streams text and tool
+	// events incrementally, so a completely silent interval here covers both a
+	// missing first model token and a stalled response stream. The generic
+	// AgentIdleWatchdog remains the global enable/disable switch.
+	DefaultOpenCodeIdleWatchdog = 10 * time.Minute
 	// DefaultAgentIdleWatchdog is the per-task safety net that force-stops a
 	// run when the backend has emitted no message for this long AND its
 	// message queue is empty. Backends like Claude Code can hang indefinitely
@@ -65,7 +71,7 @@ const (
 	DefaultGCArtifactTTL                  = 12 * time.Hour      // 12h — drop regenerable artifacts on completed but still-open issues
 	DefaultGCCodexSessionTTL              = 14 * 24 * time.Hour // 14 days — reclaim per-issue Codex session stores untouched this long
 	DefaultAutoUpdateCheckInterval        = 6 * time.Hour       // how often the daemon polls GitHub for a newer CLI release
-	DefaultDetToolsTimeout                = 90 * time.Second // per-invocation cap for a deterministic tool
+	DefaultDetToolsTimeout                = 90 * time.Second    // per-invocation cap for a deterministic tool
 	DefaultDetToolsArtifactDir            = ".multica/artifacts"
 	// DefaultPiConfigRelPath is where the daemon writes the pi-mcp-adapter config,
 	// relative to the task work dir. pi-mcp-adapter discovers `.pi/mcp.json` as
@@ -108,7 +114,7 @@ type Config struct {
 	CLIVersion                     string                // multica CLI version (e.g. "0.1.13")
 	LaunchedBy                     string                // "desktop" when spawned by the Electron app, empty for standalone
 	Profile                        string                // profile name (empty = default)
-Agents                         map[string]AgentEntry // keyed by provider: claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, cursor, kimi, kiro, antigravity, dirge, qoder, traecli, grok
+	Agents                         map[string]AgentEntry // keyed by provider: claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, cursor, kimi, kiro, antigravity, dirge, qoder, traecli, grok
 	WorkspacesRoot                 string                // base path for execution envs (default: ~/multica_workspaces)
 	KeepEnvAfterTask               bool                  // preserve env after task for debugging
 	HealthPort                     int                   // local HTTP port for health checks (default: 19514)
@@ -127,6 +133,7 @@ Agents                         map[string]AgentEntry // keyed by provider: claud
 	AgentTimeout                   time.Duration
 	CodexSemanticInactivityTimeout time.Duration
 	CodexHandshakeTimeout          time.Duration
+	OpenCodeIdleWatchdog           time.Duration // OpenCode-specific no-message window; 0 falls back to AgentIdleWatchdog and values above it cannot extend the global bound
 	AgentIdleWatchdog              time.Duration // force-stop a run when the backend goes silent this long with an empty queue (0 = disabled)
 	AgentToolWatchdog              time.Duration // force-stop a run when a single tool call stays in flight (silent) this long (0 = disabled); backstop for hung tools now that there is no wall-clock cap
 	ClaudeArgs                     []string
@@ -380,7 +387,7 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		agents["grok"] = e
 	}
 	if len(agents) == 0 {
-return Config{}, fmt.Errorf("no agent CLI found: install claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, cursor-agent, kimi, kiro-cli, agy, dirge, qodercli, or traecli and ensure it is on PATH"), deveco, traecli, or grok and ensure it is on PATH")
+		return Config{}, fmt.Errorf("no agent CLI found: install claude, codebuddy, codex, copilot, opencode, deveco, openclaw, hermes, pi, cursor-agent, kimi, kiro-cli, agy, dirge, qodercli, traecli, or grok and ensure it is on PATH")
 	}
 
 	claudeArgs, err := shellArgsFromEnv("MULTICA_CLAUDE_ARGS")
@@ -450,6 +457,15 @@ return Config{}, fmt.Errorf("no agent CLI found: install claude, codebuddy, code
 	// route 0 through durationFromEnv so the operator can opt out without
 	// patching the binary; any positive duration overrides DefaultAgentIdleWatchdog.
 	agentIdleWatchdog, err := durationFromEnv("MULTICA_AGENT_IDLE_WATCHDOG", DefaultAgentIdleWatchdog)
+	if err != nil {
+		return Config{}, err
+	}
+	// MULTICA_OPENCODE_IDLE_WATCHDOG narrows the no-message window for
+	// OpenCode's streamed model responses. Zero removes the provider-specific
+	// override and falls back to MULTICA_AGENT_IDLE_WATCHDOG; positive values
+	// cannot extend the global bound, and the global zero still disables the
+	// whole mechanism.
+	openCodeIdleWatchdog, err := durationFromEnv("MULTICA_OPENCODE_IDLE_WATCHDOG", DefaultOpenCodeIdleWatchdog)
 	if err != nil {
 		return Config{}, err
 	}
@@ -633,6 +649,7 @@ return Config{}, fmt.Errorf("no agent CLI found: install claude, codebuddy, code
 		AgentTimeout:                   agentTimeout,
 		CodexSemanticInactivityTimeout: codexSemanticInactivityTimeout,
 		CodexHandshakeTimeout:          codexHandshakeTimeout,
+		OpenCodeIdleWatchdog:           openCodeIdleWatchdog,
 		AgentIdleWatchdog:              agentIdleWatchdog,
 		AgentToolWatchdog:              agentToolWatchdog,
 		ClaudeArgs:                     claudeArgs,
@@ -909,11 +926,9 @@ func isExecutableFile(path string) bool {
 // list to pre-fetch canonical paths for every known agent in a single shell
 // invocation, instead of paying the cost-per-miss.
 var defaultAgentCommandNames = []string{
-"claude", "codex", "opencode", "openclaw", "hermes",
+	"claude", "codex", "opencode", "deveco", "openclaw", "hermes",
 	"pi", "cursor-agent", "copilot", "kimi", "kiro-cli", "codebuddy", "agy", "dirge", "traecli",
-"claude", "codex", "opencode", "deveco", "openclaw", "hermes",
-	"pi", "cursor-agent", "copilot", "kimi", "kiro-cli", "codebuddy", "agy", "traecli",
-	"pi", "cursor-agent", "copilot", "kimi", "kiro-cli", "codebuddy", "agy", "traecli", "grok",
+	"grok",
 }
 
 // codexDesktopAppBundlePaths returns candidate macOS app-bundle locations for

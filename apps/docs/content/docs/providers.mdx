@@ -1,11 +1,11 @@
 ---
 title: AI coding tools matrix
-description: Multica supports 16 AI coding tools; they implement the same interface, but the capability details diverge significantly.
+description: Multica supports 17 AI coding tools; they implement the same interface, but the capability details diverge significantly.
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
-Multica ships with built-in support for **16 AI coding tools**. They all implement the same interface — queue, dispatch, execute, return results — so you can drive any of them from the same Multica board. **But the capability details diverge significantly**: whether session resumption actually works, whether MCP is supported, where skill files live, how models are selected. This page is the full matrix.
+Multica ships with built-in support for **17 AI coding tools**. They all implement the same interface — queue, dispatch, execute, return results — so you can drive any of them from the same Multica board. **But the capability details diverge significantly**: whether session resumption actually works, whether MCP is supported, where skill files live, how models are selected. This page is the full matrix.
 
 For guidance on picking a tool when creating an agent, see [Creating and configuring agents](/agents-create).
 
@@ -124,11 +124,9 @@ The session resumption mechanism is covered in [Tasks](/tasks#can-a-task-continu
 
 ## MCP configuration: provider-specific support
 
-**Of the 15 tools, twelve consume `mcp_config`: Claude Code, CodeBuddy, Codex, Cursor, Dirge, Hermes, Kimi, Kiro CLI, OpenCode, OpenClaw, Qoder, and Trae**. The other three (Antigravity, Copilot, Pi) accept the field but **ignore it** — no error, no warning, the config just has no effect., eleven consume `mcp_config`: Claude Code, and Trae**. The other four (Antigravity, DevEco Code
+**Of the 17 tools, thirteen consume `mcp_config`: Claude Code, CodeBuddy, Codex, Cursor, Dirge, Grok, Hermes, Kimi, Kiro CLI, OpenCode, OpenClaw, Qoder, and Trae**. The other four (Antigravity, Copilot, DevEco Code, Pi) accept the field but **ignore it** — no error, no warning, the config just has no effect.
 
-The runtime paths are provider-specific: Claude Code and CodeBuddy receive it through `--mcp-config` paired with `--strict-mcp-config`; Codex writes a daemon-managed `mcp_servers` block into the per-task `$CODEX_HOME/config.toml`; Cursor writes `.cursor/mcp.json` plus per-task project approvals under `CURSOR_DATA_DIR`; Dirge writes a daemon-managed `mcp_servers` block into a per-task `DIRGE_CONFIG_DIR/config.json`; Hermes, Kimi, Kiro CLI, Qoder, and Trae receive ACP `mcpServers`; OpenCode receives inline config through `OPENCODE_CONFIG_CONTENT`; OpenClaw receives `mcp.servers` through Multica's per-task config wrapper. OpenCode's path does **not** rewrite the project's `opencode.json`.
-**Of the 16 tools, twelve consume `mcp_config`: Claude Code, CodeBuddy, Codex, Cursor, Hermes, Kimi, Kiro CLI, OpenCode, OpenClaw, Qoder, Trae, and Grok**. The other four (Antigravity, Copilot, DevEco Code, Pi) accept the field but **ignore it** — no error, no warning, the config just has no effect.
-The runtime paths are provider-specific: Claude Code and CodeBuddy receive it through `--mcp-config` paired with `--strict-mcp-config`; Codex writes a daemon-managed `mcp_servers` block into the per-task `$CODEX_HOME/config.toml`; Cursor writes `.cursor/mcp.json` plus per-task project approvals under `CURSOR_DATA_DIR`; Hermes, Kimi, Kiro CLI, Qoder, Trae, and Grok receive ACP `mcpServers`; OpenCode receives inline config through `OPENCODE_CONFIG_CONTENT`; OpenClaw receives `mcp.servers` through Multica's per-task config wrapper. OpenCode's path does **not** rewrite the project's `opencode.json`.
+The runtime paths are provider-specific: Claude Code and CodeBuddy receive it through `--mcp-config` paired with `--strict-mcp-config`; Codex writes a daemon-managed `mcp_servers` block into the per-task `$CODEX_HOME/config.toml`; Cursor writes `.cursor/mcp.json` plus per-task project approvals under `CURSOR_DATA_DIR`; Dirge writes a daemon-managed `mcp_servers` block into a per-task `DIRGE_CONFIG_DIR/config.json`; Grok, Hermes, Kimi, Kiro CLI, Qoder, and Trae receive ACP `mcpServers`; OpenCode receives inline config through `OPENCODE_CONFIG_CONTENT`; OpenClaw receives `mcp.servers` through Multica's per-task config wrapper. OpenCode's path does **not** rewrite the project's `opencode.json`.
 
 <Callout type="warning">
 If you set `mcp_config` in an agent configuration but pick a tool not marked ✅ in the MCP column, your MCP servers have **no effect** on that agent. MCP integration is provider-specific.

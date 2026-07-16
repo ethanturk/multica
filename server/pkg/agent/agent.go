@@ -1,8 +1,7 @@
 // Package agent provides a unified interface for executing prompts via
-// coding agents (Claude Code, CodeBuddy, Codex, Copilot, OpenCode, OpenClaw,
-// Hermes, Pi, Cursor, Kimi, Kiro, Antigravity, Dirge, Qoder). It mirrors the
 // coding agents (Claude Code, CodeBuddy, Codex, Copilot, OpenCode, DevEco Code,
-// OpenClaw, Hermes, Pi, Cursor, Kimi, Kiro, Antigravity, Qoder, Trae, Grok). It
+// OpenClaw, Hermes, Pi, OMP, Cursor, Kimi, Kiro, Antigravity, Dirge, Qoder,
+// Trae, Grok). It
 // mirrors the happy-cli AgentBackend pattern, translated to idiomatic Go.
 package agent
 
@@ -34,6 +33,12 @@ type ExecOptions struct {
 	MaxTurns                  int
 	Timeout                   time.Duration
 	SemanticInactivityTimeout time.Duration
+	// IdleWatchdogTimeout optionally narrows the daemon's generic no-message
+	// watchdog for this execution. Zero keeps the daemon-wide window, and a
+	// value above that window cannot extend the global safety bound. The
+	// daemon-wide zero still disables the watchdog entirely, and an in-flight
+	// tool continues to use the separate tool watchdog budget.
+	IdleWatchdogTimeout time.Duration
 	// HandshakeTimeout bounds startup RPCs for providers with a long-lived
 	// protocol transport. It is currently consumed by Codex app-server;
 	// zero uses the provider default rather than disabling the bound.
@@ -132,22 +137,32 @@ type TokenUsage struct {
 // Result is the final outcome after an agent session completes.
 type Result struct {
 	Status     string // "completed", "failed", "aborted", "timeout", "cancelled"
-	Output     string // accumulated text output
+	Output     string // final user-facing output selected by the backend
 	Error      string // error message if failed
 	DurationMs int64
 	SessionID  string
 	Usage      map[string]TokenUsage // keyed by model name
+	// codexInitializeRetrySafe is provider-internal evidence that an
+	// initialize timeout happened before semantic activity and after the
+	// process tree was reaped. It is intentionally not part of the public
+	// result contract.
+	codexInitializeRetrySafe bool
 }
 
 // Config configures a Backend instance.
 type Config struct {
-ExecutablePath string            // path to CLI binary (claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, cursor, kimi, kiro-cli, agy, dirge, qodercli), qodercli, traecli, grok)
+	ExecutablePath string            // path to CLI binary
+	CLIVersion     string            // detected version paired with ExecutablePath; observation only, never used to choose behavior
 	Env            map[string]string // extra environment variables
 	Logger         *slog.Logger
+	TaskID         string
+	RuntimeID      string
+	DaemonVersion  string
+	CodexVersion   string
 }
 
 // New creates a Backend for the given agent type.
-// Supported types: "claude", "codebuddy", "codex", "copilot", "opencode", "openclaw", "hermes", "pi", "cursor", "kimi", "kiro", "antigravity", "dirge", "qoder", "traecli"., "deveco", "traecli", "grok".
+// Supported types are listed in SupportedTypes.
 //
 // SupportedTypes is the canonical whitelist of agent types eligible to back a
 // custom runtime profile. It MUST stay in lockstep with the
@@ -236,7 +251,7 @@ func New(agentType string, cfg Config) (Backend, error) {
 	case "grok":
 		return &grokBackend{cfg: cfg}, nil
 	default:
-return nil, fmt.Errorf("unknown agent type: %q (supported: claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, omp, cursor, kimi, kiro, antigravity, dirge, qoder, traecli)", agentType), deveco, traecli, grok)"
+		return nil, fmt.Errorf("unknown agent type: %q (supported: %v)", agentType, SupportedTypes)
 	}
 }
 
@@ -258,13 +273,14 @@ var launchHeaders = map[string]string{
 	"codex":       "codex app-server",
 	"copilot":     "copilot (json)",
 	"cursor":      "cursor-agent (stream-json)",
-"dirge":       "dirge --print (json)",, "deveco":      "deveco run (json)",
+	"deveco":      "deveco run (json)",
+	"dirge":       "dirge --print (json)",
 	"hermes":      "hermes acp",
 	"kimi":        "kimi acp",
 	"kiro":        "kiro-cli acp",
-	"omp":         "omp (json mode)",
 	"openclaw":    "openclaw agent (json)",
 	"opencode":    "opencode run (json)",
+	"omp":         "omp (json mode)",
 	"pi":          "pi (json mode)",
 	"qoder":       "qodercli --acp",
 	"traecli":     "traecli acp serve",
