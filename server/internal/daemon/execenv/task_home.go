@@ -29,17 +29,10 @@ import (
 // symlink resolve the real file, which stays read-only, and those flows only
 // read them. This mirrors the existing per-task CODEX_HOME seeding precedent.
 //
-// Scope: Linux codex only. macOS Codex uses danger-full-access (no filesystem
-// sandbox), and Windows has no Landlock sandbox (and unreliable symlink
-// permissions), so neither needs — nor should get — a redirected HOME. Other
-// providers are not sandboxed either.
-//
-// NOT covered here: `git commit` inside a checked-out worktree. Codex's
-// workspace-write reads the worktree's `.git` pointer file, resolves the real
-// gitdir, and keeps that gitdir read-only even when it sits inside a
-// writable_root (see codex-rs default_read_only_subpaths_for_writable_root), so
-// `writable_roots` cannot unblock it. That needs a Codex metadata-write
-// permission path and is tracked separately (GitHub multica-ai/multica#2925).
+// This path remains for any future Linux Codex policy that restores
+// workspace-write after Git metadata gets a supported write grant. Current
+// Linux and macOS policies use danger-full-access, so no redirected HOME is
+// needed. Windows has no Landlock sandbox and unreliable symlink permissions.
 
 // taskHomeSeedEntries are top-level entries symlinked from the user's real home
 // into the per-task HOME so credential/identity reads keep resolving after HOME
