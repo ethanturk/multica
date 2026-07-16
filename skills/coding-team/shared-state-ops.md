@@ -20,6 +20,14 @@ Use `machine_data.state` only when `machine_data.is_pipeline_state == true`. Use
 
 Use the `coding_comment_extract` deterministic tool to parse coding-team comments, marker ordering, and fenced `json coding-team-artifact` blocks. Downstream roles must prefer `machine_data.artifacts.*` over prose markdown when an artifact exists. If `coding_comment_extract` is unavailable, stop instead of regex-scanning comment markdown.
 
+Determine tool availability from the MCP tools exposed directly to the current
+agent run. Do not launch `multica mcp-tools serve` in a shell to inspect
+`tools/list`: workspace-authored tools are supplied through task-scoped MCP
+configuration, and a manually launched server does not inherit that steps-file
+setting, so it will misleadingly list built-ins only. Call the required tool
+directly; report it unavailable only when it is absent from the run's tool
+surface or the direct call returns a tool-plane error.
+
 ---
 
 ## State schema
