@@ -229,18 +229,9 @@ echo "Push verified: origin/$BRANCH is up to date with HEAD."
 
 ## Step 6 — Final action: post summary, update state, and hand off with deterministic `coding_handoff_decide`
 
-**Use `coding_handoff_decide` to determine the next role.**
+**Execute every item in order. Persist the marker before `coding_handoff_decide` validates it.**
 
-1. Build deterministic input:
-   - `current_role`: `test_writer`
-   - `event`: `tests_written`
-   - `task_issue_id`: `$MULTICA_ISSUE_ID`
-   - `task_comments`: task comments
-   - `agent_ids` map with role IDs
-
-2. If the tool returns `status: error`, post the failure as a blocking comment and stop.
-
-3. Post the test summary on the **task issue**:
+1. Post the test summary on the **task issue**:
    ```bash
    cat <<COMMENT | multica issue comment add "$MULTICA_ISSUE_ID" --content-stdin
    ## Tests Written
@@ -271,9 +262,23 @@ echo "Push verified: origin/$BRANCH is up to date with HEAD."
    COMMENT
    ```
 
+2. Refresh task comments:
+   ```bash
+   COMMENTS=$(multica issue comment list "$MULTICA_ISSUE_ID" --output json)
+   ```
+
+3. Call `coding_handoff_decide` with:
+   - `current_role`: `test_writer`
+   - `event`: `tests_written`
+   - `task_issue_id`: `$MULTICA_ISSUE_ID`
+   - `task_comments`: the refreshed `$COMMENTS`
+   - `agent_ids` map with role IDs
+
+   If the tool returns `status: error`, post the failure as a blocking comment and stop. Do not invent a recipient.
+
 4. Apply the tool's `state_patches` to task state.
 
-5. **Last step** — post exact handoff from tool output on `machine_data.decision.target_issue_id`:
+5. **Final action** — execute the exact handoff from tool output on `machine_data.decision.target_issue_id`. Never stop after displaying routing information:
    ```bash
    TARGET_ISSUE_ID=$(decision target)
    COMMENT=$(decision comment)
