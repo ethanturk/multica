@@ -1589,6 +1589,17 @@ type claimBuildFailure struct {
 func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQueue, runtime db.AgentRuntime, runtimeID, runtimeWorkspaceID string) (resp AgentTaskResponse, deliveredCommentIDs []pgtype.UUID, agentSkillCount, builtinSkillCount int, failure *claimBuildFailure) {
 	// Build response with fresh agent data (name + skills + custom_env + custom_args).
 	resp = taskToResponse(*task, runtimeWorkspaceID)
+	if tools, err := h.Queries.ListEnabledDeterministicToolsByWorkspace(r.Context(), runtime.WorkspaceID); err != nil {
+		slog.Warn("task claim: failed to load deterministic tools", "workspace_id", runtimeWorkspaceID, "error", err)
+	} else {
+		for _, tool := range tools {
+			resp.DeterministicTools = append(resp.DeterministicTools, DeterministicToolData{
+				Name:        tool.Name,
+				Description: tool.Description,
+				Source:      tool.Source,
+			})
+		}
+	}
 	supportsCoalescedComments := requestHasClientCapability(r, protocol.DaemonCapabilityCoalescedCommentsV1)
 	// Empty-but-non-nil so pgx persists '{}' rather than NULL for tasks without
 	// comment input. Comment tasks replace this with the ids actually embedded
@@ -2529,25 +2540,6 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 	resp.AuthToken = tokenStr
 	task.DeliveredCommentIds = receipt
 	resp.DeliveredCommentIDs = uuidStringsOrEmpty(receipt)
-
-	// Attach the workspace's enabled deterministic tools so the daemon can expose
-	// them to the agent's tool plane alongside the built-ins. Best-effort: a query
-	// error logs and the task still runs (with built-in tools only).
-	if resp.WorkspaceID != "" {
-		if wsUUID, err := util.ParseUUID(resp.WorkspaceID); err == nil {
-			if tools, terr := h.Queries.ListEnabledDeterministicToolsByWorkspace(r.Context(), wsUUID); terr != nil {
-				slog.Warn("task claim: failed to load deterministic tools", "workspace_id", resp.WorkspaceID, "error", terr)
-			} else {
-				for _, t := range tools {
-					resp.DeterministicTools = append(resp.DeterministicTools, DeterministicToolData{
-						Name:        t.Name,
-						Description: t.Description,
-						Source:      t.Source,
-					})
-				}
-			}
-		}
-	}
 
 	slog.Info("task claimed by runtime", "task_id", uuidToString(task.ID), "runtime_id", runtimeID, "agent_id", uuidToString(task.AgentID), "prior_session", resp.PriorSessionID)
 	if resp.Agent != nil && len(resp.Agent.Skills) > 0 {
