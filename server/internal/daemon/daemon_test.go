@@ -2315,6 +2315,29 @@ func TestTaskRepoDefaultRefScopedByTask(t *testing.T) {
 	}
 }
 
+func TestRepoAuthorizationIgnoresHTTPSCredentials(t *testing.T) {
+	t.Parallel()
+
+	const (
+		configuredURL = "https://dev.azure.com/ineight/Platform/_git/AgenticAI"
+		checkoutURL   = "https://anything:secret@dev.azure.com/ineight/Platform/_git/AgenticAI"
+	)
+	d := &Daemon{
+		workspaces: map[string]*workspaceState{
+			"ws-1": newWorkspaceState("ws-1", nil, "", []RepoData{{URL: configuredURL}}, nil),
+		},
+	}
+
+	if !d.workspaceRepoAllowed("ws-1", checkoutURL) {
+		t.Fatal("credentialed checkout URL should match configured repository")
+	}
+
+	d.registerTaskRepos("ws-1", "task-a", []RepoData{{URL: configuredURL, Ref: "feature/test"}})
+	if got := d.taskRepoDefaultRef("ws-1", "task-a", checkoutURL); got != "feature/test" {
+		t.Fatalf("credentialed checkout default ref = %q, want feature/test", got)
+	}
+}
+
 func TestEnsureRepoReadyReturnsNotConfigured(t *testing.T) {
 	t.Parallel()
 
