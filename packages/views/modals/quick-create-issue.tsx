@@ -18,12 +18,6 @@ import {
 } from "@multica/core/issues/stores/quick-create-store";
 import { useIssueDraftStore } from "@multica/core/issues/stores/draft-store";
 import { useCreateModeStore } from "@multica/core/issues/stores/create-mode-store";
-import {
-  runtimeListOptions,
-  checkQuickCreateCliVersion,
-  readRuntimeCliVersion,
-  MIN_QUICK_CREATE_CLI_VERSION,
-} from "@multica/core/runtimes";
 import { useShortcut } from "@multica/core/shortcuts";
 import { ShortcutKeycaps } from "../common/shortcut-keycaps";
 import { contentReferencesAttachment, type Agent, type Attachment, type Squad } from "@multica/core/types";
@@ -227,29 +221,6 @@ export function AgentCreatePanel({
     if (lastProjectId === projectId) setLastProjectId(null);
   }, [projectsLoaded, projects, projectId, lastProjectId, setLastProjectId]);
 
-  // Daemon CLI version gate. The agent-create flow needs the runtime's
-  // bundled multica CLI to be ≥ MIN_QUICK_CREATE_CLI_VERSION; older
-  // daemons handle attachments and partial-failure retries incorrectly
-  // (see PR #1851 / MUL-1496). Pre-check on the picker so the user gets
-  // immediate feedback instead of waiting for the inbox failure; the
-  // server re-validates as the trust boundary. Dev-built daemons
-  // (git-describe shape) are exempted inside checkQuickCreateCliVersion
-  // — frontend and server share the same signal there, so they agree by
-  // construction across web/desktop/staging without comparing env flags.
-  const { data: runtimes = [] } = useQuery(runtimeListOptions(wsId));
-  const selectedRuntime = useMemo(
-    () =>
-      selectedAgent?.runtime_id
-        ? runtimes.find((r) => r.id === selectedAgent.runtime_id)
-        : undefined,
-    [runtimes, selectedAgent?.runtime_id],
-  );
-  const versionCheck = useMemo(
-    () => checkQuickCreateCliVersion(readRuntimeCliVersion(selectedRuntime?.metadata)),
-    [selectedRuntime?.metadata],
-  );
-  const versionBlocked = versionCheck.state !== "ok";
-
   const initialPrompt = (data?.prompt as string) || promptDraft;
   // The editor is uncontrolled — we read the latest markdown via the ref at
   // submit/switch time. `hasContent` mirrors emptiness so the Create button
@@ -293,7 +264,7 @@ export function AgentCreatePanel({
 
   const submit = async () => {
     const md = editorRef.current?.getMarkdown()?.trim() ?? "";
-    if (!md || !actor || submitting || versionBlocked) return;
+    if (!md || !actor || submitting) return;
     // Submit-time re-read of the queue. Blocking here is what guarantees
     // `getMarkdown()`'s blob-url strip never erases a pasted/dropped image
     // whose attachment id hasn't reached `pendingAttachments` yet — the
@@ -343,26 +314,9 @@ export function AgentCreatePanel({
         const body = e.body as {
           code?: string;
           reason?: string;
-          current_version?: string;
-          min_version?: string;
         };
         if (body.code === "agent_unavailable") {
           setError(body.reason || t(($) => $.create_issue.agent.error_agent_unavailable_fallback));
-          setSubmitting(false);
-          return;
-        }
-        if (body.code === "daemon_version_unsupported") {
-          // Race fallback: the picker pre-check should normally catch this,
-          // but a runtime can silently re-register with an older CLI between
-          // pre-check and submit. Same wording as the inline notice for
-          // consistency.
-          const cur = body.current_version || "unknown";
-          setError(
-            t(($) => $.create_issue.agent.error_daemon_version, {
-              current: cur,
-              min: body.min_version || MIN_QUICK_CREATE_CLI_VERSION,
-            }),
-          );
           setSubmitting(false);
           return;
         }
@@ -463,17 +417,6 @@ export function AgentCreatePanel({
             t={t}
           />
         </div>
-
-        {selectedAgent && versionBlocked && (
-          <div className="mx-5 mb-2 shrink-0 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
-            {versionCheck.state === "missing"
-              ? t(($) => $.create_issue.agent.version_missing, { min: versionCheck.min })
-              : t(($) => $.create_issue.agent.version_below, {
-                  current: versionCheck.current,
-                  min: versionCheck.min,
-                })}
-          </div>
-        )}
 
         {/* Prompt — same rich editor Advanced uses, so paste/drop images,
             mentions, and formatting all work. The dropZone wrapper enables
@@ -583,14 +526,9 @@ export function AgentCreatePanel({
             <Button
               size="sm"
               onClick={submit}
-              disabled={!hasContent || !actor || submitting || versionBlocked || uploadGate.uploading}
+              disabled={!hasContent || !actor || submitting || uploadGate.uploading}
               aria-disabled={uploadGate.uploading || undefined}
               aria-busy={uploadGate.uploading || undefined}
-              title={
-                versionBlocked
-                  ? t(($) => $.create_issue.agent.version_blocked_tooltip, { min: versionCheck.min })
-                  : undefined
-              }
               className={justSent ? "min-w-28 !bg-emerald-600 !text-white" : "min-w-28"}
             >
               {submitting ? t(($) => $.create_issue.agent.sending) : uploadGate.uploading ? t(($) => $.create_issue.agent.uploading) : justSent ? (
