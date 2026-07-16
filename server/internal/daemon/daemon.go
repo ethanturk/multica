@@ -8,6 +8,7 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"math/rand"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1378,12 +1379,25 @@ func newWorkspaceState(workspaceID string, runtimeIDs []string, reposVersion str
 func repoAllowlist(repos []RepoData) map[string]struct{} {
 	allowed := make(map[string]struct{}, len(repos))
 	for _, repo := range repos {
-		if repo.URL == "" {
+		key := repoAuthorizationKey(repo.URL)
+		if key == "" {
 			continue
 		}
-		allowed[repo.URL] = struct{}{}
+		allowed[key] = struct{}{}
 	}
 	return allowed
+}
+
+// repoAuthorizationKey compares repository identity without HTTPS credentials.
+// Agents may supply a task-scoped PAT in userinfo while workspace settings keep
+// the same URL credential-free.
+func repoAuthorizationKey(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if parsed, err := url.Parse(rawURL); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		parsed.User = nil
+		return strings.TrimRight(parsed.String(), "/")
+	}
+	return strings.TrimRight(rawURL, "/")
 }
 
 func (d *Daemon) setWorkspaceRepoSyncError(workspaceID, syncErr string) {
@@ -1401,10 +1415,11 @@ func (d *Daemon) workspaceRepoAllowed(workspaceID, repoURL string) bool {
 	if !ok {
 		return false
 	}
-	if _, allowed := ws.allowedRepoURLs[repoURL]; allowed {
+	key := repoAuthorizationKey(repoURL)
+	if _, allowed := ws.allowedRepoURLs[key]; allowed {
 		return true
 	}
-	if _, allowed := ws.taskRepoURLs[repoURL]; allowed {
+	if _, allowed := ws.taskRepoURLs[key]; allowed {
 		return true
 	}
 	return false
@@ -1487,17 +1502,18 @@ func (d *Daemon) registerTaskRepos(workspaceID, taskID string, repos []RepoData)
 		if url == "" {
 			continue
 		}
+		key := repoAuthorizationKey(url)
 		// Don't re-sync if the URL is already tracked (workspace or task-scoped)
 		// AND the cache already has it.
-		_, inWorkspace := ws.allowedRepoURLs[url]
-		_, inTask := ws.taskRepoURLs[url]
-		ws.taskRepoURLs[url] = struct{}{}
+		_, inWorkspace := ws.allowedRepoURLs[key]
+		_, inTask := ws.taskRepoURLs[key]
+		ws.taskRepoURLs[key] = struct{}{}
 		if taskID != "" {
 			if ws.taskRepoRefs[taskID] == nil {
 				ws.taskRepoRefs[taskID] = make(map[string]string, len(repos))
 			}
-			if _, exists := ws.taskRepoRefs[taskID][url]; !exists {
-				ws.taskRepoRefs[taskID][url] = strings.TrimSpace(repo.Ref)
+			if _, exists := ws.taskRepoRefs[taskID][key]; !exists {
+				ws.taskRepoRefs[taskID][key] = strings.TrimSpace(repo.Ref)
 			}
 		}
 		candidates = append(candidates, repoCandidate{
@@ -1540,7 +1556,7 @@ func (d *Daemon) taskRepoDefaultRef(workspaceID, taskID, repoURL string) string 
 	if !ok || ws.taskRepoRefs == nil {
 		return ""
 	}
-	return strings.TrimSpace(ws.taskRepoRefs[taskID][repoURL])
+	return strings.TrimSpace(ws.taskRepoRefs[taskID][repoAuthorizationKey(repoURL)])
 }
 
 func (d *Daemon) clearTaskRepoRefs(workspaceID, taskID string) {
