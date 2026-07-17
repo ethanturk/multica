@@ -902,6 +902,7 @@ func TestInjectRuntimeConfigBackgroundTaskSafetyProviderAgnostic(t *testing.T) {
 		{"codex", "AGENTS.md"},
 		{"opencode", "AGENTS.md"},
 		{"hermes", "AGENTS.md"},
+		{"dirge", "AGENTS.md"},
 	}
 
 	for _, tc := range providers {
@@ -1486,6 +1487,39 @@ func TestInjectRuntimeConfigAntigravity(t *testing.T) {
 	}
 }
 
+func TestInjectRuntimeConfigDirge(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	ctx := TaskContextForEnv{
+		IssueID:     "test-issue-id",
+		AgentSkills: []SkillContextForEnv{{Name: "Coding", Content: "Write good code."}},
+	}
+
+	if _, err := InjectRuntimeConfig(dir, "dirge", ctx); err != nil {
+		t.Fatalf("InjectRuntimeConfig failed: %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("failed to read AGENTS.md: %v", err)
+	}
+
+	s := string(content)
+	if !strings.Contains(s, "Multica Agent Runtime") {
+		t.Error("AGENTS.md missing meta skill header")
+	}
+	if !strings.Contains(s, "Coding") {
+		t.Error("AGENTS.md missing skill name")
+	}
+	if !strings.Contains(s, "discovered automatically") {
+		t.Error("AGENTS.md for Dirge should advertise native skill discovery")
+	}
+	if strings.Contains(s, ".agent_context/skills/") {
+		t.Error("AGENTS.md for Dirge must not reference the .agent_context/skills/ fallback")
+	}
+}
+
 // TestWriteContextFilesAntigravityNativeSkills pins that skills for the
 // antigravity provider land in {workDir}/.agents/skills/<slug>/, matching the
 // CLI's native workspace discovery path (Gemini CLI lineage).
@@ -1515,6 +1549,33 @@ func TestWriteContextFilesAntigravityNativeSkills(t *testing.T) {
 	// .agents/skills/, not .agent_context/skills/.
 	if _, err := os.Stat(filepath.Join(dir, ".agent_context", "skills")); !os.IsNotExist(err) {
 		t.Error(".agent_context/skills/ MUST NOT be written for antigravity — its scanner does not read that path")
+	}
+}
+
+func TestWriteContextFilesDirgeNativeSkills(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	ctx := TaskContextForEnv{
+		IssueID: "dirge-skill-test",
+		AgentSkills: []SkillContextForEnv{
+			{Name: "Go Conventions", Content: "Follow Go conventions."},
+		},
+	}
+
+	if err := writeContextFiles(dir, "dirge", ctx, nil); err != nil {
+		t.Fatalf("writeContextFiles failed: %v", err)
+	}
+
+	skillMd, err := os.ReadFile(filepath.Join(dir, ".dirge", "skills", "go-conventions", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("failed to read .dirge/skills/go-conventions/SKILL.md: %v", err)
+	}
+	if !strings.Contains(string(skillMd), "Follow Go conventions.") {
+		t.Error("SKILL.md missing content")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".agent_context", "skills")); !os.IsNotExist(err) {
+		t.Error(".agent_context/skills/ MUST NOT be written for dirge")
 	}
 }
 
@@ -1647,7 +1708,7 @@ func TestInjectRuntimeConfigCommentGuardrailIsProviderAgnostic(t *testing.T) {
 	t.Cleanup(func() { runtimeGOOS = saved })
 
 	for _, host := range []string{"linux", "darwin", "windows"} {
-		for _, provider := range []string{"claude", "opencode", "openclaw", "hermes", "kimi", "kiro", "cursor"} {
+		for _, provider := range []string{"claude", "opencode", "openclaw", "hermes", "kimi", "kiro", "cursor", "dirge"} {
 			t.Run(provider+"/"+host, func(t *testing.T) {
 				runtimeGOOS = host
 				dir := t.TempDir()
@@ -1722,7 +1783,7 @@ func TestInjectRuntimeConfigLinuxCommentFormattingEmphasizesFile(t *testing.T) {
 	t.Cleanup(func() { runtimeGOOS = saved })
 	runtimeGOOS = "linux"
 
-	for _, provider := range []string{"codex", "claude", "opencode"} {
+	for _, provider := range []string{"codex", "claude", "opencode", "dirge"} {
 		t.Run(provider, func(t *testing.T) {
 			dir := t.TempDir()
 			if _, err := InjectRuntimeConfig(dir, provider, TaskContextForEnv{
@@ -2060,14 +2121,14 @@ func TestPrepareCodexHomeSeedsFromShared(t *testing.T) {
 		t.Errorf("config.json content = %q", data)
 	}
 
-	// config.toml should be copied and have network access appended.
+	// config.toml should be copied and receive the daemon-managed Linux policy.
 	data, _ = os.ReadFile(filepath.Join(codexHome, "config.toml"))
 	tomlStr := string(data)
 	if !strings.Contains(tomlStr, `model = "o3"`) {
 		t.Errorf("config.toml missing original model setting, got: %q", tomlStr)
 	}
-	if !strings.Contains(tomlStr, "network_access = true") {
-		t.Errorf("config.toml missing network_access, got: %q", tomlStr)
+	if !strings.Contains(tomlStr, `sandbox_mode = "danger-full-access"`) {
+		t.Errorf("config.toml missing git-capable sandbox mode, got: %q", tomlStr)
 	}
 
 	// instructions.md should be copied.
@@ -2521,7 +2582,7 @@ func TestEnsureCodexSandboxConfigCreatesDefaultLinux(t *testing.T) {
 	if !strings.Contains(s, multicaManagedBeginMarker) || !strings.Contains(s, multicaManagedEndMarker) {
 		t.Errorf("missing managed block markers, got:\n%s", s)
 	}
-	if !strings.Contains(s, `sandbox_mode = "workspace-write"`) {
+	if !strings.Contains(s, `sandbox_mode = "danger-full-access"`) {
 		t.Error("missing sandbox_mode")
 	}
 	// The managed block uses TOML dotted-key form rather than a
@@ -2531,8 +2592,8 @@ func TestEnsureCodexSandboxConfigCreatesDefaultLinux(t *testing.T) {
 	if strings.Contains(s, "[sandbox_workspace_write]") {
 		t.Errorf("managed block must not open a [sandbox_workspace_write] table header, got:\n%s", s)
 	}
-	if !strings.Contains(s, "sandbox_workspace_write.network_access = true") {
-		t.Errorf("missing dotted-key network_access = true, got:\n%s", s)
+	if strings.Contains(s, "sandbox_workspace_write.") {
+		t.Errorf("danger-full-access must not emit workspace-write settings, got:\n%s", s)
 	}
 }
 
@@ -2560,7 +2621,7 @@ func TestEnsureCodexSandboxConfigIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 
-	policy := codexSandboxPolicyFor("linux", "0.121.0")
+	policy := codexSandboxPolicy{Mode: "workspace-write", NetworkAccess: true}
 	for i := 0; i < 3; i++ {
 		if err := ensureCodexSandboxConfig(configPath, policy, "0.121.0", testLogger()); err != nil {
 			t.Fatalf("pass %d: %v", i, err)
@@ -2583,7 +2644,7 @@ approval_policy = "on-failure"
 `
 	os.WriteFile(configPath, []byte(existing), 0o644)
 
-	policy := codexSandboxPolicyFor("linux", "0.121.0")
+	policy := codexSandboxPolicy{Mode: "workspace-write", NetworkAccess: true}
 	if err := ensureCodexSandboxConfig(configPath, policy, "0.121.0", testLogger()); err != nil {
 		t.Fatalf("ensureCodexSandboxConfig failed: %v", err)
 	}
@@ -2657,7 +2718,7 @@ trust = "always"
 `
 	os.WriteFile(configPath, []byte(existing), 0o644)
 
-	policy := codexSandboxPolicyFor("linux", "0.121.0")
+	policy := codexSandboxPolicy{Mode: "workspace-write", NetworkAccess: true}
 	if err := ensureCodexSandboxConfig(configPath, policy, "0.121.0", testLogger()); err != nil {
 		t.Fatalf("ensureCodexSandboxConfig failed: %v", err)
 	}
@@ -2722,7 +2783,7 @@ network_access = true
 `
 	os.WriteFile(configPath, []byte(legacy), 0o644)
 
-	policy := codexSandboxPolicyFor("linux", "0.121.0")
+	policy := codexSandboxPolicy{Mode: "workspace-write", NetworkAccess: true}
 	if err := ensureCodexSandboxConfig(configPath, policy, "0.121.0", testLogger()); err != nil {
 		t.Fatalf("ensureCodexSandboxConfig failed: %v", err)
 	}
@@ -2753,8 +2814,8 @@ func TestCodexSandboxPolicyFor(t *testing.T) {
 		wantMode string
 		wantNet  bool
 	}{
-		{"linux any version", "linux", "0.100.0", "workspace-write", true},
-		{"linux unknown version", "linux", "", "workspace-write", true},
+		{"linux any version", "linux", "0.100.0", "danger-full-access", false},
+		{"linux unknown version", "linux", "", "danger-full-access", false},
 		{"darwin old version", "darwin", "0.121.0", "danger-full-access", false},
 		{"darwin unknown version", "darwin", "", "danger-full-access", false},
 	}
@@ -2774,7 +2835,7 @@ func TestCodexSandboxPolicyFor(t *testing.T) {
 	}
 }
 
-func TestPrepareCodexHomeEnsuresNetworkAccess(t *testing.T) {
+func TestPrepareCodexHomeAllowsGitMetadataWrites(t *testing.T) {
 	// Cannot use t.Parallel() with t.Setenv.
 
 	// Empty shared home — no config.toml to copy.
@@ -2787,17 +2848,18 @@ func TestPrepareCodexHomeEnsuresNetworkAccess(t *testing.T) {
 		t.Fatalf("prepareCodexHome failed: %v", err)
 	}
 
-	// config.toml should be created with network access defaults.
+	// Linux tasks need full access so Codex does not re-protect the resolved
+	// worktree gitdir and block git add/commit with EROFS.
 	data, err := os.ReadFile(filepath.Join(codexHome, "config.toml"))
 	if err != nil {
 		t.Fatalf("config.toml not created: %v", err)
 	}
 	s := string(data)
-	if !strings.Contains(s, "network_access = true") {
-		t.Error("config.toml missing network_access = true")
-	}
-	if !strings.Contains(s, `sandbox_mode = "workspace-write"`) {
+	if !strings.Contains(s, `sandbox_mode = "danger-full-access"`) {
 		t.Error("config.toml missing sandbox_mode")
+	}
+	if strings.Contains(s, "sandbox_workspace_write.") {
+		t.Error("config.toml must not retain workspace-write settings")
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/multica-ai/multica/server/internal/cli"
+	"github.com/multica-ai/multica/server/pkg/detsteps"
 )
 
 var (
@@ -49,15 +50,18 @@ func init() {
 	propertyCmd.GroupID = groupCore
 	agentCmd.GroupID = groupCore
 	autopilotCmd.GroupID = groupCore
+	ailCmd.GroupID = groupCore
 	workspaceCmd.GroupID = groupCore
 	repoCmd.GroupID = groupCore
 	skillCmd.GroupID = groupCore
+	dettoolCmd.GroupID = groupCore
 	squadCmd.GroupID = groupCore
 	chatCmd.GroupID = groupCore
 
 	// Runtime commands
 	daemonCmd.GroupID = groupRuntime
 	runtimeCmd.GroupID = groupRuntime
+	mcpToolsCmd.GroupID = groupRuntime
 
 	// Additional commands
 	authCmd.GroupID = groupAdditional
@@ -75,13 +79,16 @@ func init() {
 	rootCmd.AddCommand(propertyCmd)
 	rootCmd.AddCommand(agentCmd)
 	rootCmd.AddCommand(autopilotCmd)
+	rootCmd.AddCommand(ailCmd)
 	rootCmd.AddCommand(workspaceCmd)
 	rootCmd.AddCommand(repoCmd)
 	rootCmd.AddCommand(skillCmd)
+	rootCmd.AddCommand(dettoolCmd)
 	rootCmd.AddCommand(squadCmd)
 	rootCmd.AddCommand(chatCmd)
 	rootCmd.AddCommand(daemonCmd)
 	rootCmd.AddCommand(runtimeCmd)
+	rootCmd.AddCommand(mcpToolsCmd)
 	rootCmd.AddCommand(authCmd)
 	rootCmd.AddCommand(userCmd)
 	rootCmd.AddCommand(loginCmd)
@@ -95,6 +102,10 @@ func init() {
 }
 
 func main() {
+	// If re-exec'd as a deterministic-step sandbox, run the one-shot step and
+	// exit before any CLI/cobra setup. Must be first.
+	detsteps.MaybeRunStepChild()
+
 	cli.CleanupStaleUpdateArtifacts()
 	if err := rootCmd.Execute(); err != nil {
 		if err != errSilent {

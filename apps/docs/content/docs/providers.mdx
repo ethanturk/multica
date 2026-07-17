@@ -1,11 +1,11 @@
 ---
 title: AI coding tools matrix
-description: Multica supports 16 AI coding tools; they implement the same interface, but the capability details diverge significantly.
+description: Multica supports 17 AI coding tools; they implement the same interface, but the capability details diverge significantly.
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
-Multica ships with built-in support for **16 AI coding tools**. They all implement the same interface — queue, dispatch, execute, return results — so you can drive any of them from the same Multica board. **But the capability details diverge significantly**: whether session resumption actually works, whether MCP is supported, where skill files live, how models are selected. This page is the full matrix.
+Multica ships with built-in support for **17 AI coding tools**. They all implement the same interface — queue, dispatch, execute, return results — so you can drive any of them from the same Multica board. **But the capability details diverge significantly**: whether session resumption actually works, whether MCP is supported, where skill files live, how models are selected. This page is the full matrix.
 
 For guidance on picking a tool when creating an agent, see [Creating and configuring agents](/agents-create).
 
@@ -19,6 +19,7 @@ For guidance on picking a tool when creating an agent, see [Creating and configu
 | **Codex** | OpenAI | ✅ | ✅ | `$CODEX_HOME/skills/` | Static |
 | **Copilot** | GitHub | ✅ | ❌ | `.github/skills/` | Static (determined by account entitlement) |
 | **Cursor** | Anysphere | ✅ | ✅ | `.cursor/skills/` | Dynamic discovery |
+| **Dirge** | Dirge | ✅ (`--session <id>`) | ✅ | `.dirge/skills/` | Custom flag |
 | **Hermes** | Nous Research | ✅ | ✅ | `HERMES_HOME/skills/` (per-task home) | Dynamic discovery |
 | **Kimi** | Moonshot | ✅ | ✅ | `.kimi/skills/` | Dynamic discovery |
 | **Kiro CLI** | Amazon | ✅ | ✅ | `.kiro/skills/` | Dynamic discovery |
@@ -47,6 +48,10 @@ From Tencent. A Claude Code–compatible CLI agent — Multica drives it with th
 ### Codex
 
 From OpenAI. Uses JSON-RPC 2.0, has stronger statefulness, and a finer-grained approve mechanism (manual approval for `exec_command` and `patch_apply`). MCP config is materialized into the per-task `$CODEX_HOME/config.toml`. **Session resumption works** through Codex app-server `thread/resume`; if the saved thread is missing or stale, Multica falls back to a fresh thread so the task can still run.
+
+### Dirge
+
+From the Dirge project. Multica runs `dirge --print --output-format json` for headless tasks, passes the selected model with `--model`, and pins resumable context with `--session <id>`. MCP config is materialized into a per-task `DIRGE_CONFIG_DIR/config.json` as `mcp_servers`, preserving the user's other Dirge config keys while replacing only the managed MCP server block. Skills are copied into `.dirge/skills/`.
 
 ### Copilot
 
@@ -119,9 +124,9 @@ The session resumption mechanism is covered in [Tasks](/tasks#can-a-task-continu
 
 ## MCP configuration: provider-specific support
 
-**Of the 16 tools, twelve consume `mcp_config`: Claude Code, CodeBuddy, Codex, Cursor, Hermes, Kimi, Kiro CLI, OpenCode, OpenClaw, Qoder, Trae, and Grok**. The other four (Antigravity, Copilot, DevEco Code, Pi) accept the field but **ignore it** — no error, no warning, the config just has no effect.
+**Of the 17 tools, thirteen consume `mcp_config`: Claude Code, CodeBuddy, Codex, Cursor, Dirge, Grok, Hermes, Kimi, Kiro CLI, OpenCode, OpenClaw, Qoder, and Trae**. The other four (Antigravity, Copilot, DevEco Code, Pi) accept the field but **ignore it** — no error, no warning, the config just has no effect.
 
-The runtime paths are provider-specific: Claude Code and CodeBuddy receive it through `--mcp-config` paired with `--strict-mcp-config`; Codex writes a daemon-managed `mcp_servers` block into the per-task `$CODEX_HOME/config.toml`; Cursor writes `.cursor/mcp.json` plus per-task project approvals under `CURSOR_DATA_DIR`; Hermes, Kimi, Kiro CLI, Qoder, Trae, and Grok receive ACP `mcpServers`; OpenCode receives inline config through `OPENCODE_CONFIG_CONTENT`; OpenClaw receives `mcp.servers` through Multica's per-task config wrapper. OpenCode's path does **not** rewrite the project's `opencode.json`.
+The runtime paths are provider-specific: Claude Code and CodeBuddy receive it through `--mcp-config` paired with `--strict-mcp-config`; Codex writes a daemon-managed `mcp_servers` block into the per-task `$CODEX_HOME/config.toml`; Cursor writes `.cursor/mcp.json` plus per-task project approvals under `CURSOR_DATA_DIR`; Dirge writes a daemon-managed `mcp_servers` block into a per-task `DIRGE_CONFIG_DIR/config.json`; Grok, Hermes, Kimi, Kiro CLI, Qoder, and Trae receive ACP `mcpServers`; OpenCode receives inline config through `OPENCODE_CONFIG_CONTENT`; OpenClaw receives `mcp.servers` through Multica's per-task config wrapper. OpenCode's path does **not** rewrite the project's `opencode.json`.
 
 <Callout type="warning">
 If you set `mcp_config` in an agent configuration but pick a tool not marked ✅ in the MCP column, your MCP servers have **no effect** on that agent. MCP integration is provider-specific.
@@ -138,6 +143,7 @@ Each tool uses **its own** skill discovery path. Before a task runs, the Multica
 | Codex | `$CODEX_HOME/skills/` | ✅ Native |
 | Copilot | `.github/skills/` | ✅ Native |
 | Cursor | `.cursor/skills/` | ✅ Native |
+| Dirge | `.dirge/skills/` | ✅ Native |
 | Kimi | `.kimi/skills/` | ✅ Native |
 | Kiro CLI | `.kiro/skills/` | ✅ Native |
 | OpenCode | `.opencode/skills/` | ✅ Native |
