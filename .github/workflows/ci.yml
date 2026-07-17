@@ -32,6 +32,7 @@ jobs:
         id: filter
         uses: dorny/paths-filter@v3
         with:
+          token: ''
           # apps/docs is excluded from the frontend turbo run, so a
           # docs-only change does not need this job. apps/mobile has its
           # own mobile-verify workflow. Everything else the frontend job
