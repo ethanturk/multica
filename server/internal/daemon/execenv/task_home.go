@@ -29,10 +29,16 @@ import (
 // symlink resolve the real file, which stays read-only, and those flows only
 // read them. This mirrors the existing per-task CODEX_HOME seeding precedent.
 //
-// This path remains for any future Linux Codex policy that restores
-// workspace-write after Git metadata gets a supported write grant. Current
-// Linux and macOS policies use danger-full-access, so no redirected HOME is
-// needed. Windows has no Landlock sandbox and unreliable symlink permissions.
+// Scope: Linux codex only. macOS Codex uses danger-full-access (no filesystem
+// sandbox), and Windows has no Landlock sandbox (and unreliable symlink
+// permissions), so neither needs — nor should get — a redirected HOME. Other
+// providers are not sandboxed either.
+//
+// `git commit` inside a linked worktree has the same root sandbox constraint:
+// Codex resolves the worktree's `.git` pointer and keeps the external gitdir
+// read-only even inside a writable_root. The repo checkout path handles that
+// separately by giving Linux Codex tasks an isolated, task-local `.git`
+// directory instead of widening this writable-root grant (#2925).
 
 // taskHomeSeedEntries are top-level entries symlinked from the user's real home
 // into the per-task HOME so credential/identity reads keep resolving after HOME

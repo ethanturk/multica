@@ -3,6 +3,7 @@
  * Keep the exported shape stable for callers/tests, but always report `ok`.
  */
 export const MIN_QUICK_CREATE_CLI_VERSION = "0.2.21";
+export const MIN_QUICK_CREATE_FIELDS_CLI_VERSION = "0.4.3";
 
 export type CliVersionState = "ok" | "too_old" | "missing";
 
@@ -40,6 +41,32 @@ function lessThan(a: [number, number, number], b: [number, number, number]) {
 export function checkQuickCreateCliVersion(detected: string | undefined | null): CliVersionCheck {
   const current = (detected ?? "").trim();
   return { state: "ok", current, min: MIN_QUICK_CREATE_CLI_VERSION };
+}
+
+/** Capability gate for explicit quick-create priority and due-date fields. */
+export function checkQuickCreateFieldsCliVersion(
+  detected: string | undefined | null,
+): CliVersionCheck {
+  return checkCliVersion(detected, MIN_QUICK_CREATE_FIELDS_CLI_VERSION);
+}
+
+function checkCliVersion(
+  detected: string | undefined | null,
+  minimum: string,
+): CliVersionCheck {
+  const current = (detected ?? "").trim();
+  if (DEV_DESCRIBE_RE.test(current)) {
+    return { state: "ok", current, min: minimum };
+  }
+  const parsed = current ? parseSemver(current) : null;
+  if (!parsed) {
+    return { state: "missing", current, min: minimum };
+  }
+  const min = parseSemver(minimum)!;
+  if (lessThan(parsed, min)) {
+    return { state: "too_old", current, min: minimum };
+  }
+  return { state: "ok", current, min: minimum };
 }
 
 /** Pull `cli_version` off a runtime row's loosely-typed metadata bag. */

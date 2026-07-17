@@ -730,6 +730,9 @@ importers:
       jsdom:
         specifier: 'catalog:'
         version: 29.0.1(@noble/hashes@1.8.0)
+      postcss:
+        specifier: 8.5.10
+        version: 8.5.10
       tailwindcss:
         specifier: 'catalog:'
         version: 4.2.2
@@ -838,6 +841,9 @@ importers:
       '@tanstack/react-table':
         specifier: 'catalog:'
         version: 8.21.3(react-dom@19.2.3(react@19.2.3))(react@19.2.3)
+      '@tanstack/react-virtual':
+        specifier: 'catalog:'
+        version: 3.14.2(react-dom@19.2.3(react@19.2.3))(react@19.2.3)
       class-variance-authority:
         specifier: 'catalog:'
         version: 0.7.1
