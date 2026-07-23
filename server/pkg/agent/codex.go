@@ -31,6 +31,11 @@ var codexBlockedArgs = map[string]blockedArgMode{
 	"--listen": blockedWithValue, // stdio:// transport for daemon communication
 }
 
+const (
+	codexFastServiceTier = "priority"
+	codexFastModeFeature = "fast_mode"
+)
+
 // codexStderrTailBytes bounds the stderr tail captured for inclusion in
 // error messages when codex exits before the JSON-RPC handshake (e.g. the
 // user supplied a custom_args flag that the `app-server` subcommand
@@ -164,15 +169,21 @@ type codexBackend struct {
 
 func buildCodexArgs(opts ExecOptions, logger *slog.Logger) []string {
 	args := []string{"app-server", "--listen", "stdio://"}
-	return append(args, NormalizeCodexLaunchArgs(opts.ExtraArgs, opts.CustomArgs, opts.McpConfig, logger)...)
+	launchArgs := NormalizeCodexLaunchArgs(opts.ExtraArgs, opts.CustomArgs, opts.McpConfig, logger)
+	if opts.ServiceTier == codexFastServiceTier {
+		launchArgs = enforceCodexFastMode(launchArgs, logger)
+	}
+	return append(args, launchArgs...)
 }
 
 // NormalizeCodexLaunchArgs returns the user-supplied Codex args (extra then
-// custom) exactly as buildCodexArgs hands them to the launched process: shell
-// quoting stripped, protocol-critical flags removed, and — when a managed
+// custom) after lower-priority normalization: shell quoting stripped,
+// protocol-critical flags removed, and — when a managed
 // mcp_config owns the mcp_servers namespace — stray `-c mcp_servers.*`
-// overrides dropped. buildCodexArgs only prepends the fixed
-// `app-server --listen stdio://` transport flags to this result.
+// overrides dropped. buildCodexArgs prepends the fixed
+// `app-server --listen stdio://` transport flags and may append an
+// agent-owned runtime override (currently `--enable fast_mode`) after this
+// result.
 //
 // It is exported so the daemon can reconstruct the *effective* launch args when
 // deciding the Windows sandbox mode. A `-c windows.sandbox=…` opt-in may arrive
@@ -201,6 +212,56 @@ func NormalizeCodexLaunchArgs(extraArgs, customArgs []string, mcpConfig json.Raw
 	return out
 }
 
+// enforceCodexFastMode makes the explicit agent service-tier selection
+// authoritative over daemon ExtraArgs, per-agent CustomArgs, and inherited
+// config.toml. Codex's `--disable fast_mode` wins over `--enable fast_mode`
+// regardless of argv order, so conflicting lower-priority disable flags must
+// be removed before the managed enable is appended. Conflicting `-c` /
+// `--config features.fast_mode=...` overrides are removed for the same
+// precedence reason, even though current Codex versions let `--enable` win:
+// the final argv should encode one unambiguous owner for this setting.
+//
+// Other disabled features are preserved, and this helper is used only for the
+// catalog-owned `priority` tier. Future service tiers must not accidentally
+// inherit Fast mode semantics.
+func enforceCodexFastMode(args []string, logger *slog.Logger) []string {
+	args = filterCodexConfigOverrides(
+		args,
+		codexManagedFastModeConfigKeyRe,
+		"features.fast_mode",
+		logger,
+	)
+	filtered := make([]string, 0, len(args)+2)
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		flag := arg
+		value := ""
+		hasInlineValue := false
+		if idx := strings.Index(arg, "="); idx > 0 {
+			flag = arg[:idx]
+			value = arg[idx+1:]
+			hasInlineValue = true
+		}
+		if flag == "--disable" {
+			if !hasInlineValue && i+1 < len(args) {
+				value = args[i+1]
+			}
+			if value == codexFastModeFeature {
+				if logger != nil {
+					logger.Warn("codex: ignored lower-priority feature disable",
+						"feature", codexFastModeFeature)
+				}
+				if !hasInlineValue {
+					i++
+				}
+				continue
+			}
+		}
+		filtered = append(filtered, arg)
+	}
+	return append(filtered, "--enable", codexFastModeFeature)
+}
+
 // hasManagedCodexMcpConfig reports whether the agent's mcp_config field is
 // "present" in the API three-state sense: a non-null JSON value. Both
 // `{}` and `{"mcpServers":{}}` count as present (the admin saved an empty
@@ -216,6 +277,9 @@ func hasManagedCodexMcpConfig(raw json.RawMessage) bool {
 // overrides that would otherwise shadow what the MCP Tab writes into
 // `$CODEX_HOME/config.toml`.
 var codexManagedMcpConfigKeyRe = regexp.MustCompile(`^\s*mcp_servers(?:\s*\.|\s*=|\s*$)`)
+
+var codexManagedFastModeConfigKeyRe = regexp.MustCompile(
+	`^\s*features\s*\.\s*fast_mode\s*(?:=|$)`)
 
 // A daemon-managed shell_environment_policy must also win over profile and
 // custom-arg overrides. Match root and profile policy keys without catching an
@@ -1228,6 +1292,7 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 		// MUL-2339 — Trump's constraint that the three injection points
 		// must not drift independently).
 		applyCodexReasoningEffort(turnParams, opts.ThinkingLevel)
+		applyCodexServiceTier(turnParams, opts.ServiceTier)
 		waitingForTurn := true
 		var timeoutDiagnostic codexTimeoutDiagnostic
 		var processExitErr error
@@ -1497,6 +1562,7 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 		// agent's thinking_level since. See MUL-2339 — Elon flagged that
 		// resume must honour the live config, not the stored one.
 		applyCodexReasoningEffort(resumeParams, opts.ThinkingLevel)
+		applyCodexServiceTier(resumeParams, opts.ServiceTier)
 		resumeResult, err := c.request(ctx, "thread/resume", resumeParams)
 		if err == nil {
 			if threadID := extractThreadID(resumeResult); threadID != "" {
@@ -1528,6 +1594,7 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 		"persistExtendedHistory": true,
 	}
 	applyCodexReasoningEffort(startParams, opts.ThinkingLevel)
+	applyCodexServiceTier(startParams, opts.ServiceTier)
 	c.threadStartSent = true
 	c.threadStartStarted = time.Now()
 	logger.Info("codex lifecycle",
@@ -1612,6 +1679,16 @@ func applyCodexReasoningEffort(params map[string]any, level string) {
 	}
 	cfg["model_reasoning_effort"] = level
 	params["config"] = cfg
+}
+
+// applyCodexServiceTier writes the catalog-owned service tier to the
+// app-server's top-level serviceTier field. All three execution requests
+// accept the same shape. Empty is a no-op so config.toml remains authoritative.
+func applyCodexServiceTier(params map[string]any, tier string) {
+	if params == nil || tier == "" {
+		return
+	}
+	params["serviceTier"] = tier
 }
 
 func resetTimer(timer *time.Timer, d time.Duration) {
