@@ -1,4 +1,4 @@
--- Add Dirge as a supported custom runtime protocol family.
+-- Reverse 214_runtime_profile_dirge.up.sql.
 
 ALTER TABLE runtime_profile
     DROP CONSTRAINT IF EXISTS runtime_profile_protocol_family_check;
@@ -22,5 +22,5 @@ ALTER TABLE runtime_profile
         'traecli',
         'deveco',
         'grok',
-        'dirge'
+        'qwen'
     )) NOT VALID;
