@@ -1,5 +1,6 @@
 import { queryOptions } from "@tanstack/react-query";
 import { api } from "../api";
+import { fetchLatestCliVersion } from "./update-source";
 
 export const runtimeKeys = {
   all: (wsId: string) => ["runtimes", wsId] as const,
@@ -9,6 +10,7 @@ export const runtimeKeys = {
     ["runtimes", "usage", rid, days, tz] as const,
   usageByAgent: (rid: string, days: number, tz: string) =>
     ["runtimes", "usage", "by-agent", rid, days, tz] as const,
+  latestVersion: () => ["runtimes", "latest-version"] as const,
   // by-hour now follows the viewer's tz, like the other reports.
   usageByHour: (rid: string, days: number, tz: string) =>
     ["runtimes", "usage", "by-hour", rid, days, tz] as const,
@@ -51,5 +53,13 @@ export function runtimeListOptions(wsId: string, owner?: "me") {
   return queryOptions({
     queryKey: owner === "me" ? runtimeKeys.listMine(wsId) : runtimeKeys.list(wsId),
     queryFn: () => api.listRuntimes({ workspace_id: wsId, owner }),
+  });
+}
+
+export function latestCliVersionOptions() {
+  return queryOptions({
+    queryKey: runtimeKeys.latestVersion(),
+    queryFn: () => fetchLatestCliVersion(),
+    staleTime: 10 * 60 * 1000, // 10 minutes
   });
 }

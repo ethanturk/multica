@@ -16,7 +16,7 @@ func testLogger() *slog.Logger {
 }
 
 func TestGitEnv(t *testing.T) {
-	t.Parallel()
+	t.Setenv("GIT_CONFIG_COUNT", "0")
 	env := gitEnv()
 
 	// Must contain GIT_TERMINAL_PROMPT=0.
