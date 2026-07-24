@@ -1273,6 +1273,21 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				r.Patch("/{sessionId}/runtime", h.SwitchAgentBuilderRuntime)
 			})
 
+			// Deterministic tools — author, persist, and immediately test
+			// user-authored Go "steps" (run sandboxed via the interpreter). The
+			// daemon delivers enabled tools to the per-task MCP server. Workspace
+			// context comes from the X-Workspace-Slug header like other routes.
+			r.Route("/api/deterministic-tools", func(r chi.Router) {
+				r.Get("/", h.ListDeterministicTools)
+				r.Post("/", h.CreateDeterministicTool)
+				r.Post("/test", h.TestDeterministicTool)
+				r.Route("/{id}", func(r chi.Router) {
+					r.Get("/", h.GetDeterministicTool)
+					r.Put("/", h.UpdateDeterministicTool)
+					r.Delete("/", h.DeleteDeterministicTool)
+				})
+			})
+
 			// Skills
 			r.Route("/api/skills", func(r chi.Router) {
 				r.Get("/", h.ListSkills)
@@ -1305,6 +1320,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			// Runtimes
 			r.Route("/api/runtimes", func(r chi.Router) {
 				r.Get("/", h.ListAgentRuntimes)
+				r.Get("/latest-version", h.GetLatestCLIRelease)
 				r.Route("/{runtimeId}", func(r chi.Router) {
 					r.Patch("/", h.UpdateAgentRuntime)
 					r.Get("/usage", h.GetRuntimeUsage)

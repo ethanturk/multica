@@ -172,6 +172,7 @@ func (d *Daemon) repoCheckoutHandler() http.HandlerFunc {
 			http.Error(w, "url is required", http.StatusBadRequest)
 			return
 		}
+		repoURL := repoAuthorizationKey(req.URL)
 		if req.WorkspaceID == "" {
 			http.Error(w, "workspace_id is required", http.StatusBadRequest)
 			return
@@ -190,12 +191,12 @@ func (d *Daemon) repoCheckoutHandler() http.HandlerFunc {
 			return
 		}
 
-		if err := d.ensureRepoReady(r.Context(), req.WorkspaceID, req.URL); err != nil {
+		if err := d.ensureRepoReady(r.Context(), req.WorkspaceID, repoURL); err != nil {
 			statusCode := http.StatusInternalServerError
 			if errors.Is(err, ErrRepoNotConfigured) {
 				statusCode = http.StatusBadRequest
 			}
-			d.logger.Error("repo checkout readiness failed", "workspace_id", req.WorkspaceID, "url", req.URL, "error", err)
+			d.logger.Error("repo checkout readiness failed", "workspace_id", req.WorkspaceID, "url", repoURL, "error", err)
 			http.Error(w, err.Error(), statusCode)
 			return
 		}
@@ -207,7 +208,7 @@ func (d *Daemon) repoCheckoutHandler() http.HandlerFunc {
 
 		result, err := d.repoCache.CreateWorktree(repocache.WorktreeParams{
 			WorkspaceID:         req.WorkspaceID,
-			RepoURL:             req.URL,
+			RepoURL:             repoURL,
 			WorkDir:             req.WorkDir,
 			Ref:                 checkoutRef,
 			AgentName:           req.AgentName,

@@ -71,7 +71,30 @@ const (
 	DefaultGCArtifactTTL                  = 12 * time.Hour      // 12h — drop regenerable artifacts on completed but still-open issues
 	DefaultGCCodexSessionTTL              = 14 * 24 * time.Hour // 14 days — reclaim per-issue Codex session stores untouched this long
 	DefaultAutoUpdateCheckInterval        = 6 * time.Hour       // how often the daemon polls GitHub for a newer CLI release
+	DefaultDetToolsTimeout                = 90 * time.Second    // per-invocation cap for a deterministic tool
+	DefaultDetToolsArtifactDir            = ".multica/artifacts"
+	// DefaultPiConfigRelPath is where the daemon writes the pi-mcp-adapter config,
+	// relative to the task work dir. pi-mcp-adapter discovers `.pi/mcp.json` as
+	// its highest-precedence project-local override (read relative to the agent's
+	// cwd), giving per-task isolation with no shared global file.
+	DefaultPiConfigRelPath = ".pi/mcp.json"
 )
+
+// DefaultDetToolsAllowed is the deterministic tool allowlist applied when
+// MULTICA_DETTOOLS_ALLOWED is unset. Covers the full non-destructive catalog;
+// artifact_emit only writes under the task artifact dir, and build_probe /
+// test_gate / dotnet_test_gate run the repo's own toolchain rather than
+// mutating sources.
+var DefaultDetToolsAllowed = []string{
+	"repo_facts",
+	"policy_check",
+	"build_probe",
+	"test_gate",
+	"dotnet_test_gate",
+	"diff_summarize",
+	"artifact_emit",
+	"agent_improvement_evaluate",
+}
 
 // DefaultGCArtifactPatterns lists basename matches that the GC loop treats as
 // regenerable build artifacts. Kept conservative: only directories that are
@@ -91,7 +114,7 @@ type Config struct {
 	CLIVersion                     string                // multica CLI version (e.g. "0.1.13")
 	LaunchedBy                     string                // "desktop" when spawned by the Electron app, empty for standalone
 	Profile                        string                // profile name (empty = default)
-	Agents                         map[string]AgentEntry // keyed by provider: claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, cursor, kimi, kiro, antigravity, qoder, traecli, grok, qwen
+	Agents                         map[string]AgentEntry // keyed by provider: claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, cursor, kimi, kiro, antigravity, dirge, qoder, traecli, grok
 	WorkspacesRoot                 string                // base path for execution envs (default: ~/multica_workspaces)
 	KeepEnvAfterTask               bool                  // preserve env after task for debugging
 	HealthPort                     int                   // local HTTP port for health checks (default: 19514)
@@ -125,11 +148,33 @@ type Config struct {
 	// prefers a matching, executable override over resolving the profile's
 	// command_name on PATH. nil/empty means "always resolve via PATH".
 	ProfileCommandOverrides map[string]string
+	DetTools                DetToolsConfig // deterministic tool plane (MCP) settings
+}
+
+// DetToolsConfig configures the daemon-managed deterministic tool plane. When
+// Enabled, the daemon merges an MCP server entry pointing at `multica mcp-tools
+// serve` into the agent's mcp_config for providers that consume it.
+type DetToolsConfig struct {
+	Enabled      bool
+	AllowedTools []string
+	DeniedTools  []string // workspace/daemon-wide denylist applied after the allowlist
+	Timeout      time.Duration
+	AllowNetwork bool
+	ArtifactDir  string
+
+	// Pi adapter integration (experimental). Pi has no native MCP; it reaches
+	// the tool plane through pi-mcp-adapter, which auto-discovers a project-local
+	// `.pi/mcp.json` (relative to the agent's cwd). The whole path is opt-in via
+	// PiAdapterEnabled.
+	PiAdapterEnabled bool   // MULTICA_DETTOOLS_PI_ADAPTER (default false)
+	PiConfigRelPath  string // adapter config path, relative to the task work dir (default .pi/mcp.json)
+	PiInstallCmd     string // optional command run to ensure the adapter is installed (default empty = do not auto-install)
 }
 
 // Overrides allows CLI flags to override environment variables and defaults.
 // Zero values are ignored and the env/default value is used instead.
 type Overrides struct {
+	AllowNoAgents     bool
 	ServerURL         string
 	WorkspacesRoot    string
 	PollInterval      time.Duration
@@ -145,9 +190,6 @@ type Overrides struct {
 	RuntimeName                    string
 	Profile                        string // profile name (empty = default)
 	HealthPort                     int    // health check port (0 = use default)
-	// AllowNoAgents is reserved for read-only local configuration probes. Daemon
-	// startup keeps the default false and still refuses to run with no agent CLI.
-	AllowNoAgents bool
 	// DisableAutoUpdate, when true, forces the auto-update poller off. There
 	// is no symmetric "force on" override because the env/default already
 	// resolves to enabled; the flag exists so users can opt out from the CLI.
@@ -315,6 +357,12 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	if e, ok := probe("MULTICA_CODEBUDDY_PATH", "codebuddy", "MULTICA_CODEBUDDY_MODEL"); ok {
 		agents["codebuddy"] = e
 	}
+	if e, ok := probe("MULTICA_DIRGE_PATH", "dirge", "MULTICA_DIRGE_MODEL"); ok {
+		agents["dirge"] = e
+	}
+	if e, ok := probe("MULTICA_QWEN_PATH", "qwen", "MULTICA_QWEN_MODEL"); ok {
+		agents["qwen"] = e
+	}
 	// agy 1.0.6 added a `--model` flag (MUL-3125), so Antigravity now takes a
 	// model env like every other backend. MULTICA_ANTIGRAVITY_MODEL seeds the
 	// daemon-wide default; its value is the exact `agy models` display string
@@ -343,13 +391,8 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	if e, ok := probe("MULTICA_GROK_PATH", "grok", "MULTICA_GROK_MODEL"); ok {
 		agents["grok"] = e
 	}
-	// Qwen Code (`qwen`) runs headlessly with -p and stream-json. Its native
-	// QWEN.md and .qwen/skills task context is prepared by execenv.
-	if e, ok := probe("MULTICA_QWEN_PATH", "qwen", "MULTICA_QWEN_MODEL"); ok {
-		agents["qwen"] = e
-	}
-	if len(agents) == 0 && !overrides.AllowNoAgents {
-		return Config{}, fmt.Errorf("no agent CLI found: install claude, codebuddy, codex, copilot, opencode, deveco, openclaw, hermes, pi, cursor-agent, kimi, kiro-cli, agy, qodercli, traecli, grok, or qwen and ensure it is on PATH")
+	if len(agents) == 0 {
+		return Config{}, fmt.Errorf("no agent CLI found: install claude, codebuddy, codex, copilot, opencode, deveco, openclaw, hermes, pi, cursor-agent, kimi, kiro-cli, agy, dirge, qodercli, traecli, or grok and ensure it is on PATH")
 	}
 
 	claudeArgs, err := shellArgsFromEnv("MULTICA_CLAUDE_ARGS")
@@ -570,6 +613,25 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		autoUpdateInterval = overrides.AutoUpdateCheckInterval
 	}
 
+	// Deterministic tool plane: opt-in via MULTICA_DETTOOLS_ENABLED. All other
+	// settings have safe defaults so enabling it is a single env var.
+	detToolsTimeout, err := durationFromEnv("MULTICA_DETTOOLS_TIMEOUT", DefaultDetToolsTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	detTools := DetToolsConfig{
+		Enabled:      boolEnvSet("MULTICA_DETTOOLS_ENABLED"),
+		AllowedTools: patternsFromEnv("MULTICA_DETTOOLS_ALLOWED", DefaultDetToolsAllowed),
+		DeniedTools:  patternsFromEnv("MULTICA_DETTOOLS_DENIED", nil),
+		Timeout:      detToolsTimeout,
+		AllowNetwork: boolEnvSet("MULTICA_DETTOOLS_ALLOW_NETWORK"),
+		ArtifactDir:  envOrDefault("MULTICA_DETTOOLS_ARTIFACT_DIR", DefaultDetToolsArtifactDir),
+
+		PiAdapterEnabled: boolEnvSet("MULTICA_DETTOOLS_PI_ADAPTER"),
+		PiConfigRelPath:  envOrDefault("MULTICA_DETTOOLS_PI_CONFIG_PATH", DefaultPiConfigRelPath),
+		PiInstallCmd:     strings.TrimSpace(os.Getenv("MULTICA_DETTOOLS_PI_INSTALL_CMD")),
+	}
+
 	return Config{
 		ServerBaseURL:                  serverBaseURL,
 		DaemonID:                       daemonID,
@@ -604,7 +666,19 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		CodebuddyArgs:                  codebuddyArgs,
 		QwenArgs:                       qwenArgs,
 		ProfileCommandOverrides:        profileCommandOverrides,
+		DetTools:                       detTools,
 	}, nil
+}
+
+// boolEnvSet reports whether the named env var holds a truthy value
+// (true/1/yes/on, case-insensitive).
+func boolEnvSet(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 // officialCloudHost is the hostname of Multica's hosted cloud. It's the only
@@ -863,7 +937,8 @@ func isExecutableFile(path string) bool {
 // invocation, instead of paying the cost-per-miss.
 var defaultAgentCommandNames = []string{
 	"claude", "codex", "opencode", "deveco", "openclaw", "hermes",
-	"pi", "cursor-agent", "copilot", "kimi", "kiro-cli", "codebuddy", "agy", "traecli", "grok", "qwen",
+	"pi", "cursor-agent", "copilot", "kimi", "kiro-cli", "codebuddy", "agy", "dirge", "traecli",
+	"grok", "qwen",
 }
 
 // codexDesktopAppBundlePaths returns candidate macOS app-bundle locations for

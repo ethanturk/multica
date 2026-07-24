@@ -518,6 +518,52 @@ func TestProjectsAndResourcesSkillCoversDurableContext(t *testing.T) {
 	}
 }
 
+func TestDeterministicToolsSkillCoversDecisionFrameworkAndContract(t *testing.T) {
+	skill, ok := findSkill(t, "multica-deterministic-tools")
+	if !ok {
+		return
+	}
+	fm, body, _ := splitFrontmatter(skill.Content)
+
+	// This is a contributor-facing guide for working ON the dettools plane, so
+	// unlike the platform-contract skills it is user-invocable and fences to the
+	// Go toolchain rather than the multica CLI.
+	if got := strings.TrimSpace(fm["user-invocable"]); got != "true" {
+		t.Errorf("user-invocable = %q, want true (a developer reaches for this guide explicitly)", got)
+	}
+
+	// The decision framework is the point of the skill — pin the litmus test and
+	// both sides of the keep-vs-convert split so the guidance can't silently
+	// erode into a how-to-add-a-tool manual.
+	mustContain := []string{
+		"Anything correctness-sensitive moves into deterministic tool handlers",
+		"Keep it a skill when",
+		"Convert to a deterministic Go tool when",
+		"The hybrid pattern",
+		// Contract anchors that must track the real code in server/pkg/dettools.
+		"server/pkg/dettools/tool_<name>.go",
+		"allTools()",
+		"strictUnmarshal",
+		"DefaultDetToolsAllowed",
+		"POLICY_FAILURE",
+		"MULTICA_DETTOOLS_ENABLED",
+		"deterministic_tools.{allowed_tools, denied_tools}",
+		"only **narrow**",
+		// The skill-must-be-updated-on-conversion rule (CLAUDE.md coupling).
+		"references/*-source-map.md",
+		"references/deterministic-tools-source-map.md",
+	}
+	for _, want := range mustContain {
+		if !strings.Contains(body, want) {
+			t.Errorf("deterministic-tools skill missing %q", want)
+		}
+	}
+
+	if !skillHasFile(skill, "references/deterministic-tools-source-map.md") {
+		t.Errorf("deterministic-tools skill missing supporting file references/deterministic-tools-source-map.md")
+	}
+}
+
 func TestFocusedTestingSkillUsesStackSpecificProgressiveDisclosure(t *testing.T) {
 	skill, ok := findSkill(t, "multica-focused-testing")
 	if !ok {
@@ -525,14 +571,13 @@ func TestFocusedTestingSkillUsesStackSpecificProgressiveDisclosure(t *testing.T)
 	}
 	fm, body, _ := splitFrontmatter(skill.Content)
 
-	description := fm["description"]
 	for _, want := range []string{
 		"focused or targeted test",
 		"any user repository",
 		"Detect the repository's stack and runner first",
 		"Not for an explicitly requested full-suite run",
 	} {
-		if !strings.Contains(description, want) {
+		if !strings.Contains(fm["description"], want) {
 			t.Errorf("focused-testing description missing trigger text %q", want)
 		}
 	}
@@ -553,9 +598,6 @@ func TestFocusedTestingSkillUsesStackSpecificProgressiveDisclosure(t *testing.T)
 		}
 	}
 
-	// Concrete runner commands belong behind one-level-deep references. The
-	// body is loaded for every focused-test task; keeping templates out of it
-	// prevents a Go/Python/Rust repository from inheriting frontend noise.
 	for _, runnerSpecific := range []string{
 		"pnpm --filter",
 		"go test",
@@ -575,15 +617,12 @@ func TestFocusedTestingSkillUsesStackSpecificProgressiveDisclosure(t *testing.T)
 			`["pnpm", "--filter", "<workspace>", "exec", "vitest", "run", "<package-relative-test-file>"]`,
 			`["pnpm", "--filter", "<workspace>", "exec", "vitest", "list", "<package-relative-test-file>", "--filesOnly"]`,
 			`["pnpm", "--filter", "<workspace>", "test", "--", "<test-file>"]`,
-			"exactly one discovered test file",
-			"https://pnpm.io/cli/exec",
-			"https://vitest.dev/guide/cli",
+			"exactly one discovered test file", "https://pnpm.io/cli/exec", "https://vitest.dev/guide/cli",
 		},
 		"references/go.md": {
 			`["go", "test", "./path/to/package", "-run", "^TestName$", "-count=1"]`,
 			`["go", "test", "./path/to/package", "-list", "^TestName$"]`,
-			"not reliably by\nrunning one `_test.go` file in isolation",
-			"https://pkg.go.dev/cmd/go#hdr-Testing_flags",
+			"not reliably by\nrunning one `_test.go` file in isolation", "https://pkg.go.dev/cmd/go#hdr-Testing_flags",
 		},
 		"references/python.md": {
 			`["python", "-m", "pytest", "path/to/test_file.py::TestClass::test_name"]`,
@@ -593,30 +632,23 @@ func TestFocusedTestingSkillUsesStackSpecificProgressiveDisclosure(t *testing.T)
 		"references/rust.md": {
 			`["cargo", "test", "-p", "<package>", "--test", "<integration-target>"]`,
 			`["cargo", "test", "-p", "<package>", "--test", "<integration-target>", "--", "<full-test-path>", "--exact"]`,
-			"the separator is required",
-			"`harness = false`",
-			"https://doc.rust-lang.org/rustc/tests/",
+			"the separator is required", "`harness = false`", "https://doc.rust-lang.org/rustc/tests/",
 		},
 		"references/jvm.md": {
 			`["./gradlew", ":module:test", "--tests", "package.ClassName.methodName"]`,
 			`["./mvnw", "-pl", "module", "-Dtest=ClassName#methodName", "test"]`,
-			"JUnit 4.x and TestNG",
-			"https://docs.gradle.org/current/userguide/java_testing.html#test_filtering",
-			"https://maven.apache.org/surefire/maven-surefire-plugin/examples/single-test.html",
+			"JUnit 4.x and TestNG", "https://docs.gradle.org/current/userguide/java_testing.html#test_filtering", "https://maven.apache.org/surefire/maven-surefire-plugin/examples/single-test.html",
 		},
 		"references/dotnet.md": {
 			`["dotnet", "test", "path/to/project.csproj", "--filter", "FullyQualifiedName=Namespace.ClassName.MethodName"]`,
 			`["dotnet", "test", "path/to/project.csproj", "--list-tests", "--filter", "FullyQualifiedName=Namespace.ClassName.MethodName"]`,
-			"Do not reuse that argv for MTP",
-			"https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-test-mtp",
+			"Do not reuse that argv for MTP", "https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-test-mtp",
 		},
 		"references/ruby.md": {
 			`["bundle", "exec", "rspec", "spec/path/to/example_spec.rb"]`,
 			`["bundle", "exec", "rspec", "spec/path/to/example_spec.rb:<line>"]`,
 			`["bin/rails", "test", "test/models/user_test.rb:<line>"]`,
-			"Do not apply RSpec syntax to Minitest",
-			"https://bundler.io/man/bundle-exec.1.html",
-			"https://guides.rubyonrails.org/testing.html#the-rails-test-runner",
+			"Do not apply RSpec syntax to Minitest", "https://bundler.io/man/bundle-exec.1.html", "https://guides.rubyonrails.org/testing.html#the-rails-test-runner",
 		},
 	}
 	for path, mustContain := range references {

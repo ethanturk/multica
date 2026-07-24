@@ -29,6 +29,7 @@ describe("paths.workspace() shape", () => {
         "myIssues",
         "runtimes",
         "skills",
+        "deterministicTools",
         "squads",
         "settings",
       ]),
@@ -52,6 +53,7 @@ describe("paths.workspace() shape", () => {
       ["myIssues", "my-issues"],
       ["runtimes", "runtimes"],
       ["skills", "skills"],
+      ["deterministicTools", "deterministic-tools"],
       ["squads", "squads"],
       ["settings", "settings"],
     ];
