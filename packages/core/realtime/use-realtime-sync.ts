@@ -193,6 +193,7 @@ function patchLatestChatMessagePage(
 type ChatSessionUpdatedPayload = {
   chat_session_id: string;
   title?: string;
+  project_id?: string | null;
   pinned?: boolean;
   status?: "active" | "archived";
   updated_at?: string;
@@ -227,6 +228,7 @@ export function applyChatSessionUpdatedToCache(
         ? {
             ...s,
             title: payload.title ?? s.title,
+            ...("project_id" in payload ? { project_id: payload.project_id } : {}),
             pinned: payload.pinned ?? s.pinned,
             status: payload.status ?? s.status,
             updated_at: payload.updated_at ?? s.updated_at,
@@ -683,6 +685,10 @@ export function useRealtimeSync(
       slack_installation: () => {
         const wsId = getCurrentWsId();
         if (wsId) qc.invalidateQueries({ queryKey: slackKeys.installations(wsId) });
+      },
+      vcs_connection: () => {
+        const wsId = getCurrentWsId();
+        if (wsId) qc.invalidateQueries({ queryKey: ["vcs", wsId] });
       },
       pull_request: () => {
         // PR list is keyed by issue id, not workspace, so we invalidate all
