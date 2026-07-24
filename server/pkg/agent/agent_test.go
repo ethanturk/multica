@@ -78,17 +78,6 @@ func TestNewReturnsAntigravityBackend(t *testing.T) {
 	}
 }
 
-func TestNewReturnsDirgeBackend(t *testing.T) {
-	t.Parallel()
-	b, err := New("dirge", Config{ExecutablePath: "/nonexistent/dirge"})
-	if err != nil {
-		t.Fatalf("New(dirge) error: %v", err)
-	}
-	if _, ok := b.(*dirgeBackend); !ok {
-		t.Fatalf("expected *dirgeBackend, got %T", b)
-	}
-}
-
 func TestNewRejectsUnknownType(t *testing.T) {
 	t.Parallel()
 	_, err := New("gpt", Config{})
@@ -180,16 +169,10 @@ func TestDetectVersionTimesOutOnHang(t *testing.T) {
 func TestLaunchHeaderCoversAllSupportedBackends(t *testing.T) {
 	t.Parallel()
 
-	// The factory in New() enumerates every supported agent type; LaunchHeader
-	// must stay in sync so the UI preview never shows an empty skeleton for a
-	// runtime the daemon actually spawns. If a new backend is added, add an
-	// entry to launchHeaders in agent.go and extend this list.
-	supported := []string{
-		"antigravity", "claude", "codebuddy", "codex", "copilot", "cursor", "dirge",
-		"deveco", "grok", "hermes", "kimi", "kiro", "omp", "openclaw", "opencode",
-		"pi", "qoder", "traecli",
-	}
-	for _, t_ := range supported {
+	// SupportedTypes is the canonical factory/profile whitelist. Iterating it
+	// directly prevents this coverage check from drifting when a backend is
+	// added, so the UI preview always has a launch skeleton.
+	for _, t_ := range SupportedTypes {
 		if header := LaunchHeader(t_); header == "" {
 			t.Errorf("LaunchHeader(%q) returned empty string — add it to launchHeaders", t_)
 		}

@@ -8,23 +8,23 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/pelletier/go-toml/v2"
 )
 
 // Background
 //
-// Codex's `workspace-write` sandbox intentionally protects Git metadata, even
-// when the resolved gitdir is inside an explicit writable root. Multica repo
-// checkouts are linked worktrees whose gitdir lives under the shared .repos
-// cache, so Linux Landlock makes normal git add/commit/branch operations fail
-// with EROFS. Codex currently offers no narrower metadata-write grant; upstream
-// recommends disabling its sandbox when Git writes are required. Multica tasks
-// already run inside the daemon-managed runtime boundary, so Linux uses
-// danger-full-access to preserve the required coding-agent workflow. See
-// openai/codex#5034 and multica-ai/multica#2925.
+// On macOS, Codex's Seatbelt sandbox in the `workspace-write` mode silently
+// ignores `[sandbox_workspace_write] network_access = true`. DNS resolution is
+// blocked at the syscall layer, so processes inside the sandbox see
+// `no such host` errors when calling out (for example, `multica issue get`
+// hitting the Multica API). See upstream issue openai/codex#10390.
 //
-// macOS also uses danger-full-access because Seatbelt currently ignores
-// `[sandbox_workspace_write] network_access = true`, blocking the Multica API.
-// Windows keeps workspace-write because it does not use Linux Landlock.
+// Until a fixed Codex release ships, the per-task Codex config on macOS needs
+// to fall back to `sandbox_mode = "danger-full-access"` so the agent can
+// actually reach the Multica API. On Linux (and on macOS once the upstream
+// fix is released), the normal `workspace-write` + `network_access = true`
+// combo is preferred because it keeps the filesystem sandbox intact.
 //
 // CodexDarwinNetworkAccessFixedVersion is the earliest Codex CLI version in
 // which `network_access = true` is honored under Seatbelt on macOS. Bump this
@@ -51,13 +51,44 @@ type codexSandboxPolicy struct {
 	WritableRoots []string
 	// Reason is a short human-readable label used in warn-level logs.
 	Reason string
+	// Hint is an optional, actionable remediation surfaced in warn-level logs
+	// when Mode is danger-full-access. It is empty when there is no generic
+	// action to surface (e.g. the Windows compatibility fallback, where
+	// enabling Codex's native sandbox is deferred follow-up work rather than a
+	// version bump), so the log omits the hint instead of showing an irrelevant
+	// one.
+	Hint string
 }
 
-// codexSandboxPolicyFor picks the right policy for the given platform and
-// detected Codex CLI version.
+// resolveGOOS returns goos, or runtime.GOOS when goos is empty. Callers pass an
+// explicit goos in tests; production leaves it empty to use the host platform.
+func resolveGOOS(goos string) string {
+	if goos == "" {
+		return runtime.GOOS
+	}
+	return goos
+}
+
+// codexSandboxPolicyFor picks the default policy for the given platform and
+// detected Codex CLI version. It is the platform baseline; per-task user config
+// can refine it (see codexSandboxPolicyForConfig).
 //
-//   - Linux: danger-full-access so linked-worktree Git metadata stays writable.
-//   - Windows: workspace-write with network access.
+//   - Linux: workspace-write with network access. Landlock enforces the
+//     filesystem sandbox and is not affected by the macOS Seatbelt bug.
+//   - Windows: danger-full-access, as a deliberate compatibility choice.
+//     Codex ships a native Windows sandbox (windows.sandbox = "unelevated" via
+//     a Restricted Token, or "elevated"), but it is still experimental with
+//     known reliability limitations, so the daemon does not enable it by
+//     default. When no native windows.sandbox is configured, Codex cannot
+//     enforce workspace-write on Windows (it downgrades to read-only) and then
+//     rejects non-safe mutation commands "by policy" — e.g. `multica issue
+//     create` fails — because under approval_policy = "never" the request never
+//     reaches the daemon's auto-approver. danger-full-access sidesteps that.
+//     Enabling the native sandbox is tracked as separate follow-up work. See
+//     MUL-4957. A user who has opted into windows.sandbox (via config.toml or a
+//     `-c` custom arg) keeps workspace-write instead of this fallback, and an
+//     undecidable config fails closed; that logic lives in
+//     codexSandboxPolicyForConfig / resolveWindowsSandboxState.
 //   - darwin with a version at or above CodexDarwinNetworkAccessFixedVersion:
 //     workspace-write with network access (upstream bug fixed).
 //   - darwin otherwise (including when the version is unknown): fall back to
@@ -66,18 +97,17 @@ func codexSandboxPolicyFor(goos, detectedVersion string) codexSandboxPolicy {
 	if goos == "" {
 		goos = runtime.GOOS
 	}
-	if goos == "linux" {
+	if goos == "windows" {
 		return codexSandboxPolicy{
-			Mode:          "danger-full-access",
-			NetworkAccess: false,
-			Reason:        "codex workspace-write protects git metadata and blocks required git operations (openai/codex#5034)",
+			Mode:   "danger-full-access",
+			Reason: "codex on windows: compatibility fallback; no native windows.sandbox configured, so workspace-write cannot be enforced (MUL-4957)",
 		}
 	}
 	if goos != "darwin" {
 		return codexSandboxPolicy{
 			Mode:          "workspace-write",
 			NetworkAccess: true,
-			Reason:        "platform does not use linux landlock or macos seatbelt",
+			Reason:        "non-darwin platform — seatbelt bug does not apply",
 		}
 	}
 	if codexDarwinNetworkAccessFixed(detectedVersion) {
@@ -95,7 +125,172 @@ func codexSandboxPolicyFor(goos, detectedVersion string) codexSandboxPolicy {
 		Mode:          "danger-full-access",
 		NetworkAccess: false,
 		Reason:        reason,
+		Hint:          codexUpgradeHint(),
 	}
+}
+
+// windowsSandboxConfig is the tri-state of a native Codex Windows sandbox
+// selection. It is three-valued (not a bool) so an undecidable config fails
+// closed — the daemon never loosens to danger-full-access when it cannot
+// confirm the user's intent. See MUL-4957.
+type windowsSandboxConfig int
+
+const (
+	// windowsSandboxAbsent: confidently no native sandbox is selected anywhere,
+	// so the danger-full-access compatibility fallback is safe to apply.
+	windowsSandboxAbsent windowsSandboxConfig = iota
+	// windowsSandboxNative: a valid windows.sandbox = "unelevated"|"elevated"
+	// is selected, so keep workspace-write and let Codex enforce isolation.
+	windowsSandboxNative
+	// windowsSandboxUndecidable: the config could not be read/parsed, or holds
+	// a windows.sandbox value Codex does not accept. The daemon cannot tell
+	// whether the user asked for isolation, so it must NOT loosen — fail closed.
+	windowsSandboxUndecidable
+)
+
+// codexSandboxPolicyForConfig returns the platform default from
+// codexSandboxPolicyFor for linux/darwin. On Windows it applies the resolved
+// native-sandbox state (see resolveWindowsSandboxState): a user who opted into
+// windows.sandbox keeps workspace-write, an undecidable config fails closed to
+// workspace-write, and only a confidently absent sandbox gets the
+// danger-full-access compatibility fallback. See MUL-4957.
+//
+// This is intentionally the branch point for the eventual native-sandbox
+// rollout: flipping the Windows default later means writing windows.sandbox
+// ourselves and defaulting winState to native, not restructuring callers.
+func codexSandboxPolicyForConfig(goos, detectedVersion string, winState windowsSandboxConfig) codexSandboxPolicy {
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	if goos == "windows" {
+		return codexSandboxPolicyForWindows(winState)
+	}
+	return codexSandboxPolicyFor(goos, detectedVersion)
+}
+
+// codexSandboxPolicyForWindows maps a resolved native-sandbox state to a
+// policy. Native and Undecidable both keep workspace-write (Undecidable is the
+// fail-closed case — it never loosens on doubt); only a confidently absent
+// native sandbox gets the danger-full-access compatibility fallback.
+func codexSandboxPolicyForWindows(state windowsSandboxConfig) codexSandboxPolicy {
+	switch state {
+	case windowsSandboxNative:
+		return codexSandboxPolicy{
+			Mode:          "workspace-write",
+			NetworkAccess: true,
+			Reason:        "codex on windows: native windows.sandbox configured; keeping workspace-write so Codex enforces task isolation",
+		}
+	case windowsSandboxUndecidable:
+		return codexSandboxPolicy{
+			Mode:          "workspace-write",
+			NetworkAccess: true,
+			Reason:        "codex on windows: windows.sandbox config undecidable (unreadable/unparseable/invalid); failing closed to workspace-write rather than loosening (MUL-4957)",
+		}
+	default: // windowsSandboxAbsent
+		return codexSandboxPolicy{
+			Mode:   "danger-full-access",
+			Reason: "codex on windows: compatibility fallback; no native windows.sandbox configured (MUL-4957)",
+		}
+	}
+}
+
+// windowsSandboxFromConfig classifies the windows.sandbox selection in a
+// config.toml body. Codex accepts only the exact-lowercase variants
+// "unelevated"/"elevated" and refuses to load a config with any other value, so
+// anything else present is treated as undecidable (fail closed) rather than a
+// safe "absent". Unparseable TOML is likewise undecidable — Codex would reject
+// the same file. An absent windows.sandbox key is a genuine "absent".
+func windowsSandboxFromConfig(config string) windowsSandboxConfig {
+	var probe struct {
+		Windows struct {
+			Sandbox string `toml:"sandbox"`
+		} `toml:"windows"`
+	}
+	if err := toml.Unmarshal([]byte(config), &probe); err != nil {
+		return windowsSandboxUndecidable
+	}
+	return classifyWindowsSandboxValue(probe.Windows.Sandbox)
+}
+
+// codexConfigOverrideValueRe matches the value token of a Codex `-c` /
+// `--config` windows.sandbox override, e.g. `windows.sandbox = "unelevated"`.
+// It tolerates whitespace around the dotted key and the `=`, matching Codex's
+// own lenient `-c` parsing.
+var codexWindowsSandboxOverrideRe = regexp.MustCompile(`^\s*windows\s*\.\s*sandbox\s*=`)
+
+// windowsSandboxFromCustomArgs classifies a native Windows sandbox selection
+// passed via Codex `-c windows.sandbox=...` / `--config windows.sandbox=...`
+// args. These never land in config.toml (they stay in argv and are applied on
+// top of it), so config-only detection would miss them — the MUL-4957 review's
+// second must-fix. Mirrors the override-parsing shape in server/pkg/agent's
+// buildCodexArgs: inline (`-c=windows.sandbox=x`) and two-token
+// (`-c windows.sandbox=x`) forms, last occurrence winning (Codex is last-wins).
+func windowsSandboxFromCustomArgs(args []string) windowsSandboxConfig {
+	state := windowsSandboxAbsent
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		flag := arg
+		value := ""
+		hasInlineValue := false
+		if idx := strings.Index(arg, "="); idx > 0 {
+			flag = arg[:idx]
+			value = arg[idx+1:]
+			hasInlineValue = true
+		}
+		if flag != "-c" && flag != "--config" {
+			continue
+		}
+		if !hasInlineValue {
+			if i+1 >= len(args) {
+				continue
+			}
+			i++
+			value = args[i]
+		}
+		if !codexWindowsSandboxOverrideRe.MatchString(value) {
+			continue
+		}
+		// A windows.sandbox override token: take the part after its first `=`.
+		if eq := strings.Index(value, "="); eq >= 0 {
+			state = classifyWindowsSandboxValue(value[eq+1:])
+		}
+	}
+	return state
+}
+
+// classifyWindowsSandboxValue maps a raw windows.sandbox value (from config.toml
+// or a `-c` arg, possibly surrounded by whitespace/quotes) to a tri-state. Only
+// the exact-lowercase variants Codex accepts count as native; a present but
+// unaccepted value is undecidable (Codex would refuse the config); an empty
+// value is absent.
+func classifyWindowsSandboxValue(raw string) windowsSandboxConfig {
+	v := strings.TrimSpace(raw)
+	v = strings.Trim(v, `"'`)
+	v = strings.TrimSpace(v)
+	switch v {
+	case "":
+		return windowsSandboxAbsent
+	case "unelevated", "elevated":
+		return windowsSandboxNative
+	default:
+		return windowsSandboxUndecidable
+	}
+}
+
+// resolveWindowsSandbox folds per-layer states into one. Undecidable wins over
+// everything (any broken/ambiguous layer means fail closed), then Native over
+// Absent (an opt-in in any layer keeps isolation).
+func resolveWindowsSandbox(states ...windowsSandboxConfig) windowsSandboxConfig {
+	result := windowsSandboxAbsent
+	for _, s := range states {
+		if s == windowsSandboxUndecidable {
+			return windowsSandboxUndecidable
+		}
+		if s == windowsSandboxNative {
+			result = windowsSandboxNative
+		}
+	}
+	return result
 }
 
 // codexDarwinNetworkAccessFixed returns true if the given detected version is
@@ -113,6 +308,12 @@ func codexDarwinNetworkAccessFixed(detectedVersion string) bool {
 		return false
 	}
 	return !got.lessThan(fixed)
+}
+
+// codexUpgradeHint returns a short, actionable hint for users running a Codex
+// version that suffers from the macOS network_access bug.
+func codexUpgradeHint() string {
+	return "upgrade Codex CLI (e.g. `brew upgrade codex` or `npm i -g @openai/codex`) once a release including openai/codex#10390 is available to restore workspace-write + network_access"
 }
 
 // multicaManagedBeginMarker / multicaManagedEndMarker delimit the block the
@@ -240,8 +441,8 @@ func stripLegacySandboxDirectives(content string) string {
 // twice produces the same file contents. The file is created if it doesn't
 // exist.
 //
-// The function logs (at warn level) when danger-full-access is selected so the
-// reduced inner-sandbox boundary is visible in daemon logs.
+// The function logs (at warn level) when it falls back to danger-full-access
+// on macOS so the incident is visible in daemon logs.
 func ensureCodexSandboxConfig(configPath string, policy codexSandboxPolicy, detectedVersion string, logger *slog.Logger) error {
 	data, err := os.ReadFile(configPath)
 	if err != nil && !os.IsNotExist(err) {
@@ -265,11 +466,15 @@ func ensureCodexSandboxConfig(configPath string, policy codexSandboxPolicy, dete
 		if version == "" {
 			version = "unknown"
 		}
-		logger.Warn("codex sandbox: using danger-full-access",
+		attrs := []any{
 			"reason", policy.Reason,
 			"codex_version", version,
 			"config_path", configPath,
-		)
+		}
+		if policy.Hint != "" {
+			attrs = append(attrs, "hint", policy.Hint)
+		}
+		logger.Warn("codex sandbox: running unsandboxed with danger-full-access", attrs...)
 	}
 
 	if err := os.WriteFile(configPath, []byte(updated), 0o644); err != nil {

@@ -1,6 +1,6 @@
 import { forwardRef, useImperativeHandle, useRef, useState, type ReactNode } from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 const mockQuickCreateIssue = vi.hoisted(() => vi.fn());
@@ -14,10 +14,25 @@ const mockSetLastMode = vi.hoisted(() => vi.fn());
 const mockToastSuccess = vi.hoisted(() => vi.fn());
 const mockUploadWithToast = vi.hoisted(() => vi.fn());
 const mockNavigationPush = vi.hoisted(() => vi.fn());
-const mockCliVersionCheck = vi.hoisted(() => ({
-  state: "ok" as "ok" | "too_old" | "missing",
-  min: "1.0.0",
-}));
+const mockSetIssueDraft = vi.hoisted(() => vi.fn());
+
+const mockIssueDraftStore = {
+  draft: {
+    title: "",
+    description: "",
+    status: "todo" as const,
+    priority: "none" as const,
+    assigneeType: undefined as "agent" | "squad" | "member" | undefined,
+    assigneeId: undefined as string | undefined,
+    projectId: undefined as string | undefined,
+    startDate: null as string | null,
+    dueDate: null as string | null,
+    labelIds: [] as string[],
+    propertyValues: {} as Record<string, string | number | boolean | string[]>,
+    attachments: [],
+  },
+  setDraft: mockSetIssueDraft,
+};
 
 const mockQuickCreateStore = {
   lastActorType: null as "agent" | "squad" | null,
@@ -117,6 +132,14 @@ vi.mock("@multica/core/issues/stores/quick-create-store", () => ({
     (selector ? selector(mockQuickCreateStore) : mockQuickCreateStore),
 }));
 
+vi.mock("@multica/core/issues/stores/draft-store", () => ({
+  useIssueDraftStore: Object.assign(
+    (selector?: (state: typeof mockIssueDraftStore) => unknown) =>
+      (selector ? selector(mockIssueDraftStore) : mockIssueDraftStore),
+    { getState: () => mockIssueDraftStore },
+  ),
+}));
+
 vi.mock("@multica/core/issues/stores/issue-create-settings-store", () => ({
   useIssueCreateSettingsStore: (
     selector?: (state: typeof mockCreateSettingsStore) => unknown,
@@ -136,7 +159,7 @@ vi.mock("@multica/core/auth", () => ({
 vi.mock("@multica/core/runtimes", () => ({
   runtimeListOptions: () => ({ queryKey: ["runtimes"] }),
   checkQuickCreateCliVersion: () => ({ state: "ok", min: "1.0.0" }),
-  checkQuickCreateFieldsCliVersion: () => mockCliVersionCheck,
+  checkQuickCreateFieldsCliVersion: () => ({ state: "ok", min: "1.0.0" }),
   readRuntimeCliVersion: () => "1.2.3",
   MIN_QUICK_CREATE_CLI_VERSION: "1.0.0",
 }));
@@ -155,22 +178,22 @@ vi.mock("../common/actor-avatar", () => ({
 
 vi.mock("../issues/components", () => ({
   PriorityIcon: ({ priority }: { priority: string }) => <span>{priority}</span>,
-  PriorityPicker: ({ onUpdate }: any) => (
+  PriorityPicker: ({ priority, onUpdate }: any) => (
     <button type="button" data-testid="priority-picker" onClick={() => onUpdate({ priority: "high" })}>
-      Priority
+      Priority {priority}
     </button>
   ),
-  DueDatePicker: ({ onUpdate }: any) => (
+  DueDatePicker: ({ dueDate, onUpdate }: any) => (
     <button type="button" data-testid="due-date-picker" onClick={() => onUpdate({ due_date: "2026-08-01" })}>
-      Due date
+      Due date {dueDate ?? "none"}
     </button>
   ),
 }));
 
 vi.mock("../projects/components/project-picker", () => ({
-  ProjectPicker: ({ onUpdate }: any) => (
+  ProjectPicker: ({ projectId, onUpdate }: any) => (
     <button type="button" data-testid="project-picker" onClick={() => onUpdate({ project_id: "proj-1" })}>
-      Project
+      Project {projectId ?? "none"}
     </button>
   ),
 }));
@@ -374,12 +397,27 @@ describe("AgentCreatePanel", () => {
     mockCreateSettingsStore.quickCreateFields = ["project"];
     mockQuickCreateStore.prompt = "Persisted draft prompt";
     mockQuickCreateStore.keepOpen = false;
+    mockIssueDraftStore.draft = {
+      title: "",
+      description: "",
+      status: "todo",
+      priority: "none",
+      assigneeType: undefined,
+      assigneeId: undefined,
+      projectId: undefined,
+      startDate: null,
+      dueDate: null,
+      labelIds: [],
+      propertyValues: {},
+      attachments: [],
+    };
+    mockSetIssueDraft.mockImplementation((patch: Partial<typeof mockIssueDraftStore.draft>) => {
+      mockIssueDraftStore.draft = { ...mockIssueDraftStore.draft, ...patch };
+    });
     mockProjectsQuery.data = [];
     mockProjectsQuery.isSuccess = true;
     mockSquadsData.list = [];
     mockQuickCreateIssue.mockResolvedValue(undefined);
-    mockCliVersionCheck.state = "ok";
-    mockCliVersionCheck.min = "1.0.0";
     mockUploadWithToast.mockResolvedValue({
       id: "019ec09d-6222-722b-bdfa-427b105d80be",
       workspace_id: "ws-test",
@@ -412,6 +450,47 @@ describe("AgentCreatePanel", () => {
     ).toHaveValue("Persisted draft prompt");
   });
 
+  it("restores unfinished actor, project, priority, and due-date selections after remount", async () => {
+    mockSquadsData.list = [
+      { id: "squad-1", name: "Frontend Squad", leader_id: "agent-1", archived_at: null },
+    ];
+    mockProjectsQuery.data = [{ id: "proj-1", title: "Web", icon: null }];
+    mockCreateSettingsStore.quickCreateFields = ["project", "priority", "due_date"];
+    const user = userEvent.setup();
+
+    const firstOpen = renderPanel({
+      onClose: vi.fn(),
+      isExpanded: false,
+      setIsExpanded: vi.fn(),
+    });
+
+    await user.click(screen.getByRole("button", { name: /Frontend Squad/ }));
+    await user.click(screen.getByTestId("project-picker"));
+    await user.click(screen.getByTestId("priority-picker"));
+    await user.click(screen.getByTestId("due-date-picker"));
+
+    expect(mockIssueDraftStore.draft).toEqual(
+      expect.objectContaining({
+        assigneeType: "squad",
+        assigneeId: "squad-1",
+        projectId: "proj-1",
+        priority: "high",
+        dueDate: "2026-08-01",
+      }),
+    );
+
+    firstOpen.unmount();
+    renderPanel({ onClose: vi.fn(), isExpanded: false, setIsExpanded: vi.fn() });
+
+    expect(screen.getByRole("button", { name: /Frontend Squad/ })).toHaveAttribute(
+      "data-selected",
+      "true",
+    );
+    expect(screen.getByTestId("project-picker")).toHaveTextContent("Project proj-1");
+    expect(screen.getByTestId("priority-picker")).toHaveTextContent("Priority high");
+    expect(screen.getByTestId("due-date-picker")).toHaveTextContent("Due date 2026-08-01");
+  });
+
   it("writes prompt changes back to the draft store and clears them after submit", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
@@ -440,6 +519,13 @@ describe("AgentCreatePanel", () => {
     // No project picked → persisted project preference is cleared so the
     // store stays in sync with the actual outgoing request.
     expect(mockSetLastProjectId).toHaveBeenCalledWith(null);
+    expect(mockSetIssueDraft).toHaveBeenLastCalledWith({
+      assigneeType: undefined,
+      assigneeId: undefined,
+      projectId: undefined,
+      priority: "none",
+      dueDate: null,
+    });
     expect(mockClearPrompt).toHaveBeenCalled();
     expect(mockSetLastMode).toHaveBeenCalledWith("agent");
     expect(onClose).toHaveBeenCalled();
@@ -542,32 +628,6 @@ describe("AgentCreatePanel", () => {
         project_id: undefined,
         parent_issue_id: undefined,
         attachment_ids: ["019ec09d-6222-722b-bdfa-427b105d80be"],
-      });
-    });
-  });
-
-  it("still submits when the runtime reports an old daemon cli version", async () => {
-    mockCliVersionCheck.state = "too_old";
-    mockCliVersionCheck.min = "9.9.9";
-    const user = userEvent.setup();
-
-    renderPanel({ onClose: vi.fn(), isExpanded: false, setIsExpanded: vi.fn() });
-
-    const editor = screen.getByPlaceholderText(
-      'Tell the agent what to do, e.g. "let Bohan fix the inbox loading slowness in the Web project"',
-    );
-    await user.clear(editor);
-    await user.type(editor, "Create this even on an old daemon");
-
-    const createButton = screen.getByRole("button", { name: /^Create$/i });
-    expect(createButton).not.toBeDisabled();
-    await user.click(createButton);
-
-    await waitFor(() => {
-      expect(mockQuickCreateIssue).toHaveBeenCalledWith({
-        agent_id: "agent-1",
-        prompt: "Create this even on an old daemon",
-        project_id: undefined,
       });
     });
   });
@@ -739,6 +799,42 @@ describe("AgentCreatePanel", () => {
       const submit = await screen.findByRole("button", { name: "Uploading…" });
       expect(submit).toBeDisabled();
       expect(screen.getByRole("button", { name: "Upload file" })).not.toBeDisabled();
+    });
+  });
+
+  // MUL-4931 — this path files a real issue, so a double-fire is a duplicate
+  // issue, not a cosmetic glitch. `submitting` is state: two chords landing in
+  // one tick both read the pre-update value, so only a synchronously-flipped
+  // ref can gate it. Mirrors the manual-create regression.
+  describe("send shortcut single-flight", () => {
+    it("creates once when the send chord fires twice in the same tick", async () => {
+      // Hold the request open so both presses land inside the in-flight window.
+      let release!: (v: unknown) => void;
+      mockQuickCreateIssue.mockImplementationOnce(
+        () => new Promise((resolve) => { release = resolve; }),
+      );
+
+      renderPanel({ onClose: vi.fn(), isExpanded: false, setIsExpanded: vi.fn() });
+
+      const editor = screen.getByPlaceholderText(
+        'Tell the agent what to do, e.g. "let Bohan fix the inbox loading slowness in the Web project"',
+      );
+
+      // Both presses inside ONE act: React cannot re-render between them, so
+      // the second handler still closes over `submitting === false`. fireEvent
+      // would flush in between and hide the race entirely.
+      await act(async () => {
+        const press = () =>
+          editor.dispatchEvent(
+            new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }),
+          );
+        press();
+        press();
+      });
+
+      await act(async () => { release(undefined); });
+
+      expect(mockQuickCreateIssue).toHaveBeenCalledTimes(1);
     });
   });
 });

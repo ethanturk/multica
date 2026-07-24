@@ -40,14 +40,14 @@ func TestSupportedTypesMatchesMigrationWhitelist(t *testing.T) {
 		"claude": true, "codebuddy": true, "codex": true, "copilot": true,
 		"opencode": true, "deveco": true, "openclaw": true, "hermes": true,
 		"pi": true, "cursor": true, "kimi": true, "kiro": true, "antigravity": true,
-		"dirge": true, "qoder": true, "traecli": true, "grok": true,
+		"qoder": true, "traecli": true, "grok": true, "qwen": true,
 	}
 	if len(SupportedTypes) != len(want) {
 		t.Fatalf("SupportedTypes has %d entries, migration whitelist has %d; keep them in lockstep", len(SupportedTypes), len(want))
 	}
 	for _, typ := range SupportedTypes {
 		if !want[typ] {
-			t.Errorf("SupportedTypes contains %q which is not in the runtime_profile protocol_family CHECK", typ)
+			t.Errorf("SupportedTypes contains %q which is not in the migration 120 protocol_family CHECK", typ)
 		}
 	}
 }

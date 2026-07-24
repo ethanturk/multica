@@ -139,6 +139,7 @@ type Config struct {
 	ClaudeArgs                     []string
 	CodexArgs                      []string
 	CodebuddyArgs                  []string
+	QwenArgs                       []string
 
 	// ProfileCommandOverrides maps a custom runtime profile_id -> the absolute
 	// executable path to use for that profile on THIS machine (MUL-3284).
@@ -173,6 +174,7 @@ type DetToolsConfig struct {
 // Overrides allows CLI flags to override environment variables and defaults.
 // Zero values are ignored and the env/default value is used instead.
 type Overrides struct {
+	AllowNoAgents     bool
 	ServerURL         string
 	WorkspacesRoot    string
 	PollInterval      time.Duration
@@ -358,6 +360,9 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	if e, ok := probe("MULTICA_DIRGE_PATH", "dirge", "MULTICA_DIRGE_MODEL"); ok {
 		agents["dirge"] = e
 	}
+	if e, ok := probe("MULTICA_QWEN_PATH", "qwen", "MULTICA_QWEN_MODEL"); ok {
+		agents["qwen"] = e
+	}
 	// agy 1.0.6 added a `--model` flag (MUL-3125), so Antigravity now takes a
 	// model env like every other backend. MULTICA_ANTIGRAVITY_MODEL seeds the
 	// daemon-wide default; its value is the exact `agy models` display string
@@ -399,6 +404,10 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		return Config{}, err
 	}
 	codebuddyArgs, err := shellArgsFromEnv("MULTICA_CODEBUDDY_ARGS")
+	if err != nil {
+		return Config{}, err
+	}
+	qwenArgs, err := shellArgsFromEnv("MULTICA_QWEN_ARGS")
 	if err != nil {
 		return Config{}, err
 	}
@@ -655,6 +664,7 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		ClaudeArgs:                     claudeArgs,
 		CodexArgs:                      codexArgs,
 		CodebuddyArgs:                  codebuddyArgs,
+		QwenArgs:                       qwenArgs,
 		ProfileCommandOverrides:        profileCommandOverrides,
 		DetTools:                       detTools,
 	}, nil
@@ -928,7 +938,7 @@ func isExecutableFile(path string) bool {
 var defaultAgentCommandNames = []string{
 	"claude", "codex", "opencode", "deveco", "openclaw", "hermes",
 	"pi", "cursor-agent", "copilot", "kimi", "kiro-cli", "codebuddy", "agy", "dirge", "traecli",
-	"grok",
+	"grok", "qwen",
 }
 
 // codexDesktopAppBundlePaths returns candidate macOS app-bundle locations for

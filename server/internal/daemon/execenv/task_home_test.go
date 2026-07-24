@@ -96,9 +96,10 @@ func TestEnsureCodexSandboxConfigWritableRoots(t *testing.T) {
 	}
 }
 
-// TestPrepareCodexSandboxHomeLinux verifies Linux skips the redirected home
-// when danger-full-access is active. The real HOME and resolved worktree gitdir
-// are both writable without extra roots.
+// TestPrepareCodexSandboxHomeLinux verifies the Linux path creates a writable
+// home and returns exactly that home as the only writable root (no repo cache —
+// Codex re-protects resolved gitdirs, so writable_roots can't unblock git; see
+// task_home.go / #2925).
 func TestPrepareCodexSandboxHomeLinux(t *testing.T) {
 	// Not parallel: mutates HOME via os.UserHomeDir seeding in prepareTaskHome.
 	fakeHome := t.TempDir()
@@ -110,11 +111,15 @@ func TestPrepareCodexSandboxHomeLinux(t *testing.T) {
 		t.Fatalf("prepareCodexSandboxHome: %v", err)
 	}
 
-	if home != "" || roots != nil {
-		t.Fatalf("linux danger-full-access should skip writable home, got home=%q roots=%v", home, roots)
+	wantHome := filepath.Join(envRoot, "home")
+	if home != wantHome {
+		t.Errorf("home = %q, want %q", home, wantHome)
 	}
-	if _, err := os.Stat(filepath.Join(envRoot, "home")); !os.IsNotExist(err) {
-		t.Errorf("linux must not create a task home dir, stat err=%v", err)
+	if fi, err := os.Stat(home); err != nil || !fi.IsDir() {
+		t.Errorf("task home dir not created: err=%v", err)
+	}
+	if len(roots) != 1 || roots[0] != wantHome {
+		t.Errorf("writable roots = %v, want [%q]", roots, wantHome)
 	}
 }
 
