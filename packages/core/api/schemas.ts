@@ -184,6 +184,10 @@ export interface AppConfigResponse {
   daemon_server_url?: string;
   daemon_app_url?: string;
   workspace_creation_disabled?: boolean;
+  /** Whether this deployment offers the self-hosted Git provider integration
+   * (self-host only; off on the managed cloud). Absent/false hides the whole
+   * Settings → Integrations "Git providers" section. */
+  vcs_integration_available?: boolean;
   feature_flags?: Record<string, boolean>;
   server_version?: string;
 }
@@ -334,6 +338,7 @@ export const AppConfigSchema = z.object({
   daemon_server_url: OptionalStringSchema,
   daemon_app_url: OptionalStringSchema,
   workspace_creation_disabled: BooleanWithDefaultSchema(false).optional(),
+  vcs_integration_available: BooleanWithDefaultSchema(false).optional(),
   feature_flags: FeatureFlagsSchema,
   server_version: OptionalStringSchema,
 }).loose();
@@ -346,6 +351,7 @@ export const EMPTY_APP_CONFIG: AppConfigResponse = {
   daemon_server_url: "",
   daemon_app_url: "",
   workspace_creation_disabled: false,
+  vcs_integration_available: false,
   feature_flags: {},
 };
 
@@ -742,6 +748,26 @@ export const EMPTY_CLOUD_RUNTIME_NODE: CloudRuntimeNode = {
 // only that row instead of dropping the whole array to the `[]` fallback.
 // ---------------------------------------------------------------------------
 
+// Cost split carried by every usage row. `cost_usd_ticks` is what the provider
+// itself charged for the rows behind this aggregate (1e-10 USD); the
+// `uncosted_*` counts are the tokens from rows the provider did NOT price, and
+// so are the only ones the client should run through its rate table.
+//
+// The `uncosted_*` fields are deliberately `.optional()` rather than
+// `.default(0)`: a backend that predates them sends nothing, and defaulting
+// those rows to "0 tokens left to estimate" would silently zero their cost.
+// `undefined` means "this backend doesn't split", and the consumer falls back
+// to the full token counts — i.e. exactly the old behaviour. A real 0 from a
+// current backend means "everything here is already priced", which is a
+// different thing and must stay distinguishable.
+const CostSplitShape = {
+  cost_usd_ticks: z.number().optional(),
+  uncosted_input_tokens: z.number().optional(),
+  uncosted_output_tokens: z.number().optional(),
+  uncosted_cache_read_tokens: z.number().optional(),
+  uncosted_cache_write_tokens: z.number().optional(),
+};
+
 const DashboardUsageDailySchema = z.object({
   date: z.string().default(""),
   provider: z.string().default(""),
@@ -750,6 +776,7 @@ const DashboardUsageDailySchema = z.object({
   output_tokens: z.number().default(0),
   cache_read_tokens: z.number().default(0),
   cache_write_tokens: z.number().default(0),
+  ...CostSplitShape,
   task_count: z.number().default(0),
 }).loose();
 
@@ -763,6 +790,7 @@ const DashboardUsageByAgentSchema = z.object({
   output_tokens: z.number().default(0),
   cache_read_tokens: z.number().default(0),
   cache_write_tokens: z.number().default(0),
+  ...CostSplitShape,
   task_count: z.number().default(0),
 }).loose();
 
@@ -802,6 +830,7 @@ const RuntimeUsageSchema = z.object({
   output_tokens: z.number().default(0),
   cache_read_tokens: z.number().default(0),
   cache_write_tokens: z.number().default(0),
+  ...CostSplitShape,
 }).loose();
 
 export const RuntimeUsageListSchema = z.array(RuntimeUsageSchema);
@@ -821,6 +850,7 @@ const RuntimeUsageByAgentSchema = z.object({
   output_tokens: z.number().default(0),
   cache_read_tokens: z.number().default(0),
   cache_write_tokens: z.number().default(0),
+  ...CostSplitShape,
   task_count: z.number().default(0),
 }).loose();
 
@@ -833,6 +863,7 @@ const RuntimeUsageByHourSchema = z.object({
   output_tokens: z.number().default(0),
   cache_read_tokens: z.number().default(0),
   cache_write_tokens: z.number().default(0),
+  ...CostSplitShape,
   task_count: z.number().default(0),
 }).loose();
 

@@ -31,6 +31,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/storage"
 	"github.com/multica-ai/multica/server/internal/util"
+	"github.com/multica-ai/multica/server/internal/util/secretbox"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/featureflag"
 	"github.com/multica-ai/multica/server/pkg/llm"
@@ -65,6 +66,16 @@ type Config struct {
 	// invitation only. The public /api/config endpoint mirrors this flag so
 	// the UI can hide every "Create workspace" affordance — see #3433.
 	DisableWorkspaceCreation bool
+	// VCSIntegrationEnabled gates the self-hosted Git provider integration
+	// (Forgejo / Gitea / GitLab) at the deployment level, independent of whether
+	// MULTICA_VCS_SECRET_KEY is set. It is the product boundary: the feature is
+	// intended for self-hosted Multica only (where Multica and the Git instance
+	// can share a network), and is left off on the managed cloud — connect,
+	// rotate, and webhook handlers reject when it is false, and /api/config
+	// omits it so the UI hides the whole section rather than showing a
+	// "missing key" message a cloud user cannot act on. Populated from
+	// MULTICA_VCS_INTEGRATION_ENABLED; the self-host compose defaults it on.
+	VCSIntegrationEnabled bool
 	// PublicURL is the absolute base URL the API is reachable at from the
 	// public internet, with no trailing slash (e.g. "https://multica.ai").
 	// Used only to build webhook_url responses for autopilot webhook triggers
@@ -228,7 +239,14 @@ type Handler struct {
 	// Config); when unconfigured its Enabled() reports false and callers fall
 	// back silently.
 	LLM *llm.Client
-	cfg Config
+	// VCSSecretBox encrypts/decrypts per-workspace Git provider access tokens and
+	// webhook secrets at rest (Forgejo / Gitea / GitLab). Nil when
+	// MULTICA_VCS_SECRET_KEY is unset; the connect/webhook handlers return 503
+	// in that case so a misconfigured self-host deployment surfaces a clear
+	// error rather than silently storing plaintext. Wired in
+	// cmd/server/router.go after New.
+	VCSSecretBox *secretbox.Box
+	cfg          Config
 }
 
 func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *events.Bus, emailService *service.EmailService, store storage.Storage, cfSigner *auth.CloudFrontSigner, analyticsClient analytics.Client, cfg Config, daemonHubs ...*daemonws.Hub) *Handler {

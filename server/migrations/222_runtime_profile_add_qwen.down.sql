@@ -1,4 +1,4 @@
--- Restore the pre-213 whitelist (with Grok, without Qwen Code).  NOT VALID
+-- Restore the pre-222 whitelist (with Grok, without Qwen Code).  NOT VALID
 -- keeps rollback compatible with historical rows the prior migrations allowed.
 ALTER TABLE runtime_profile DROP CONSTRAINT IF EXISTS runtime_profile_protocol_family_check;
 
