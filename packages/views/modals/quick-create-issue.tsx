@@ -440,7 +440,7 @@ export function AgentCreatePanel({
             setError(
               t(($) => $.create_issue.agent.error_daemon_version, {
                 current: cur,
-                min: body.min_version || versionCheck.min,
+                min: body.min_version || fieldVersionCheck.min,
               }),
             );
             return false;
