@@ -988,7 +988,16 @@ func TestInjectRuntimeConfigBackgroundTaskSafetyProviderAgnostic(t *testing.T) {
 				// no follow-up wakeup. These pins forbid that shape.
 				"Never background-and-yield",
 				"foreground tool call that blocks",
-				"only to work owned by the current run",
+				// MUL-5274: persistent local services are allowed only as
+				// an explicit, verified handoff with a cleanup handle.
+				"persistent service handoff",
+				"running service itself is the requested deliverable",
+				"stdio redirected to durable logs",
+				"PID/profile",
+				"verify readiness before replying",
+				"survival as best-effort, not guaranteed",
+				"does not cover tests, builds, CI polling",
+				"are not agent-owned background tasks",
 				"GitHub Actions after a successful push",
 				"Do not wait for them by default",
 				// MUL-5223: the conceptual boundary above was read as
@@ -1020,6 +1029,12 @@ func TestInjectRuntimeConfigBackgroundTaskSafetyProviderAgnostic(t *testing.T) {
 			// the section's example of how to wait properly.
 			if strings.Contains(s, "e.g. `gh run watch`") {
 				t.Errorf("%s should not suggest waiting for external GitHub CI\n---\n%s", tc.file, s)
+			}
+			// MUL-5274 review: with the persistent-service exception in the
+			// list, a "The rules above ..." scoping sentence would sweep in
+			// work that is precisely no longer run-owned after handoff.
+			if strings.Contains(s, "The rules above") {
+				t.Errorf("%s must not reintroduce the ambiguous \"The rules above\" scoping sentence\n---\n%s", tc.file, s)
 			}
 		})
 	}
@@ -4585,14 +4600,26 @@ func TestBuildMetaSkillContentOmitsRequestingUserWhenEmpty(t *testing.T) {
 	}
 }
 
-// TestBuildMetaSkillContentEmitsTaskInitiatorMember pins MUL-2645's brief
-// contract: when the task resolves to a member initiator, the brief gains a
-// `## Task Initiator` block naming that person (with email) and stating the
-// privacy boundary — the agent's credentials stay owner-scoped. This is what
-// lets a workspace-visible, multi-user agent tell who is actually asking
-// rather than seeing every requester as the runtime owner.
-func TestBuildMetaSkillContentEmitsTaskInitiatorMember(t *testing.T) {
+// Task Initiator moved to the per-turn prompt (MUL-5377): the initiator
+// changes whenever a different person comments on the same issue.
+func TestTaskInitiatorBlockMember(t *testing.T) {
 	t.Parallel()
+	block := BuildTaskInitiatorBlock("member", "Bohan", "bohan@example.com")
+
+	for _, want := range []string{
+		"## Task Initiator",
+		"initiated by **Bohan** (bohan@example.com), a member of this workspace",
+		"apply any per-person privacy or access rules",
+		"credentials stay scoped to the runtime owner",
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("expected initiator block to contain %q\n---\n%s", want, block)
+		}
+	}
+	if BuildTaskInitiatorBlock("member", "", "") != "" {
+		t.Error("no initiator name must render nothing")
+	}
+
 	content := buildMetaSkillContent("claude", TaskContextForEnv{
 		IssueID:        "issue-1",
 		AgentName:      "Lambda",
@@ -4602,46 +4629,20 @@ func TestBuildMetaSkillContentEmitsTaskInitiatorMember(t *testing.T) {
 		InitiatorName:  "Bohan",
 		InitiatorEmail: "bohan@example.com",
 	})
-
-	for _, want := range []string{
-		"## Task Initiator",
-		"initiated by **Bohan** (bohan@example.com), a member of this workspace",
-		"apply any per-person privacy or access rules",
-		"credentials stay scoped to the runtime owner",
-	} {
-		if !strings.Contains(content, want) {
-			t.Errorf("expected brief to contain %q\n---\n%s", want, content)
-		}
-	}
-
-	// Initiator sits after Requesting User and before Available Commands so the
-	// agent reads "who am I" → "whose context" → "who is asking now" → commands.
-	initiatorIdx := strings.Index(content, "## Task Initiator")
-	commandsIdx := strings.Index(content, "## Available Commands")
-	if !(initiatorIdx >= 0 && initiatorIdx < commandsIdx) {
-		t.Errorf("section order wrong: initiator=%d commands=%d", initiatorIdx, commandsIdx)
+	if strings.Contains(content, "## Task Initiator") {
+		t.Errorf("brief must not carry Task Initiator — it is per-run state (MUL-5377)\n---\n%s", content)
 	}
 }
 
-// TestBuildMetaSkillContentEmitsTaskInitiatorAgent covers an agent-initiated
-// task (another agent @mentioned this one): the block names the agent and
-// carries no email, since agents have no address.
-func TestBuildMetaSkillContentEmitsTaskInitiatorAgent(t *testing.T) {
+func TestTaskInitiatorBlockAgent(t *testing.T) {
 	t.Parallel()
-	content := buildMetaSkillContent("claude", TaskContextForEnv{
-		IssueID:       "issue-1",
-		AgentName:     "Lambda",
-		AgentID:       "agent-1",
-		InitiatorType: "agent",
-		InitiatorID:   "agent-9",
-		InitiatorName: "GPT-Boy",
-	})
+	block := BuildTaskInitiatorBlock("agent", "GPT-Boy", "")
 
-	if !strings.Contains(content, "initiated by **GPT-Boy**, another agent in this workspace") {
-		t.Errorf("expected agent-initiator phrasing\n---\n%s", content)
+	if !strings.Contains(block, "initiated by **GPT-Boy**, another agent in this workspace") {
+		t.Errorf("expected agent-initiator phrasing\n---\n%s", block)
 	}
-	if strings.Contains(content, "a member of this workspace") {
-		t.Errorf("agent initiator must not be described as a member\n---\n%s", content)
+	if strings.Contains(block, "a member of this workspace") {
+		t.Errorf("agent initiator must not be described as a member\n---\n%s", block)
 	}
 }
 
@@ -4707,14 +4708,9 @@ func TestSanitizeEmailForBrief(t *testing.T) {
 	}
 }
 
-// TestInjectRuntimeConfigCommentTriggerColdStartRead checks the
-// comment-triggered Workflow on cold start (no prior run): it points the agent
-// at the triggering thread (--thread <trigger> --tail 30) instead of the flat
-// dump and with no since-delta hint, while the Available Commands core line
-// still surfaces the thread/recent/cursor flags so they remain discoverable for
-// CLI use even though the verbose cursor walkthrough was dropped from the
-// workflow steps.
-func TestInjectRuntimeConfigCommentTriggerColdStartRead(t *testing.T) {
+// The brief carries the static catch-up read and the CLI flag discovery
+// point; the per-run thread routing lives in the per-turn prompt (MUL-5377).
+func TestInjectRuntimeConfigBriefKeepsStaticCatchUpRead(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -4722,11 +4718,10 @@ func TestInjectRuntimeConfigCommentTriggerColdStartRead(t *testing.T) {
 		triggerID = "trigger-comment-1"
 	)
 	dir := t.TempDir()
-	ctx := TaskContextForEnv{
+	if _, err := InjectRuntimeConfig(dir, "claude", TaskContextForEnv{
 		IssueID:          issueID,
 		TriggerCommentID: triggerID,
-	}
-	if _, err := InjectRuntimeConfig(dir, "claude", ctx); err != nil {
+	}); err != nil {
 		t.Fatalf("InjectRuntimeConfig failed: %v", err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "CLAUDE.md"))
@@ -4735,55 +4730,34 @@ func TestInjectRuntimeConfigCommentTriggerColdStartRead(t *testing.T) {
 	}
 	s := string(data)
 
-	// Cold start (no prior run) → read the triggering thread, not the flat dump,
-	// and no since-delta hint.
-	for _, want := range []string{
-		"Read the triggering conversation first",
-		"multica issue comment list " + issueID + " --thread " + triggerID + " --tail 30 --output json",
-		"multica issue comment list " + issueID + " --recent 10 --output json",
-	} {
-		if !strings.Contains(s, want) {
-			t.Errorf("comment-triggered Workflow missing cold-start read %q\n---\n%s", want, s)
-		}
+	if !strings.Contains(s, "multica issue comment list "+issueID+" --recent 10 --output json") {
+		t.Errorf("brief must keep the static catch-up read\n---\n%s", s)
 	}
 	if strings.Contains(s, "--recent 20") {
-		t.Errorf("comment-triggered Workflow still uses recent 20\n---\n%s", s)
+		t.Errorf("brief still uses recent 20\n---\n%s", s)
+	}
+	if strings.Contains(s, triggerID) {
+		t.Errorf("brief must not carry the trigger comment id (MUL-5377)\n---\n%s", s)
 	}
 	if strings.Contains(s, "new comment(s) since your last run") {
-		t.Errorf("cold-start workflow must not render the since-delta hint\n---\n%s", s)
+		t.Errorf("brief must not render a since-delta hint\n---\n%s", s)
 	}
 
-	// Available Commands core line must surface the new flags (this is the
-	// single discovery point for non-workflow CLI use cases).
+	// Available Commands stays the single discovery point for the flags.
 	for _, want := range []string{
 		"[--thread <comment-id>",
 		"--tail N",
 		"--recent N",
-		"Next reply cursor",
-		"Next thread cursor",
 	} {
 		if !strings.Contains(s, want) {
-			t.Errorf("Available Commands core line missing %q\n---\n%s", want, s)
+			t.Errorf("Available Commands missing flag documentation %q\n---\n%s", want, s)
 		}
-	}
-
-	// The legacy step-2 phrasing this PR replaces must not regress.
-	if strings.Contains(s, "read the conversation (returns all comments, capped server-side at 2000)") {
-		t.Errorf("comment-triggered Workflow still carries the legacy full-dump phrasing\n---\n%s", s)
-	}
-	// The pre-MUL-2421 unbounded `--thread` recipe (no --tail) is also a
-	// regression target: it dumps the entire thread on long threads.
-	if strings.Contains(s, "multica issue comment list "+issueID+" --thread "+triggerID+" --output json") {
-		t.Errorf("comment-triggered Workflow regressed to unbounded --thread recipe (no --tail) — long threads will overflow context\n---\n%s", s)
 	}
 }
 
-// TestInjectRuntimeConfigCommentTriggerResumedNoDeltaRead checks the
-// comment-triggered Workflow when the daemon is resuming a prior session and no
-// since-delta hint is present. In that shape, the agent already has session
-// context and the trigger body is injected in the per-turn prompt, so the
-// runtime brief must not force a duplicate thread read.
-func TestInjectRuntimeConfigCommentTriggerResumedNoDeltaRead(t *testing.T) {
+// Resumed/no-delta routing lives in the per-turn prompt (MUL-5377); pin the
+// helper that renders it and assert the brief stays clean.
+func TestInjectRuntimeConfigBriefOmitsResumedThreadAnchor(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -4791,13 +4765,12 @@ func TestInjectRuntimeConfigCommentTriggerResumedNoDeltaRead(t *testing.T) {
 		triggerID = "trigger-comment-1"
 	)
 	dir := t.TempDir()
-	ctx := TaskContextForEnv{
+	if _, err := InjectRuntimeConfig(dir, "claude", TaskContextForEnv{
 		IssueID:             issueID,
 		TriggerCommentID:    triggerID,
 		TriggerThreadID:     "thread-root-1",
 		PriorSessionResumed: true,
-	}
-	if _, err := InjectRuntimeConfig(dir, "claude", ctx); err != nil {
+	}); err != nil {
 		t.Fatalf("InjectRuntimeConfig failed: %v", err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "CLAUDE.md"))
@@ -4806,6 +4779,13 @@ func TestInjectRuntimeConfigCommentTriggerResumedNoDeltaRead(t *testing.T) {
 	}
 	s := string(data)
 
+	for _, banned := range []string{triggerID, "thread-root-1", "triggering comment is already included above"} {
+		if strings.Contains(s, banned) {
+			t.Errorf("brief must not carry per-run resume routing %q (MUL-5377)\n---\n%s", banned, s)
+		}
+	}
+
+	hint := BuildResumedCommentsHint(issueID, triggerID, "thread-root-1")
 	for _, want := range []string{
 		"triggering comment is already included above",
 		"No other new comments on this issue since your last run",
@@ -4814,15 +4794,9 @@ func TestInjectRuntimeConfigCommentTriggerResumedNoDeltaRead(t *testing.T) {
 		"do not rely only on resumed session memory",
 		"multica issue comment list " + issueID + " --thread thread-root-1 --tail 30 --output json",
 	} {
-		if !strings.Contains(s, want) {
-			t.Errorf("comment-triggered resumed Workflow missing %q\n---\n%s", want, s)
+		if !strings.Contains(hint, want) {
+			t.Errorf("resumed hint missing %q\n---\n%s", want, hint)
 		}
-	}
-	if strings.Contains(s, "scoped to the triggering thread") {
-		t.Errorf("resumed Workflow must not claim the delta is thread-scoped\n---\n%s", s)
-	}
-	if strings.Contains(s, "Read the triggering conversation first") {
-		t.Errorf("resumed workflow must not force the cold-start thread read\n---\n%s", s)
 	}
 }
 
@@ -5127,10 +5101,10 @@ func TestInjectRuntimeConfigIssueMetadataCodexFormattingUnchanged(t *testing.T) 
 		if !strings.Contains(s, "always write the comment body to a UTF-8 file with your file-write tool first, then post it with `--content-file <path>`") {
 			t.Fatalf("codex linux --content-file rule missing\n---\n%s", s)
 		}
-		// ...AND the per-turn reply instruction still points at this
-		// turn's trigger comment id.
-		if !strings.Contains(s, "--parent comment-md-codex") {
-			t.Fatalf("reply instruction lost trigger comment id\n---\n%s", s)
+		// ...AND the brief does NOT carry this turn's trigger comment id:
+		// it moved to the per-turn user message (MUL-5377).
+		if strings.Contains(s, "comment-md-codex") {
+			t.Fatalf("brief must not carry the trigger comment id\n---\n%s", s)
 		}
 	})
 

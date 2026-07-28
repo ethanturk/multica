@@ -22,6 +22,9 @@ import { createDesktopLocaleAdapter } from "./platform/i18n-adapter";
 import { captureEvent } from "@multica/core/analytics";
 import { RESOURCES } from "@multica/views/locales";
 import { DesktopClientUsageReporter } from "./platform/client-usage-reporter";
+import { DiagnosticRouteReporter } from "./platform/diagnostic-route-reporter";
+import { flushFreezeBreadcrumb } from "./freeze-flush";
+import { DiagnosticsControlReporter } from "./platform/diagnostics-control-reporter";
 
 // BCP-47 region tags for the <html lang> attribute, mirroring
 // apps/web/app/layout.tsx HTML_LANG. index.html ships a static lang="en";
@@ -378,20 +381,15 @@ export default function App() {
   // (the renderer is blocked or gone), so the main process persists it and we
   // emit it here on the next boot. The in-thread, recoverable freeze tier is
   // handled separately by the shared watchdog in CoreProvider.
-  useEffect(() => {
-    const last = window.desktopAPI.getLastFreeze();
-    if (!last) return;
-    const crashed = last.kind === "render-process-gone";
-    captureEvent(crashed ? "client_crash" : "client_unresponsive", {
-      // Spread context FIRST so our explicit fields below always win — a
-      // future context key (e.g. its own `source`) must not silently override.
-      ...last.context,
-      source: crashed ? "render-process-gone" : "main-unresponsive",
-      recovered: false,
-      breadcrumb_ts: last.ts,
-      crashed_version: last.version,
-    });
-  }, []);
+  useEffect(
+    () =>
+      flushFreezeBreadcrumb({
+        getLastFreeze: () => window.desktopAPI.getLastFreeze(),
+        ackFreeze: (ts) => window.desktopAPI.ackFreeze(ts),
+        capture: captureEvent,
+      }),
+    [],
+  );
 
   // Stable identity reference so downstream effects (WS reconnect) don't
   // tear down on every parent render.
@@ -453,6 +451,8 @@ export default function App() {
           localeAdapter={localeAdapter}
         >
           <DesktopAuthSessionBridge />
+          {windowContext.kind === "main" && <DiagnosticRouteReporter />}
+          <DiagnosticsControlReporter />
           {windowContext.kind === "main" && (
             <DesktopClientUsageReporter
               apiUrl={runtimeConfigResult.config.apiUrl}

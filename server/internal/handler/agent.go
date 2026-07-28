@@ -290,32 +290,38 @@ type AgentTaskResponse struct {
 	// as `## Workspace Context` so every agent running in this workspace —
 	// regardless of issue / chat / autopilot / quick-create — sees the same
 	// shared context. Empty when the workspace owner hasn't set it.
-	WorkspaceContext   string                  `json:"workspace_context,omitempty"`
-	ThreadName         string                  `json:"thread_name,omitempty"` // semantic title for provider-native session/thread history
-	Status             string                  `json:"status"`
-	Priority           int32                   `json:"priority"`
-	DispatchedAt       *string                 `json:"dispatched_at"`
-	StartedAt          *string                 `json:"started_at"`
-	CompletedAt        *string                 `json:"completed_at"`
-	Result             any                     `json:"result"`
-	Error              *string                 `json:"error"`
-	FailureReason      string                  `json:"failure_reason,omitempty"` // see TaskService.MaybeRetryFailedTask
-	Attempt            int32                   `json:"attempt"`
-	MaxAttempts        int32                   `json:"max_attempts"`
-	ParentTaskID       *string                 `json:"parent_task_id,omitempty"`
-	IsLeaderTask       bool                    `json:"is_leader_task,omitempty"`
-	Agent              *TaskAgentData          `json:"agent,omitempty"`
-	ConnectedApps      []ConnectedAppData      `json:"connected_apps,omitempty"` // daemon-claim only: per-run app capabilities mounted through runtime MCP overlays
-	Repos              []RepoData              `json:"repos,omitempty"`
-	DeterministicTools []DeterministicToolData `json:"deterministic_tools,omitempty"` // workspace-authored sandboxed tools for the agent tool plane
-	ProjectID          string                  `json:"project_id,omitempty"`          // issue's project, when present
-	ProjectTitle       string                  `json:"project_title,omitempty"`       // for surfacing in agent context
-	ProjectDescription string                  `json:"project_description,omitempty"` // durable project-level context injected into the brief
-	ProjectResources   []ProjectResourceData   `json:"project_resources,omitempty"`   // resources attached to the project
-	CreatedAt          string                  `json:"created_at"`
-	PriorSessionID     string                  `json:"prior_session_id,omitempty"` // session ID from a previous task on same issue
-	PriorWorkDir       string                  `json:"prior_work_dir,omitempty"`   // work_dir from a previous task on same issue
-	WorkDir            string                  `json:"work_dir,omitempty"`         // local working directory pinned for this task; populated once the daemon reports it
+	WorkspaceContext              string                `json:"workspace_context,omitempty"`
+	ThreadName                    string                `json:"thread_name,omitempty"` // semantic title for provider-native session/thread history
+	Status                        string                `json:"status"`
+	Priority                      int32                 `json:"priority"`
+	DispatchedAt                  *string               `json:"dispatched_at"`
+	StartedAt                     *string               `json:"started_at"`
+	CompletedAt                   *string               `json:"completed_at"`
+	Result                        any                   `json:"result"`
+	Error                         *string               `json:"error"`
+	FailureReason                 string                `json:"failure_reason,omitempty"` // see TaskService.MaybeRetryFailedTask
+	Attempt                       int32                 `json:"attempt"`
+	MaxAttempts                   int32                 `json:"max_attempts"`
+	ParentTaskID                  *string               `json:"parent_task_id,omitempty"`
+	IsLeaderTask                  bool                  `json:"is_leader_task,omitempty"`
+	Agent                         *TaskAgentData        `json:"agent,omitempty"`
+	ConnectedApps                 []ConnectedAppData    `json:"connected_apps,omitempty"` // daemon-claim only: per-run app capabilities mounted through runtime MCP overlays
+	Repos                         []RepoData            `json:"repos,omitempty"`
+	DeterministicTools            []DeterministicToolData `json:"deterministic_tools,omitempty"` // workspace-authored sandboxed tools for the agent tool plane
+	ProjectID                     string                `json:"project_id,omitempty"` // issue's project, when present
+	ProjectTitle                  string                `json:"project_title,omitempty"` // for surfacing in agent context
+	ProjectDescription            string                `json:"project_description,omitempty"` // durable project-level context injected into the brief
+	ProjectResources              []ProjectResourceData `json:"project_resources,omitempty"` // resources attached to the project
+	CreatedAt                     string                `json:"created_at"`
+	PriorSessionID                string                `json:"prior_session_id,omitempty"` // session ID from a previous task on same issue
+	PriorWorkDir                  string                `json:"prior_work_dir,omitempty"` // work_dir from a previous task on same issue
+	// PriorSessionResumeUnavailable is set when a more recent Codex session was
+	// withheld because its rollout was missing (MUL-5305); PriorSessionID (if
+	// any) is then an older fallback. The daemon surfaces the continuity gap in
+	// the brief even when that older session resumes cleanly. omitempty keeps it
+	// off the wire for the common (no-gap) case and for old daemons.
+	PriorSessionResumeUnavailable bool   `json:"prior_session_resume_unavailable,omitempty"`
+	WorkDir                       string `json:"work_dir,omitempty"` // local working directory pinned for this task; populated once the daemon reports it
 	// RelativeWorkDir is a privacy-safe display form of WorkDir intended for
 	// the UI. For standard tasks it strips the daemon's workspaces root so
 	// the user sees `<wsUUID>/<taskShort>/workdir`; for local_directory
@@ -1810,6 +1816,21 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 
 	updated, err := h.Queries.UpdateAgent(r.Context(), params)
 	if err != nil {
+		// Unique constraint on (workspace_id, name) — mirror CreateAgent and
+		// return a clear conflict instead of a 500 that leaks the raw
+		// constraint name. The name can still be held by an *archived* agent
+		// (the constraint does not exclude archived rows), so this is the only
+		// signal the caller gets that a rename collided rather than the server
+		// faulting.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "agent_workspace_name_unique" {
+			name := ""
+			if req.Name != nil {
+				name = *req.Name
+			}
+			writeError(w, http.StatusConflict, fmt.Sprintf("an agent named %q already exists in this workspace", name))
+			return
+		}
 		slog.Warn("update agent failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
 		writeError(w, http.StatusInternalServerError, "failed to update agent: "+err.Error())
 		return
@@ -2177,13 +2198,36 @@ func (h *Handler) ListWorkspaceWorkingAgents(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Narrows the projection to one issue's direct children, so an issue
+	// detail's sub-issue header reads this endpoint instead of deriving a
+	// count client-side. Left zero when absent, which the query treats as
+	// NULL and therefore as "no narrowing" — an older client that never
+	// sends it keeps the exact workspace-wide behaviour.
+	var parentIssueID pgtype.UUID
+	if raw := strings.TrimSpace(r.URL.Query().Get("parent")); raw != "" {
+		if workType != "issue" {
+			writeError(w, http.StatusBadRequest, "parent requires type=issue")
+			return
+		}
+		if scope != "" {
+			writeError(w, http.StatusBadRequest, "parent cannot be combined with scope")
+			return
+		}
+		var ok bool
+		parentIssueID, ok = parseUUIDOrBadRequest(w, raw, "parent")
+		if !ok {
+			return
+		}
+	}
+
 	rows, err := h.Queries.ListWorkspaceWorkingAgents(
 		r.Context(),
 		db.ListWorkspaceWorkingAgentsParams{
-			WorkspaceID:  parseUUID(workspaceID),
-			WorkType:     workType,
-			MineRelation: mineRelation,
-			MemberID:     memberID,
+			WorkspaceID:   parseUUID(workspaceID),
+			WorkType:      workType,
+			MineRelation:  mineRelation,
+			MemberID:      memberID,
+			ParentIssueID: parentIssueID,
 		},
 	)
 	if err != nil {

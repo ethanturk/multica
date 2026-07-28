@@ -142,7 +142,14 @@ func (b *qoderBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 	resCh := make(chan Result, 1)
 
 	var outputMu sync.Mutex
-	var output strings.Builder
+	// Result.Output is the final user-facing output selected by the backend.
+	// Qoder emits interim narration and the final answer as the same ACP
+	// AgentMessageChunk type, with tool calls as the only reliable boundary.
+	// Keep the complete text for provider-error detection, while deliverable
+	// holds only the text block after the latest tool call. This boundary is a
+	// heuristic until Qoder exposes an explicit final-answer marker.
+	var fullOutput, deliverableOutput strings.Builder
+	var lastTextBlock string
 	var streamingCurrentTurn atomic.Bool
 
 	promptDone := make(chan hermesPromptResult, 1)
@@ -162,11 +169,18 @@ func (b *qoderBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 			if msg.Type == MessageToolUse {
 				msg.Tool = kimiToolNameFromTitle(msg.Tool)
 			}
-			if msg.Type == MessageText {
-				outputMu.Lock()
-				output.WriteString(msg.Content)
-				outputMu.Unlock()
+			outputMu.Lock()
+			switch msg.Type {
+			case MessageText:
+				fullOutput.WriteString(msg.Content)
+				deliverableOutput.WriteString(msg.Content)
+			case MessageToolUse:
+				if block := deliverableOutput.String(); strings.TrimSpace(block) != "" {
+					lastTextBlock = block
+				}
+				deliverableOutput.Reset()
 			}
+			outputMu.Unlock()
 			msgStream.send(msg)
 		},
 		onPromptDone: func(result hermesPromptResult) {
@@ -406,7 +420,11 @@ func (b *qoderBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		streamingCurrentTurn.Store(false)
 
 		outputMu.Lock()
-		finalOutput := output.String()
+		finalOutput := deliverableOutput.String()
+		if strings.TrimSpace(finalOutput) == "" {
+			finalOutput = lastTextBlock
+		}
+		providerErrorOutput := fullOutput.String()
 		outputMu.Unlock()
 
 		// Promote completed→failed when stderr or the agent text stream show a
@@ -414,7 +432,7 @@ func (b *qoderBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		// Mirrors hermes/kimi/kiro; without it a run that exhausts retries still
 		// reports "completed" because session/prompt ends with stopReason=end_turn
 		// even though qodercli wrote a terminal error to stderr.
-		finalStatus, finalError = promoteACPResultOnProviderError(finalStatus, finalError, finalOutput, providerErr)
+		finalStatus, finalError = promoteACPResultOnProviderError(finalStatus, finalError, providerErrorOutput, providerErr)
 
 		c.usageMu.Lock()
 		u := c.usage

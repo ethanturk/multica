@@ -527,6 +527,9 @@ func TestListWorkspaceWorkingAgentsRejectsInvalidFilters(t *testing.T) {
 		"/api/working-agents?type=issue&scope=workspace",
 		"/api/working-agents?type=issue&relation=assigned",
 		"/api/working-agents?type=issue&scope=mine&relation=watching",
+		"/api/working-agents?type=issue&parent=not-a-uuid",
+		"/api/working-agents?type=chat&parent=00000000-0000-0000-0000-000000000000",
+		"/api/working-agents?type=issue&scope=mine&parent=00000000-0000-0000-0000-000000000000",
 	} {
 		t.Run(path, func(t *testing.T) {
 			w := httptest.NewRecorder()
@@ -539,6 +542,151 @@ func TestListWorkspaceWorkingAgentsRejectsInvalidFilters(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The sub-issue header on issue detail reads this endpoint with ?parent=, so
+// the projection must cover exactly one issue's direct children. The final
+// sub-test is the compatibility guard: dropping the parameter has to return
+// the unnarrowed workspace projection, which is what an older installed
+// client keeps sending.
+func TestListWorkspaceWorkingAgentsParentScope(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	ctx := context.Background()
+	childAgentID := createHandlerTestAgent(t, "working-agents-parent-child", []byte(`{}`))
+	siblingAgentID := createHandlerTestAgent(t, "working-agents-parent-sibling", []byte(`{}`))
+
+	insertedIssueIDs := make([]string, 0, 4)
+	insertIssue := func(title string, parentIssueID any) string {
+		t.Helper()
+		var issueID string
+		if err := testPool.QueryRow(ctx, `
+			INSERT INTO issue (
+				workspace_id, number, title, status, priority,
+				creator_type, creator_id, parent_issue_id
+			)
+			SELECT $1, COALESCE(MIN(number), 0) - 1, $2, 'todo', 'none',
+			       'member', $3, $4
+			FROM issue
+			WHERE workspace_id = $1
+			RETURNING id
+		`, testWorkspaceID, title, testUserID, parentIssueID).Scan(&issueID); err != nil {
+			t.Fatalf("insert issue %q: %v", title, err)
+		}
+		insertedIssueIDs = append(insertedIssueIDs, issueID)
+		return issueID
+	}
+	parentIssueID := insertIssue("working-agents-parent", nil)
+	firstChildID := insertIssue("working-agents-parent-first-child", parentIssueID)
+	secondChildID := insertIssue("working-agents-parent-second-child", parentIssueID)
+	// Same workspace, no parent — must never leak into the narrowed read even
+	// though the same agent is running on it.
+	unrelatedIssueID := insertIssue("working-agents-parent-unrelated", nil)
+	t.Cleanup(func() {
+		for _, issueID := range insertedIssueIDs {
+			testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, issueID)
+		}
+	})
+
+	insertedTaskIDs := make([]string, 0, 3)
+	for _, fixture := range []struct {
+		agentID string
+		issueID string
+	}{
+		{childAgentID, firstChildID},
+		{siblingAgentID, secondChildID},
+		{childAgentID, unrelatedIssueID},
+	} {
+		var taskID string
+		if err := testPool.QueryRow(ctx, `
+			INSERT INTO agent_task_queue (
+				agent_id, runtime_id, status, priority, issue_id, started_at
+			)
+			VALUES ($1, $2, 'running', 0, $3, now())
+			RETURNING id
+		`, fixture.agentID, testRuntimeID, fixture.issueID).Scan(&taskID); err != nil {
+			t.Fatalf("insert running task: %v", err)
+		}
+		insertedTaskIDs = append(insertedTaskIDs, taskID)
+	}
+	t.Cleanup(func() {
+		for _, taskID := range insertedTaskIDs {
+			testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE id = $1`, taskID)
+		}
+	})
+
+	read := func(t *testing.T, query string) map[string]WorkspaceWorkingAgent {
+		t.Helper()
+		w := httptest.NewRecorder()
+		testHandler.ListWorkspaceWorkingAgents(
+			w,
+			newRequest(http.MethodGet, "/api/working-agents"+query, nil),
+		)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+		var agents []WorkspaceWorkingAgent
+		if err := json.NewDecoder(w.Body).Decode(&agents); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		byID := make(map[string]WorkspaceWorkingAgent, len(agents))
+		for _, agent := range agents {
+			byID[agent.ID] = agent
+		}
+		return byID
+	}
+
+	t.Run("narrows to the parent's direct children", func(t *testing.T) {
+		byID := read(t, "?type=issue&parent="+parentIssueID)
+
+		child, ok := byID[childAgentID]
+		if !ok {
+			t.Fatalf("agent running on a child issue was not returned")
+		}
+		if child.RunningTaskCount != 1 {
+			t.Errorf("running_task_count = %d, want 1", child.RunningTaskCount)
+		}
+		if len(child.IssueIDs) != 1 || child.IssueIDs[0] != firstChildID {
+			t.Errorf("issue_ids = %v, want [%s]", child.IssueIDs, firstChildID)
+		}
+		if _, ok := byID[siblingAgentID]; !ok {
+			t.Errorf("agent running on the second child was not returned")
+		}
+	})
+
+	t.Run("an unrelated issue's parent yields nothing", func(t *testing.T) {
+		byID := read(t, "?type=issue&parent="+unrelatedIssueID)
+
+		if _, ok := byID[childAgentID]; ok {
+			t.Errorf("childless issue must not return the child agent")
+		}
+		if _, ok := byID[siblingAgentID]; ok {
+			t.Errorf("childless issue must not return the sibling agent")
+		}
+	})
+
+	t.Run("omitting parent keeps the workspace projection", func(t *testing.T) {
+		byID := read(t, "?type=issue")
+
+		child, ok := byID[childAgentID]
+		if !ok {
+			t.Fatalf("agent was not returned by the unnarrowed read")
+		}
+		if child.RunningTaskCount != 2 {
+			t.Errorf("running_task_count = %d, want 2", child.RunningTaskCount)
+		}
+		seen := make(map[string]struct{}, len(child.IssueIDs))
+		for _, issueID := range child.IssueIDs {
+			seen[issueID] = struct{}{}
+		}
+		for _, want := range []string{firstChildID, unrelatedIssueID} {
+			if _, ok := seen[want]; !ok {
+				t.Errorf("issue_ids = %v, missing %s", child.IssueIDs, want)
+			}
+		}
+	})
 }
 
 func TestCreateAgent_RejectsDuplicateName(t *testing.T) {
@@ -584,6 +732,41 @@ func TestCreateAgent_RejectsDuplicateName(t *testing.T) {
 	testHandler.CreateAgent(w2, newRequest(http.MethodPost, "/api/agents", body))
 	if w2.Code != http.StatusConflict {
 		t.Fatalf("second CreateAgent with duplicate name: expected 409, got %d: %s", w2.Code, w2.Body.String())
+	}
+}
+
+// TestUpdateAgent_RejectsRenameToArchivedName is the regression for #5914: the
+// (workspace_id, name) unique constraint does not exclude archived agents, so a
+// rename that collides with an *archived* agent's still-reserved name used to
+// fall through UpdateAgent as a raw 500 that leaked the constraint name — while
+// CreateAgent already mapped the same collision to a clean 409. This asserts the
+// two entry points now agree: a structured 409, and no raw constraint in the body.
+func TestUpdateAgent_RejectsRenameToArchivedName(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	// Agent A holds the name, then is archived — the name stays reserved.
+	const heldName = "rename-collision-archived-name"
+	idA := createHandlerTestAgent(t, heldName, nil)
+	archiveReq := withURLParam(newRequest(http.MethodPost, "/api/agents/"+idA+"/archive", nil), "id", idA)
+	archiveW := httptest.NewRecorder()
+	testHandler.ArchiveAgent(archiveW, archiveReq)
+	if archiveW.Code != http.StatusOK {
+		t.Fatalf("ArchiveAgent: expected 200, got %d: %s", archiveW.Code, archiveW.Body.String())
+	}
+
+	// Agent B renames itself into the archived agent's name.
+	idB := createHandlerTestAgent(t, "rename-collision-source", nil)
+	w := httptest.NewRecorder()
+	testHandler.UpdateAgent(w, withURLParam(
+		newRequest(http.MethodPatch, "/api/agents/"+idB, map[string]any{"name": heldName}), "id", idB))
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("rename to archived agent's name: expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "agent_workspace_name_unique") {
+		t.Fatalf("409 body leaked the raw constraint name: %s", w.Body.String())
 	}
 }
 

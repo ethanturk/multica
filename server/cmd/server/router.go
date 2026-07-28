@@ -268,6 +268,21 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// into one agent run instead of one per message (MUL-2968).
 	channelRouter.EnableRunBatching(engine.DefaultChatRunBatchWindow)
 	h.ChannelRouter = channelRouter
+	// Media intent-ledger reconciler: settles uploaded-but-unbound objects.
+	// Built ONLY when a storage backend exists — store is nil when S3 is not
+	// configured and the local upload dir failed to initialize, and a
+	// reconciler with nil Storage would panic the worker goroutine on the
+	// first unreferenced row (ledger rows can pre-exist from a boot where
+	// storage WAS configured). Without storage the resolver skips every
+	// upload, so no new rows appear and the ledger simply waits for a boot
+	// with working storage. Started from main.go as its own worker.
+	if store != nil {
+		h.ChannelMediaReconciler = &service.ChannelMediaReconciler{
+			Queries: queries,
+			Storage: store,
+			Logger:  slog.Default(),
+		}
+	}
 	h.ChannelSupervisor = engine.NewSupervisor(
 		lark.NewChannelInstallationStore(queries),
 		channelRegistry,
@@ -392,8 +407,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					Credentials: installSvc,
 					Logger:      slog.Default(),
 				})
+				mediaResolver := lark.NewFeishuMediaResolver(larkClient, installSvc, store, engine.NewDBMediaIntentLedger(queries), slog.Default())
 				channelRouter.Register(channel.TypeFeishu, lark.NewFeishuResolverSet(
-					cs, feishuSession, auditLogger, resolverReplier, typingIndicator,
+					cs, feishuSession, auditLogger, resolverReplier, typingIndicator, mediaResolver,
 				))
 				slog.Info("lark inbound pipeline wired", "connector", connectorLabel)
 
@@ -927,6 +943,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				r.Group(func(r chi.Router) {
 					r.Use(middleware.RequireWorkspaceRoleFromURL(queries, "id", "owner", "admin"))
 					r.Get("/github/connect", h.GitHubConnect)
+					r.Get("/github/installations/{installationId}/repositories", h.ListGitHubInstallationRepositories)
 					r.Delete("/github/installations/{installationId}", h.DeleteGitHubInstallation)
 					// VCS connect / disconnect / webhook regeneration (admin-only).
 					r.Post("/vcs/connections", h.ConnectVCS)
@@ -1315,6 +1332,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				r.Get("/usage/by-agent", h.GetDashboardUsageByAgent)
 				r.Get("/agent-runtime", h.GetDashboardAgentRunTime)
 				r.Get("/runtime/daily", h.GetDashboardRunTimeDaily)
+				r.Get("/failures/daily", h.GetDashboardFailuresDaily)
+				r.Get("/failures/by-agent", h.GetDashboardFailuresByAgent)
 			})
 
 			// Runtimes

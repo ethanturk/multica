@@ -16,12 +16,17 @@ export const workspaceWorkingAgentsKeys = {
     wsId: string,
     type?: WorkspaceWorkingAgentType,
     mineRelation?: WorkspaceWorkingAgentMineRelation,
+    parentIssueId?: string,
   ) =>
     [
       ...workspaceWorkingAgentsKeys.all(wsId),
       "list",
       type ?? "all",
-      mineRelation ? `mine:${mineRelation}` : "workspace",
+      mineRelation
+        ? `mine:${mineRelation}`
+        : parentIssueId
+          ? `parent:${parentIssueId}`
+          : "workspace",
     ] as const,
 };
 
@@ -54,17 +59,25 @@ export function agentTaskSnapshotOptions(wsId: string) {
   });
 }
 
-// Working-agent summaries, optionally narrowed to a My Issues relation. Task
-// lifecycle WebSocket events invalidate every relation immediately; the short
-// stale time is the reconnect / missed-event safety net.
+// Working-agent summaries, optionally narrowed to a My Issues relation or to
+// one issue's direct children. Task lifecycle WebSocket events invalidate
+// every narrowing immediately; the short stale time is the reconnect /
+// missed-event safety net.
 export function workspaceWorkingAgentsOptions(
   wsId: string,
   type?: WorkspaceWorkingAgentType,
   mineRelation?: WorkspaceWorkingAgentMineRelation,
+  parentIssueId?: string,
 ) {
   return queryOptions({
-    queryKey: workspaceWorkingAgentsKeys.list(wsId, type, mineRelation),
-    queryFn: () => api.getWorkspaceWorkingAgents(type, mineRelation),
+    queryKey: workspaceWorkingAgentsKeys.list(
+      wsId,
+      type,
+      mineRelation,
+      parentIssueId,
+    ),
+    queryFn: () =>
+      api.getWorkspaceWorkingAgents(type, mineRelation, parentIssueId),
     staleTime: 30 * 1000,
     gcTime: 5 * 60 * 1000,
     refetchOnWindowFocus: true,
