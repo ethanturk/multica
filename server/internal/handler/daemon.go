@@ -1590,6 +1590,17 @@ type claimBuildFailure struct {
 func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQueue, runtime db.AgentRuntime, runtimeID, runtimeWorkspaceID string) (resp AgentTaskResponse, deliveredCommentIDs []pgtype.UUID, agentSkillCount, builtinSkillCount int, failure *claimBuildFailure) {
 	// Build response with fresh agent data (name + skills + custom_env + custom_args).
 	resp = taskToResponse(*task, runtimeWorkspaceID)
+	if tools, err := h.Queries.ListEnabledDeterministicToolsByWorkspace(r.Context(), runtime.WorkspaceID); err != nil {
+		slog.Warn("task claim: failed to load deterministic tools", "workspace_id", runtimeWorkspaceID, "error", err)
+	} else {
+		for _, tool := range tools {
+			resp.DeterministicTools = append(resp.DeterministicTools, DeterministicToolData{
+				Name:        tool.Name,
+				Description: tool.Description,
+				Source:      tool.Source,
+			})
+		}
+	}
 	supportsCoalescedComments := requestHasClientCapability(r, protocol.DaemonCapabilityCoalescedCommentsV1)
 	// Empty-but-non-nil so pgx persists '{}' rather than NULL for tasks without
 	// comment input. Comment tasks replace this with the ids actually embedded
