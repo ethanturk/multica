@@ -75,6 +75,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       },
     },
     plugins: [
+      "./plugins/with-android-release-signing.ts",
       "expo-router",
       "expo-secure-store",
       "@react-native-community/datetimepicker",
