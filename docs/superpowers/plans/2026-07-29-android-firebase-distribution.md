@@ -214,12 +214,14 @@ git commit -m "feat(mobile): generate Android release signing"
 
 - Create: `apps/mobile/lib/android-distribution-workflow.test.ts`
 - Create: `.github/workflows/mobile-android-distribute.yml`
+- Modify: `apps/mobile/package.json`
+- Modify: `pnpm-lock.yaml`
 
 **Step 1: Write the failing workflow contract test**
 
-Create `apps/mobile/lib/android-distribution-workflow.test.ts`. Read `.github/workflows/mobile-android-distribute.yml` and assert:
+Add `yaml: "catalog:"` to the mobile package's development dependencies. Create `apps/mobile/lib/android-distribution-workflow.test.ts`, parse `.github/workflows/mobile-android-distribute.yml` with `yaml`, and assert the resulting workflow structure:
 
-- `workflow_dispatch` exists and no `push` or `pull_request` trigger exists.
+- `on` contains only `workflow_dispatch`.
 - Job environment is `android-staging`.
 - Permissions include `contents: read` and `id-token: write`.
 - Concurrency does not cancel an active run.
@@ -232,6 +234,8 @@ Create `apps/mobile/lib/android-distribution-workflow.test.ts`. Read `.github/wo
 - `app-release.apk` is uploaded with seven-day retention before Google authentication.
 - `google-github-actions/auth@v3` is used.
 - `firebase-tools@15.24.0 appdistribution:distribute` is used with app ID, tester groups, and release notes.
+
+Assert step ordering from the parsed `steps` array so configuration validation precedes install, artifact upload precedes Google authentication, and authentication precedes distribution. Shell command strings are workflow boundary inputs; assert their required arguments without matching YAML formatting.
 
 **Step 2: Run the focused test and confirm RED**
 
@@ -319,7 +323,9 @@ Expected: valid formatting and no whitespace errors.
 
 ```bash
 git add .github/workflows/mobile-android-distribute.yml \
-  apps/mobile/lib/android-distribution-workflow.test.ts
+  apps/mobile/lib/android-distribution-workflow.test.ts \
+  apps/mobile/package.json \
+  pnpm-lock.yaml
 git commit -m "ci(mobile): distribute Android staging builds"
 ```
 
@@ -329,31 +335,11 @@ git commit -m "ci(mobile): distribute Android staging builds"
 
 **Files:**
 
-- Modify: `apps/mobile/lib/android-scaffold.test.ts`
 - Modify: `apps/mobile/README.md`
 - Modify: `apps/mobile/docs/android-release-readiness.md`
 - Modify: `apps/mobile/CLAUDE.md`
 
-**Step 1: Write the failing documentation contract**
-
-Extend `apps/mobile/lib/android-scaffold.test.ts` to assert:
-
-- The README names `.github/workflows/mobile-android-distribute.yml`.
-- The README identifies `ai.multica.mobile.staging`, `android-staging`, Firebase App Distribution, and the required external configuration categories.
-- The readiness document marks signed staging APK generation and Firebase distribution as implemented, while keeping Play production distribution deferred.
-- `apps/mobile/CLAUDE.md` no longer claims a nonexistent `mobile-release.yml` or EAS pipeline.
-
-**Step 2: Run the focused test and confirm RED**
-
-Run:
-
-```bash
-pnpm -C apps/mobile test -- lib/android-scaffold.test.ts
-```
-
-Expected: documentation assertions fail.
-
-**Step 3: Update the operator documentation**
+**Step 1: Update the operator documentation**
 
 In `apps/mobile/README.md`:
 
@@ -375,23 +361,31 @@ In `apps/mobile/CLAUDE.md`:
 - Replace stale `mobile-release.yml` and EAS claims with the actual manual Firebase workflow.
 - Do not describe cloud configuration as already provisioned.
 
-**Step 4: Run the focused test and confirm GREEN**
+Human-facing prose is reviewed directly rather than protected by brittle source-text tests.
+
+**Step 2: Review documentation for contradictions**
+
+Read all three changed documents together and confirm:
+
+- Staging distribution is described as implemented in repository code.
+- External Firebase, Google Cloud, GitHub environment, and keystore setup is described as required.
+- Production Play distribution remains deferred.
+- No EAS or nonexistent workflow is described as active.
 
 Run:
 
 ```bash
-pnpm -C apps/mobile test -- lib/android-scaffold.test.ts
+git diff --check
 ```
 
-Expected: documentation contract passes.
+Expected: no whitespace errors.
 
-**Step 5: Commit**
+**Step 3: Commit**
 
 ```bash
 git add apps/mobile/README.md \
   apps/mobile/docs/android-release-readiness.md \
-  apps/mobile/CLAUDE.md \
-  apps/mobile/lib/android-scaffold.test.ts
+  apps/mobile/CLAUDE.md
 git commit -m "docs(mobile): document Firebase Android distribution"
 ```
 
