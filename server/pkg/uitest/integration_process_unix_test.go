@@ -10,30 +10,17 @@ import (
 	"strings"
 )
 
-func integrationChromiumDescendantPIDs(rootPID int) ([]int, error) {
-	output, err := exec.Command("ps", "-axo", "pid=,ppid=,command=").Output()
+type integrationUnixProcess struct {
+	parent   int
+	identity integrationProcessIdentity
+}
+
+func integrationChromiumDescendantProcesses(
+	rootPID int,
+) ([]integrationProcessIdentity, error) {
+	processes, err := integrationUnixProcessSnapshot()
 	if err != nil {
-		return nil, fmt.Errorf("list process tree: %w", err)
-	}
-	type process struct {
-		parent  int
-		command string
-	}
-	processes := make(map[int]process)
-	for _, line := range strings.Split(string(output), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 3 {
-			continue
-		}
-		pid, pidErr := strconv.Atoi(fields[0])
-		parent, parentErr := strconv.Atoi(fields[1])
-		if pidErr != nil || parentErr != nil {
-			continue
-		}
-		processes[pid] = process{
-			parent:  parent,
-			command: strings.Join(fields[2:], " "),
-		}
+		return nil, err
 	}
 	descendants := map[int]bool{rootPID: true}
 	for changed := true; changed; {
@@ -45,17 +32,63 @@ func integrationChromiumDescendantPIDs(rootPID int) ([]int, error) {
 			}
 		}
 	}
-	var chromium []int
+	var chromium []integrationProcessIdentity
 	for pid := range descendants {
-		if pid == rootPID || !platformProcessAlive(pid) {
+		if pid == rootPID {
 			continue
 		}
-		command := strings.ToLower(processes[pid].command)
-		if strings.Contains(command, "chromium") ||
-			strings.Contains(command, "chrome") {
-			chromium = append(chromium, pid)
+		identity := processes[pid].identity
+		executable := strings.ToLower(identity.Executable)
+		if strings.Contains(executable, "chromium") ||
+			strings.Contains(executable, "chrome") {
+			chromium = append(chromium, identity)
 		}
 	}
-	sort.Ints(chromium)
+	sort.Slice(chromium, func(i, j int) bool {
+		return chromium[i].PID < chromium[j].PID
+	})
 	return chromium, nil
+}
+
+func integrationProcessIdentityByPID(
+	pid int,
+) (integrationProcessIdentity, bool, error) {
+	processes, err := integrationUnixProcessSnapshot()
+	if err != nil {
+		return integrationProcessIdentity{}, false, err
+	}
+	process, found := processes[pid]
+	return process.identity, found, nil
+}
+
+func integrationUnixProcessSnapshot() (map[int]integrationUnixProcess, error) {
+	output, err := exec.Command(
+		"ps",
+		"-axo",
+		"pid=,ppid=,lstart=,stat=,comm=",
+	).Output()
+	if err != nil {
+		return nil, fmt.Errorf("list process tree: %w", err)
+	}
+	processes := make(map[int]integrationUnixProcess)
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 9 || strings.Contains(fields[7], "Z") {
+			continue
+		}
+		pid, pidErr := strconv.Atoi(fields[0])
+		parent, parentErr := strconv.Atoi(fields[1])
+		if pidErr != nil || parentErr != nil {
+			continue
+		}
+		processes[pid] = integrationUnixProcess{
+			parent: parent,
+			identity: integrationProcessIdentity{
+				PID:        pid,
+				StartedAt:  strings.Join(fields[2:7], " "),
+				Executable: strings.Join(fields[8:], " "),
+			},
+		}
+	}
+	return processes, nil
 }

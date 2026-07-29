@@ -99,7 +99,7 @@ func TestUITestIntegrationRealBrowserPolicy(t *testing.T) {
 		_ = session.Close()
 		t.Fatalf("start pinned Playwright MCP (also validates config schema): %v", err)
 	}
-	var chromiumPIDs []int
+	var chromiumProcesses []integrationProcessIdentity
 	defer func() {
 		session.registry.mu.Lock()
 		childPIDs := make([]int, 0, len(session.registry.processes))
@@ -128,13 +128,28 @@ func TestUITestIntegrationRealBrowserPolicy(t *testing.T) {
 				t.Errorf("managed child PID %d remained alive after close", pid)
 			}
 		}
-		for _, pid := range chromiumPIDs {
+		for _, process := range chromiumProcesses {
 			deadline := time.Now().Add(2 * time.Second)
-			for platformProcessAlive(pid) && time.Now().Before(deadline) {
+			alive, identityErr := integrationProcessStillAlive(
+				process,
+				integrationProcessIdentityByPID,
+			)
+			for identityErr == nil && alive && time.Now().Before(deadline) {
 				time.Sleep(10 * time.Millisecond)
+				alive, identityErr = integrationProcessStillAlive(
+					process,
+					integrationProcessIdentityByPID,
+				)
 			}
-			if platformProcessAlive(pid) {
-				t.Errorf("Chromium descendant PID %d remained alive after close", pid)
+			if identityErr != nil {
+				t.Errorf("check Chromium descendant PID %d after close: %v", process.PID, identityErr)
+			} else if alive {
+				t.Errorf(
+					"Chromium descendant PID %d (%s, started %s) remained alive after close",
+					process.PID,
+					process.Executable,
+					process.StartedAt,
+				)
 			}
 		}
 	}()
@@ -157,11 +172,11 @@ func TestUITestIntegrationRealBrowserPolicy(t *testing.T) {
 		t.Fatalf("screenshot capture evidence: %v", err)
 	}
 	browserOwnerPID := integrationBrowserOwnerPID(t, session)
-	chromiumPIDs, err = integrationChromiumDescendantPIDs(browserOwnerPID)
+	chromiumProcesses, err = integrationChromiumDescendantProcesses(browserOwnerPID)
 	if err != nil {
 		t.Fatalf("capture live Chromium descendants: %v", err)
 	}
-	if len(chromiumPIDs) == 0 {
+	if len(chromiumProcesses) == 0 {
 		t.Fatalf("browser owner PID %d had no live Chromium descendants", browserOwnerPID)
 	}
 	beforePopup := integrationToolCall(proxy, 4, "browser_snapshot", map[string]any{})
@@ -321,6 +336,86 @@ func integrationBrowserOwnerPID(t *testing.T, session *Session) int {
 	}
 	t.Fatal("managed browser owner missing from live process registry")
 	return 0
+}
+
+type integrationProcessIdentity struct {
+	PID        int
+	StartedAt  string
+	Executable string
+}
+
+type integrationProcessLookup func(int) (integrationProcessIdentity, bool, error)
+
+func integrationProcessStillAlive(
+	expected integrationProcessIdentity,
+	lookup integrationProcessLookup,
+) (bool, error) {
+	current, found, err := lookup(expected.PID)
+	if err != nil {
+		return false, err
+	}
+	return found && current == expected, nil
+}
+
+func TestUITestIntegrationProcessIdentityDoesNotTreatReusedPIDAsLeak(t *testing.T) {
+	expected := integrationProcessIdentity{
+		PID:        42,
+		StartedAt:  "100",
+		Executable: "chromium",
+	}
+	tests := []struct {
+		name      string
+		current   integrationProcessIdentity
+		found     bool
+		wantAlive bool
+	}{
+		{
+			name:      "same process remains alive",
+			current:   expected,
+			found:     true,
+			wantAlive: true,
+		},
+		{
+			name: "PID reused at a later start time",
+			current: integrationProcessIdentity{
+				PID:        expected.PID,
+				StartedAt:  "200",
+				Executable: expected.Executable,
+			},
+			found: true,
+		},
+		{
+			name: "PID reused by another executable",
+			current: integrationProcessIdentity{
+				PID:        expected.PID,
+				StartedAt:  expected.StartedAt,
+				Executable: "unrelated",
+			},
+			found: true,
+		},
+		{
+			name: "process exited",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			alive, err := integrationProcessStillAlive(
+				expected,
+				func(pid int) (integrationProcessIdentity, bool, error) {
+					if pid != expected.PID {
+						t.Fatalf("lookup PID = %d, want %d", pid, expected.PID)
+					}
+					return test.current, test.found, nil
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if alive != test.wantAlive {
+				t.Fatalf("same identity alive = %v, want %v", alive, test.wantAlive)
+			}
+		})
+	}
 }
 
 func TestUITestIntegrationRejectsMCPToolErrorsAndEmptyContent(t *testing.T) {
