@@ -410,6 +410,235 @@ func (c *startFailureController) close() error {
 	return c.closeErr
 }
 
+type blockingAbortController struct {
+	*startFailureController
+	abortEntered chan struct{}
+	releaseAbort chan struct{}
+	blockOnce    sync.Once
+}
+
+func (c *blockingAbortController) abort(cmd *exec.Cmd, grace time.Duration) error {
+	c.blockOnce.Do(func() {
+		close(c.abortEntered)
+		<-c.releaseAbort
+	})
+	return c.startFailureController.abort(cmd, grace)
+}
+
+func TestCleanupRejectsProcessStartNotAdmittedBeforeClose(t *testing.T) {
+	workDir := t.TempDir()
+	registry, err := newProcessRegistry(workDir, "cleanup-before-admission", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseAbort := make(chan struct{})
+	controller := &blockingAbortController{
+		startFailureController: &startFailureController{},
+		abortEntered:           make(chan struct{}),
+		releaseAbort:           releaseAbort,
+	}
+	done := make(chan struct{})
+	close(done)
+	process := &managedProcess{
+		controller: controller,
+		registry:   registry,
+		done:       done,
+		record: processRecord{
+			TaskID: registry.taskID, ProxyPID: os.Getpid(), ChildPID: 424243,
+			Kind: "app", StartedAt: time.Now().UTC(),
+		},
+	}
+	if err := registry.add(process); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanupResult := make(chan error, 1)
+	go func() { cleanupResult <- registry.cleanup() }()
+	<-controller.abortEntered
+
+	pidPath := filepath.Join(workDir, "late-start.pid")
+	logPath := filepath.Join(workDir, "late-start", "app.log")
+	_, startErr := startManagedProcess(
+		registry, "app", helperCommand("descendant", pidPath),
+		workDir, os.Environ(), logPath,
+	)
+	close(releaseAbort)
+	cleanupErr := <-cleanupResult
+
+	if startErr == nil || !strings.Contains(startErr.Error(), "process registry is closed") {
+		t.Fatalf("startManagedProcess() error = %v, want closed admission", startErr)
+	}
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("startManagedProcess() created resources after cleanup closed admission: %v", err)
+	}
+	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+		t.Fatalf("startManagedProcess() spawned after cleanup closed admission: %v", err)
+	}
+	if cleanupErr != nil {
+		t.Fatalf("cleanup() error = %v", cleanupErr)
+	}
+}
+
+func TestCleanupWaitsForAdmittedStartBeforeSpawn(t *testing.T) {
+	workDir := t.TempDir()
+	registry, err := newProcessRegistry(workDir, "cleanup-between-admission-and-spawn", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finishStart, err := registry.admitStart()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupResult := make(chan error, 1)
+	go func() { cleanupResult <- registry.cleanup() }()
+	waitForRegistryAdmissionClosed(t, registry)
+
+	cmd := newWaitingHelperCommand(t)
+	process, startErr := startManagedCommandAdmitted(
+		registry, "app", cmd, &startFailureController{}, cmd.Start,
+	)
+	finishStart()
+	cleanupErr := <-cleanupResult
+
+	if startErr != nil {
+		t.Fatalf("admitted start error = %v", startErr)
+	}
+	if process == nil || cmd.Process == nil {
+		t.Fatal("admitted start did not spawn after cleanup closed admission")
+	}
+	if cleanupErr != nil {
+		t.Fatalf("cleanup() error = %v", cleanupErr)
+	}
+	if platformProcessAlive(cmd.Process.Pid) {
+		_ = cmd.Process.Kill()
+		t.Fatal("cleanup did not stop admitted process")
+	}
+	if _, ok := liveProcessRegistries.Load(registry.stateDir); ok {
+		t.Fatal("successful cleanup retained live registry")
+	}
+}
+
+func TestCleanupRetainsAdmittedOwnerAddedAfterCloseWhenAbortFails(t *testing.T) {
+	workDir := t.TempDir()
+	registry, err := newProcessRegistry(workDir, "cleanup-between-spawn-and-add", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finishStart, err := registry.admitStart()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := newWaitingHelperCommand(t)
+	attachErr := errors.New("injected attach failure")
+	abortErr := errors.New("injected abort failure")
+	controller := &startFailureController{attachErr: attachErr, abortErr: abortErr}
+	spawned := make(chan struct{})
+	allowAdd := make(chan struct{})
+	startResult := make(chan error, 1)
+	go func() {
+		defer finishStart()
+		_, err := startManagedCommandAdmitted(
+			registry, "app", cmd, controller,
+			func() error {
+				if err := cmd.Start(); err != nil {
+					return err
+				}
+				close(spawned)
+				<-allowAdd
+				return nil
+			},
+		)
+		startResult <- err
+	}()
+	<-spawned
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		liveProcessRegistries.Delete(registry.stateDir)
+	})
+
+	cleanupResult := make(chan error, 1)
+	go func() { cleanupResult <- registry.cleanup() }()
+	waitForRegistryAdmissionClosed(t, registry)
+	close(allowAdd)
+	startErr := <-startResult
+	cleanupErr := <-cleanupResult
+
+	if !errors.Is(startErr, attachErr) || !errors.Is(startErr, abortErr) {
+		t.Fatalf("admitted start error = %v, want attach and abort failures", startErr)
+	}
+	if !errors.Is(cleanupErr, abortErr) {
+		t.Fatalf("cleanup() error = %v, want abort failure", cleanupErr)
+	}
+	assertRetryableOwner(t, registry)
+	assertPersistedOwner(t, registry, 1)
+
+	controller.mu.Lock()
+	controller.abortErr = nil
+	controller.mu.Unlock()
+	if err := registry.cleanup(); err != nil {
+		t.Fatalf("retry cleanup error = %v", err)
+	}
+}
+
+func TestConcurrentCleanupCallersShareFailureAndLaterRetrySucceeds(t *testing.T) {
+	workDir := t.TempDir()
+	registry, err := newProcessRegistry(workDir, "concurrent-cleanup", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	abortErr := errors.New("injected abort failure")
+	controller := &blockingAbortController{
+		startFailureController: &startFailureController{abortErr: abortErr},
+		abortEntered:           make(chan struct{}),
+		releaseAbort:           make(chan struct{}),
+	}
+	done := make(chan struct{})
+	close(done)
+	process := &managedProcess{
+		controller: controller,
+		registry:   registry,
+		done:       done,
+		record: processRecord{
+			TaskID: registry.taskID, ProxyPID: os.Getpid(), ChildPID: 424244,
+			Kind: "app", StartedAt: time.Now().UTC(),
+		},
+	}
+	if err := registry.add(process); err != nil {
+		t.Fatal(err)
+	}
+
+	firstResult := make(chan error, 1)
+	secondResult := make(chan error, 1)
+	go func() { firstResult <- CleanupTask(workDir, registry.taskID, nil) }()
+	<-controller.abortEntered
+	go func() { secondResult <- CleanupTask(workDir, registry.taskID, nil) }()
+	waitForCleanupWaiters(t, registry, 1)
+	close(controller.releaseAbort)
+
+	firstErr := <-firstResult
+	secondErr := <-secondResult
+	if !errors.Is(firstErr, abortErr) || !errors.Is(secondErr, abortErr) {
+		t.Fatalf("cleanup errors = (%v, %v), want shared abort failure", firstErr, secondErr)
+	}
+	assertRetryableOwner(t, registry)
+	if finishStart, err := registry.admitStart(); err == nil {
+		finishStart()
+		t.Fatal("failed cleanup reopened process-start admission")
+	}
+
+	controller.mu.Lock()
+	controller.abortErr = nil
+	controller.mu.Unlock()
+	if err := CleanupTask(workDir, registry.taskID, nil); err != nil {
+		t.Fatalf("retry cleanup error = %v", err)
+	}
+	if _, ok := liveProcessRegistries.Load(registry.stateDir); ok {
+		t.Fatal("successful retry retained live registry")
+	}
+}
+
 func TestManagedCommandRetainsOwnerWhenFailureCleanupFails(t *testing.T) {
 	for _, test := range []struct {
 		name        string
@@ -619,6 +848,43 @@ func assertPersistedOwner(t *testing.T, registry *processRegistry, want int) {
 	}
 	if len(records) != want {
 		t.Fatalf("persisted process owners = %d, want %d", len(records), want)
+	}
+}
+
+func waitForRegistryAdmissionClosed(t *testing.T, registry *processRegistry) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		registry.mu.Lock()
+		closed := registry.admissionClosed
+		registry.mu.Unlock()
+		if closed {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("cleanup did not close process-start admission")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func waitForCleanupWaiters(t *testing.T, registry *processRegistry, want int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		registry.mu.Lock()
+		waiters := 0
+		if registry.cleanupAttempt != nil {
+			waiters = registry.cleanupAttempt.waiters
+		}
+		registry.mu.Unlock()
+		if waiters >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("cleanup waiters = %d, want at least %d", waiters, want)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

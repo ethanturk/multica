@@ -48,15 +48,23 @@ type managedProcess struct {
 	waitErr           error
 }
 
+type processCleanupAttempt struct {
+	done    chan struct{}
+	err     error
+	waiters int
+}
+
 type processRegistry struct {
-	mu           sync.Mutex
-	taskID       string
-	stateDir     string
-	statePath    string
-	logger       *slog.Logger
-	processes    map[int]*managedProcess
-	nextOwnerKey int
-	closed       bool
+	mu              sync.Mutex
+	taskID          string
+	stateDir        string
+	statePath       string
+	logger          *slog.Logger
+	processes       map[int]*managedProcess
+	nextOwnerKey    int
+	admissionClosed bool
+	starting        sync.WaitGroup
+	cleanupAttempt  *processCleanupAttempt
 }
 
 var liveProcessRegistries sync.Map
@@ -75,6 +83,12 @@ func newProcessRegistry(workDir, taskID string, logger *slog.Logger) (*processRe
 }
 
 func startManagedProcess(registry *processRegistry, kind, command, workDir string, env []string, logPath string) (*managedProcess, error) {
+	finishStart, err := registry.admitStart()
+	if err != nil {
+		return nil, fmt.Errorf("admit %s process start: %w", kind, err)
+	}
+	defer finishStart()
+
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
 		return nil, fmt.Errorf("create %s log directory: %w", kind, err)
 	}
@@ -98,7 +112,7 @@ func startManagedProcess(registry *processRegistry, kind, command, workDir strin
 		_ = logFile.Close()
 		return nil, fmt.Errorf("create %s process owner: %w", kind, err)
 	}
-	process, startErr := startManagedCommand(registry, kind, cmd, controller)
+	process, startErr := startManagedCommandAdmitted(registry, kind, cmd, controller, cmd.Start)
 	_ = logFile.Close()
 	if startErr != nil {
 		return nil, fmt.Errorf("start and own %s process tree: %w", kind, startErr)
@@ -112,7 +126,22 @@ func startManagedCommand(
 	cmd *exec.Cmd,
 	controller processStartController,
 ) (*managedProcess, error) {
-	if err := cmd.Start(); err != nil {
+	finishStart, err := registry.admitStart()
+	if err != nil {
+		return nil, err
+	}
+	defer finishStart()
+	return startManagedCommandAdmitted(registry, kind, cmd, controller, cmd.Start)
+}
+
+func startManagedCommandAdmitted(
+	registry *processRegistry,
+	kind string,
+	cmd *exec.Cmd,
+	controller processStartController,
+	start func() error,
+) (*managedProcess, error) {
+	if err := start(); err != nil {
 		done := make(chan struct{})
 		close(done)
 		process := &managedProcess{
@@ -231,9 +260,6 @@ func (p *managedProcess) currentOwnershipError() error {
 func (r *processRegistry) add(process *managedProcess) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.closed {
-		return errors.New("process registry is closed")
-	}
 	key := process.record.ChildPID
 	if key <= 0 || r.processes[key] != nil {
 		r.nextOwnerKey--
@@ -251,7 +277,7 @@ func (r *processRegistry) remove(pid int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.processes, pid)
-	if r.closed {
+	if r.admissionClosed {
 		return
 	}
 	if err := r.writeLocked(); err != nil && r.logger != nil {
@@ -273,13 +299,33 @@ func (r *processRegistry) writeLocked() error {
 	return writeAtomic0600(r.statePath, data)
 }
 
+func (r *processRegistry) admitStart() (func(), error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.admissionClosed {
+		return nil, errors.New("process registry is closed")
+	}
+	r.starting.Add(1)
+	var once sync.Once
+	return func() { once.Do(r.starting.Done) }, nil
+}
+
 func (r *processRegistry) cleanup() error {
 	r.mu.Lock()
-	if r.closed {
+	if attempt := r.cleanupAttempt; attempt != nil {
+		attempt.waiters++
 		r.mu.Unlock()
-		return nil
+		<-attempt.done
+		return attempt.err
 	}
-	r.closed = true
+	attempt := &processCleanupAttempt{done: make(chan struct{})}
+	r.cleanupAttempt = attempt
+	r.admissionClosed = true
+	r.mu.Unlock()
+
+	r.starting.Wait()
+
+	r.mu.Lock()
 	processes := make([]*managedProcess, 0, len(r.processes))
 	for _, process := range r.processes {
 		processes = append(processes, process)
@@ -305,20 +351,33 @@ func (r *processRegistry) cleanup() error {
 		cleanupErr = errors.Join(cleanupErr, err)
 	}
 	if cleanupErr == nil {
+		r.mu.Lock()
+		remaining := len(r.processes)
+		r.mu.Unlock()
+		if remaining != 0 {
+			cleanupErr = fmt.Errorf("process cleanup retained %d owners", remaining)
+		}
+	}
+	if cleanupErr == nil {
 		if err := os.RemoveAll(r.stateDir); err != nil {
 			cleanupErr = fmt.Errorf("remove process metadata: %w", err)
 		}
 	}
 	if cleanupErr != nil {
 		r.mu.Lock()
-		r.closed = false
 		if err := r.writeLocked(); err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("preserve process metadata: %w", err))
 		}
 		r.mu.Unlock()
-		return cleanupErr
+	} else {
+		liveProcessRegistries.Delete(r.stateDir)
 	}
-	liveProcessRegistries.Delete(r.stateDir)
+
+	r.mu.Lock()
+	attempt.err = cleanupErr
+	close(attempt.done)
+	r.cleanupAttempt = nil
+	r.mu.Unlock()
 	return cleanupErr
 }
 
