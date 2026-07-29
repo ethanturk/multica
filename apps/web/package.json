@@ -7,7 +7,7 @@
     "dev": "sh -c 'next dev --webpack --port \"${FRONTEND_PORT:-3000}\"'",
     "build": "fumadocs-mdx && next build --webpack",
     "start": "next start",
-    "typecheck": "fumadocs-mdx && tsc --noEmit",
+    "typecheck": "fumadocs-mdx && next typegen && tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
     "postinstall": "fumadocs-mdx"

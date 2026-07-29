@@ -113,7 +113,7 @@ type Config struct {
 	CLIVersion                     string                // multica CLI version (e.g. "0.1.13")
 	LaunchedBy                     string                // "desktop" when spawned by the Electron app, empty for standalone
 	Profile                        string                // profile name (empty = default)
-	Agents                         map[string]AgentEntry // keyed by provider: claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, cursor, kimi, kiro, antigravity, dirge, qoder, traecli, grok
+	Agents                         map[string]AgentEntry // keyed by provider: claude, codebuddy, codex, copilot, opencode, deveco, openclaw, hermes, pi, cursor, kimi, kiro, antigravity, dirge, qoder, traecli, grok, qwen
 	WorkspacesRoot                 string                // base path for execution envs (default: ~/multica_workspaces)
 	KeepEnvAfterTask               bool                  // preserve env after task for debugging
 	HealthPort                     int                   // local HTTP port for health checks (default: 19514)
@@ -804,8 +804,8 @@ func isExecutableFile(path string) bool {
 // invocation, instead of paying the cost-per-miss.
 var defaultAgentCommandNames = []string{
 	"claude", "codex", "opencode", "deveco", "openclaw", "hermes",
-	"pi", "cursor-agent", "copilot", "kimi", "kiro-cli", "codebuddy", "agy", "dirge", "traecli",
-	"grok", "qwen",
+	"pi", "cursor-agent", "copilot", "kimi", "kiro-cli", "codebuddy",
+	"agy", "dirge", "qodercli", "traecli", "grok", "qwen",
 }
 
 // codexDesktopAppBundlePaths returns candidate macOS app-bundle locations for

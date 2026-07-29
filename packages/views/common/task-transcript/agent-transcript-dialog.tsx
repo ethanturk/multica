@@ -1269,4 +1269,3 @@ function ToolDetailSurface({ text }: { text: string }) {
     </div>
   );
 }
-

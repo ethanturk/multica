@@ -722,7 +722,9 @@ describe("AgentCreatePanel", () => {
       },
     });
 
-    await user.click(screen.getByRole("button", { name: /^Create$/i }));
+    const createButton = screen.getByRole("button", { name: /^Create$/i });
+    expect(createButton).not.toBeDisabled();
+    await user.click(createButton);
 
     await waitFor(() => {
       expect(mockQuickCreateIssue).toHaveBeenCalledWith({
