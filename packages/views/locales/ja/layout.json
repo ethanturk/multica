@@ -11,6 +11,7 @@
     "usage": "使用量",
     "runtimes": "ランタイム",
     "skills": "スキル",
+    "deterministic_tools": "ツール",
     "settings": "設定"
   },
   "tab": {

@@ -8,12 +8,17 @@ import enRuntimes from "../../locales/en/runtimes.json";
 import { UpdateSection } from "./update-section";
 
 const TEST_RESOURCES = { en: { common: enCommon, runtimes: enRuntimes } };
+const mockFetchLatestCliVersion = vi.hoisted(() => vi.fn());
 
 vi.mock("@multica/core/api", () => ({
   api: {
     initiateUpdate: vi.fn(),
     getUpdateResult: vi.fn(),
   },
+}));
+
+vi.mock("@multica/core/runtimes", () => ({
+  fetchLatestCliVersion: mockFetchLatestCliVersion,
 }));
 
 function renderSection(props: {
@@ -40,13 +45,7 @@ afterEach(() => {
 
 describe("UpdateSection read-only status", () => {
   it("shows Latest without a redundant read-only label or update action", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({ tag_name: "v0.4.0" }),
-      }),
-    );
+    mockFetchLatestCliVersion.mockResolvedValue("v0.4.0");
 
     renderSection({ runtimeId: null });
 
@@ -58,13 +57,7 @@ describe("UpdateSection read-only status", () => {
   });
 
   it("shows the Desktop manager without exposing an update action", () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({ tag_name: "v0.4.0" }),
-      }),
-    );
+    mockFetchLatestCliVersion.mockResolvedValue("v0.4.0");
 
     renderSection({ runtimeId: null, launchedBy: "desktop" });
 
@@ -76,13 +69,7 @@ describe("UpdateSection read-only status", () => {
   });
 
   it("shows an available version without an action for a read-only viewer", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({ tag_name: "v0.4.0" }),
-      }),
-    );
+    mockFetchLatestCliVersion.mockResolvedValue("v0.4.0");
 
     renderSection({ runtimeId: null, currentVersion: "v0.3.17" });
 

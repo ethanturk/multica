@@ -12,6 +12,7 @@ ALTER TABLE runtime_profile ADD CONSTRAINT runtime_profile_protocol_family_check
         'opencode',
         'openclaw',
         'hermes',
+        'gemini',
         'pi',
         'cursor',
         'kimi',

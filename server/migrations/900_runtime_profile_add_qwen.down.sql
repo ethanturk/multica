@@ -1,4 +1,4 @@
--- Restore the pre-202 whitelist (with Grok, without Qwen Code).  NOT VALID
+-- Restore the pre-900 whitelist (with Grok, without Qwen Code).  NOT VALID
 -- keeps rollback compatible with historical rows the prior migrations allowed.
 ALTER TABLE runtime_profile DROP CONSTRAINT IF EXISTS runtime_profile_protocol_family_check;
 
@@ -11,6 +11,7 @@ ALTER TABLE runtime_profile ADD CONSTRAINT runtime_profile_protocol_family_check
         'opencode',
         'openclaw',
         'hermes',
+        'gemini',
         'pi',
         'cursor',
         'kimi',
