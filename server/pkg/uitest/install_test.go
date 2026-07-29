@@ -24,14 +24,14 @@ func TestUIRuntimeStatusStates(t *testing.T) {
 		{
 			name: "installing",
 			setup: func(t *testing.T, root string) {
-				writeJSONFile(t, filepath.Join(root, "install.lock"), installMarker{PID: 42, StartedAt: now.Add(-time.Minute)})
+				writeJSONFile(t, filepath.Join(root, "install.lock"), installMarker{PID: 42, StartedAt: now.Add(-time.Minute), Token: "active"})
 			},
 			want: StatusInstalling,
 		},
 		{
 			name: "stale install is broken",
 			setup: func(t *testing.T, root string) {
-				writeJSONFile(t, filepath.Join(root, "install.lock"), installMarker{PID: 42, StartedAt: now.Add(-31 * time.Minute)})
+				writeJSONFile(t, filepath.Join(root, "install.lock"), installMarker{PID: 42, StartedAt: now.Add(-31 * time.Minute), Token: "stale"})
 			},
 			want: StatusBroken,
 		},
@@ -196,6 +196,35 @@ func TestUIRuntimeInstallRejectsConcurrentInstaller(t *testing.T) {
 	}
 }
 
+func TestUIRuntimeLockReleaseDoesNotRemoveSuccessor(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	root := filepath.Join(t.TempDir(), "ui-test")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manager := testManager(root, now, nil)
+	unlock, err := manager.acquireLock()
+	if err != nil {
+		t.Fatalf("acquireLock() error = %v", err)
+	}
+
+	lockPath := filepath.Join(root, "install.lock")
+	writeJSONFile(t, lockPath, map[string]any{
+		"pid":        456,
+		"started_at": now.Add(time.Minute),
+		"token":      "successor",
+	})
+	unlock()
+
+	data, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("successor lock was removed: %v", err)
+	}
+	if !strings.Contains(string(data), "successor") {
+		t.Fatalf("lock = %s, want successor owner", data)
+	}
+}
+
 func TestUIRuntimeInstallPreservesReadyRuntime(t *testing.T) {
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 	root := filepath.Join(t.TempDir(), "ui-test")
@@ -219,6 +248,90 @@ func TestUIRuntimeInstallPreservesReadyRuntime(t *testing.T) {
 	}
 	if string(after) != string(before) {
 		t.Fatal("Install() replaced existing ready manifest")
+	}
+}
+
+func TestUIRuntimePromotionPreservesReadyRuntimeAppearingDuringRepair(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	root := filepath.Join(t.TempDir(), "ui-test")
+	runtimeDir := filepath.Join(root, "runtimes", PlaywrightMCPVersion)
+	writeTestRuntimeFile(t, runtimeDir, "sentinel.txt", "broken")
+	manager := testManager(root, now, func(_ context.Context, command Command) (CommandResult, error) {
+		switch {
+		case command.Path == "/tools/npm":
+			createFakeInstall(t, command.Args[2])
+		case strings.HasSuffix(command.Path, filepath.Join("node_modules", ".bin", "playwright")):
+		case command.Path == "/tools/node":
+			return CommandResult{Stdout: filepath.Join(command.Dir, "browsers", "chromium")}, nil
+		default:
+			t.Fatalf("unexpected command: %#v", command)
+		}
+		return CommandResult{}, nil
+	})
+	renameCalls := 0
+	manager.rename = func(oldPath, newPath string) error {
+		renameCalls++
+		if renameCalls == 1 {
+			if err := os.RemoveAll(oldPath); err != nil {
+				t.Fatal(err)
+			}
+			writeReadyRuntime(t, root, PlaywrightMCPVersion, AxeCoreVersion)
+			return errors.New("target changed before quarantine")
+		}
+		return os.Rename(oldPath, newPath)
+	}
+
+	got, err := manager.Install(context.Background())
+	if err != nil {
+		t.Fatalf("Install() error = %v, want concurrent ready runtime preserved", err)
+	}
+	if got.Status != StatusReady {
+		t.Fatalf("Install() = %+v, want concurrent ready runtime", got)
+	}
+	if renameCalls != 1 {
+		t.Fatalf("rename calls = %d, want no attempt to replace ready runtime", renameCalls)
+	}
+}
+
+func TestUIRuntimePromotionRestoresReadyRuntimeClaimedDuringRepair(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	root := filepath.Join(t.TempDir(), "ui-test")
+	runtimeDir := filepath.Join(root, "runtimes", PlaywrightMCPVersion)
+	writeTestRuntimeFile(t, runtimeDir, "sentinel.txt", "broken")
+	manager := testManager(root, now, func(_ context.Context, command Command) (CommandResult, error) {
+		switch {
+		case command.Path == "/tools/npm":
+			createFakeInstall(t, command.Args[2])
+		case strings.HasSuffix(command.Path, filepath.Join("node_modules", ".bin", "playwright")):
+		case command.Path == "/tools/node":
+			return CommandResult{Stdout: filepath.Join(command.Dir, "browsers", "chromium")}, nil
+		default:
+			t.Fatalf("unexpected command: %#v", command)
+		}
+		return CommandResult{}, nil
+	})
+	renameCalls := 0
+	manager.rename = func(oldPath, newPath string) error {
+		renameCalls++
+		if renameCalls == 1 {
+			if err := os.RemoveAll(oldPath); err != nil {
+				t.Fatal(err)
+			}
+			writeReadyRuntime(t, root, PlaywrightMCPVersion, AxeCoreVersion)
+			writeTestRuntimeFile(t, runtimeDir, "concurrent.txt", "preserve")
+		}
+		return os.Rename(oldPath, newPath)
+	}
+
+	got, err := manager.Install(context.Background())
+	if err != nil {
+		t.Fatalf("Install() error = %v, want claimed ready runtime restored", err)
+	}
+	if got.Status != StatusReady {
+		t.Fatalf("Install() = %+v, want claimed ready runtime", got)
+	}
+	if data, err := os.ReadFile(filepath.Join(runtimeDir, "concurrent.txt")); err != nil || string(data) != "preserve" {
+		t.Fatalf("ready runtime was replaced: data=%q err=%v", data, err)
 	}
 }
 
@@ -319,6 +432,85 @@ func TestUIRuntimeInstallRestoresBrokenRuntimeWhenPromotionFails(t *testing.T) {
 	}
 }
 
+func TestUIRuntimeStatusRejectsSymlinkEscapeButAllowsInternalBinSymlink(t *testing.T) {
+	t.Run("external target", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "ui-test")
+		writeReadyRuntime(t, root, PlaywrightMCPVersion, AxeCoreVersion)
+		runtimeDir := filepath.Join(root, "runtimes", PlaywrightMCPVersion)
+		axePath := filepath.Join(runtimeDir, "node_modules", "axe-core", "axe.min.js")
+		if err := os.Remove(axePath); err != nil {
+			t.Fatal(err)
+		}
+		external := filepath.Join(t.TempDir(), "axe.min.js")
+		if err := os.WriteFile(external, []byte("external"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(external, axePath); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+
+		got := testManager(root, time.Now(), nil).Status()
+		if got.Status != StatusBroken {
+			t.Fatalf("Status() = %+v, want external symlink broken", got)
+		}
+	})
+
+	t.Run("internal target", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "ui-test")
+		writeReadyRuntime(t, root, PlaywrightMCPVersion, AxeCoreVersion)
+		runtimeDir := filepath.Join(root, "runtimes", PlaywrightMCPVersion)
+		playwrightPath := filepath.Join(runtimeDir, "node_modules", ".bin", "playwright")
+		if err := os.Remove(playwrightPath); err != nil {
+			t.Fatal(err)
+		}
+		internalTarget := filepath.Join(runtimeDir, "node_modules", "playwright", "cli.js")
+		writeTestRuntimeFile(t, runtimeDir, filepath.Join("node_modules", "playwright", "cli.js"), "cli")
+		relativeTarget, err := filepath.Rel(filepath.Dir(playwrightPath), internalTarget)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(relativeTarget, playwrightPath); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+
+		got := testManager(root, time.Now(), nil).Status()
+		if got.Status != StatusReady {
+			t.Fatalf("Status() = %+v, want internal .bin symlink ready", got)
+		}
+	})
+}
+
+func TestUIRuntimeFutureInstallMarkerIsBrokenAndReplaceable(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+
+	t.Run("status", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "ui-test")
+		writeJSONFile(t, filepath.Join(root, "install.lock"), map[string]any{
+			"pid":        42,
+			"started_at": now.Add(time.Minute),
+			"token":      "future",
+		})
+		got := testManager(root, now, nil).Status()
+		if got.Status != StatusBroken {
+			t.Fatalf("Status() = %+v, want future marker broken", got)
+		}
+	})
+
+	t.Run("takeover", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "ui-test")
+		writeJSONFile(t, filepath.Join(root, "install.lock"), map[string]any{
+			"pid":        42,
+			"started_at": now.Add(time.Minute),
+			"token":      "future",
+		})
+		unlock, err := testManager(root, now, nil).acquireLock()
+		if err != nil {
+			t.Fatalf("acquireLock() future marker error = %v", err)
+		}
+		unlock()
+	})
+}
+
 func TestUIRuntimeRootUsesProfileLayout(t *testing.T) {
 	home := t.TempDir()
 	if got := RootForProfile(home, ""); got != filepath.Join(home, ".multica", "ui-test") {
@@ -346,9 +538,10 @@ func testManager(root string, now time.Time, runner CommandRunner) *Manager {
 				return "", errors.New("missing")
 			}
 		},
-		run:    runner,
-		rename: os.Rename,
-		pid:    123,
+		run:      runner,
+		rename:   os.Rename,
+		newToken: randomToken,
+		pid:      123,
 	}
 }
 

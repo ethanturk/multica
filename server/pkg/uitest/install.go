@@ -3,6 +3,8 @@ package uitest
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,6 +36,7 @@ type Manager struct {
 	lookPath func(string) (string, error)
 	run      CommandRunner
 	rename   func(string, string) error
+	newToken func() (string, error)
 	pid      int
 }
 
@@ -44,6 +47,7 @@ func NewManager(root string) *Manager {
 		lookPath: exec.LookPath,
 		run:      runCommand,
 		rename:   os.Rename,
+		newToken: randomToken,
 		pid:      os.Getpid(),
 	}
 }
@@ -146,34 +150,71 @@ func (m *Manager) Install(ctx context.Context) (CapabilityStatus, error) {
 
 func (m *Manager) acquireLock() (func(), error) {
 	lockPath := filepath.Join(m.root, "install.lock")
+	token, err := m.newToken()
+	if err != nil {
+		return nil, fmt.Errorf("create install marker token: %w", err)
+	}
 	for attempt := 0; attempt < 2; attempt++ {
 		file, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err == nil {
-			marker := installMarker{PID: m.pid, StartedAt: m.now()}
+			marker := installMarker{PID: m.pid, StartedAt: m.now(), Token: token}
 			encodeErr := json.NewEncoder(file).Encode(marker)
 			closeErr := file.Close()
 			if encodeErr != nil || closeErr != nil {
-				_ = os.Remove(lockPath)
+				_, _ = removeLockIfOwned(lockPath, marker.Token)
 				return nil, errors.Join(encodeErr, closeErr)
 			}
-			return func() { _ = os.Remove(lockPath) }, nil
+			return func() { _, _ = removeLockIfOwned(lockPath, marker.Token) }, nil
 		}
 		if !errors.Is(err, os.ErrExist) {
 			return nil, fmt.Errorf("create install marker: %w", err)
 		}
 		data, readErr := os.ReadFile(lockPath)
 		var marker installMarker
-		if readErr != nil || json.Unmarshal(data, &marker) != nil || marker.StartedAt.IsZero() {
+		if readErr != nil || json.Unmarshal(data, &marker) != nil || marker.StartedAt.IsZero() || marker.Token == "" {
 			return nil, fmt.Errorf("UI test runtime installation already in progress")
 		}
-		if m.now().Sub(marker.StartedAt) <= lockMaxAge {
+		age := m.now().Sub(marker.StartedAt)
+		if age >= 0 && age <= lockMaxAge {
 			return nil, fmt.Errorf("UI test runtime installation already in progress")
 		}
-		if err := os.Remove(lockPath); err != nil {
+		removed, err := removeLockIfOwned(lockPath, marker.Token)
+		if err != nil {
 			return nil, fmt.Errorf("remove stale install marker: %w", err)
+		}
+		if !removed {
+			return nil, fmt.Errorf("UI test runtime installation already in progress")
 		}
 	}
 	return nil, fmt.Errorf("UI test runtime installation already in progress")
+}
+
+func randomToken() (string, error) {
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(value), nil
+}
+
+func removeLockIfOwned(lockPath, token string) (bool, error) {
+	data, err := os.ReadFile(lockPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var marker installMarker
+	if err := json.Unmarshal(data, &marker); err != nil || marker.Token != token {
+		return false, nil
+	}
+	if err := os.Remove(lockPath); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (m *Manager) runChecked(ctx context.Context, command Command) error {
@@ -252,13 +293,42 @@ func (m *Manager) promote(temp, target string) error {
 	if _, err := os.Stat(target); err == nil {
 		quarantine = fmt.Sprintf("%s.broken-%d", target, m.now().UnixNano())
 		if err := m.rename(target, quarantine); err != nil {
+			if status := inspectRuntime(target); status.Status == StatusReady {
+				return nil
+			}
 			return fmt.Errorf("quarantine broken runtime: %w", err)
+		}
+		if status := inspectRuntime(quarantine); status.Status == StatusReady {
+			if status := inspectRuntime(target); status.Status == StatusReady {
+				if err := os.RemoveAll(quarantine); err != nil {
+					return fmt.Errorf("remove duplicate claimed runtime: %w", err)
+				}
+				return nil
+			}
+			if err := m.rename(quarantine, target); err != nil {
+				if status := inspectRuntime(target); status.Status == StatusReady {
+					if removeErr := os.RemoveAll(quarantine); removeErr != nil {
+						return fmt.Errorf("restore claimed ready runtime: %w; remove duplicate: %v", err, removeErr)
+					}
+					return nil
+				}
+				return fmt.Errorf("restore claimed ready runtime: %w", err)
+			}
+			return nil
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect runtime destination: %w", err)
 	}
 
 	if err := m.rename(temp, target); err != nil {
+		if status := inspectRuntime(target); status.Status == StatusReady {
+			if quarantine != "" {
+				if removeErr := os.RemoveAll(quarantine); removeErr != nil {
+					return fmt.Errorf("preserve concurrent ready runtime: remove quarantine: %w", removeErr)
+				}
+			}
+			return nil
+		}
 		if quarantine != "" {
 			if restoreErr := m.rename(quarantine, target); restoreErr != nil {
 				return fmt.Errorf("promote runtime: %w; restore broken runtime: %v", err, restoreErr)

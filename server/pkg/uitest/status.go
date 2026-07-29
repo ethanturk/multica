@@ -43,6 +43,7 @@ type readyManifest struct {
 type installMarker struct {
 	PID       int       `json:"pid"`
 	StartedAt time.Time `json:"started_at"`
+	Token     string    `json:"token"`
 }
 
 func RootForProfile(home, profile string) string {
@@ -63,10 +64,14 @@ func (m *Manager) Status() CapabilityStatus {
 	lockPath := filepath.Join(m.root, "install.lock")
 	if data, err := os.ReadFile(lockPath); err == nil {
 		var marker installMarker
-		if err := json.Unmarshal(data, &marker); err != nil || marker.StartedAt.IsZero() {
+		if err := json.Unmarshal(data, &marker); err != nil || marker.StartedAt.IsZero() || marker.Token == "" {
 			return brokenStatus(fmt.Errorf("invalid install marker"))
 		}
-		if m.now().Sub(marker.StartedAt) <= lockMaxAge {
+		age := m.now().Sub(marker.StartedAt)
+		if age < 0 {
+			return brokenStatus(fmt.Errorf("installation marker timestamp is in the future"))
+		}
+		if age <= lockMaxAge {
 			return CapabilityStatus{Status: StatusInstalling}
 		}
 		return brokenStatus(fmt.Errorf("installation marker is older than %s", lockMaxAge))
@@ -130,7 +135,22 @@ func managedPath(root, relative string) (string, error) {
 	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("escapes runtime directory")
 	}
-	return filepath.Join(root, clean), nil
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve runtime directory: %w", err)
+	}
+	canonicalPath, err := filepath.EvalSymlinks(filepath.Join(root, clean))
+	if err != nil {
+		return "", fmt.Errorf("resolve managed path: %w", err)
+	}
+	relativeToRoot, err := filepath.Rel(canonicalRoot, canonicalPath)
+	if err != nil {
+		return "", fmt.Errorf("compare managed path: %w", err)
+	}
+	if relativeToRoot == ".." || strings.HasPrefix(relativeToRoot, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("escapes runtime directory")
+	}
+	return canonicalPath, nil
 }
 
 func brokenStatus(err error) CapabilityStatus {
