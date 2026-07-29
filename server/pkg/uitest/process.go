@@ -16,6 +16,8 @@ import (
 
 const processShutdownGrace = 5 * time.Second
 
+var proxyLifetimeStartedAt = time.Now().UTC()
+
 type processRecord struct {
 	TaskID    string    `json:"task_id"`
 	ProxyPID  int       `json:"proxy_pid"`
@@ -25,16 +27,29 @@ type processRecord struct {
 	StartedAt time.Time `json:"started_at"`
 }
 
+type processTreeController interface {
+	terminate(time.Duration) error
+	close() error
+}
+
+type processStartController interface {
+	processTreeController
+	attach(*exec.Cmd) error
+	resume(*exec.Cmd) error
+	abort(*exec.Cmd, time.Duration) error
+}
+
 type managedProcess struct {
 	cmd        *exec.Cmd
-	controller *platformProcessController
+	controller processTreeController
 	record     processRecord
 	registry   *processRegistry
 
-	terminateOnce sync.Once
-	terminateErr  error
-	done          chan struct{}
-	waitErr       error
+	ownershipMu       sync.Mutex
+	ownershipReleased bool
+	ownershipErr      error
+	done              chan struct{}
+	waitErr           error
 }
 
 type processRegistry struct {
@@ -80,24 +95,32 @@ func startManagedProcess(registry *processRegistry, kind, command, workDir strin
 	cmd.Env = env
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	controller, err := newPlatformProcessController(cmd)
+	var controller processStartController
+	controller, err = newPlatformProcessController(cmd)
 	if err != nil {
 		_ = logFile.Close()
 		return nil, fmt.Errorf("create %s process owner: %w", kind, err)
 	}
-	if err := cmd.Start(); err != nil {
+	if err := runOwnedProcessStart(
+		cmd.Start,
+		func() error { return controller.attach(cmd) },
+		func() error { return controller.resume(cmd) },
+		func() error {
+			if err := controller.abort(cmd, processShutdownGrace); err != nil {
+				return err
+			}
+			waitErr := cmd.Wait()
+			closeErr := controller.close()
+			return errors.Join(waitErr, closeErr)
+		},
+	); err != nil {
 		_ = logFile.Close()
-		_ = controller.close()
-		return nil, fmt.Errorf("start %s command: %w", kind, err)
+		if cmd.Process == nil {
+			_ = controller.close()
+		}
+		return nil, fmt.Errorf("start and own %s process tree: %w", kind, err)
 	}
 	_ = logFile.Close()
-	if err := controller.attach(cmd); err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		_ = controller.terminate(processShutdownGrace)
-		_ = controller.close()
-		return nil, fmt.Errorf("own %s process tree: %w", kind, err)
-	}
 
 	process := &managedProcess{
 		cmd: cmd, controller: controller, registry: registry, done: make(chan struct{}),
@@ -108,15 +131,27 @@ func startManagedProcess(registry *processRegistry, kind, command, workDir strin
 		},
 	}
 	if err := registry.add(process); err != nil {
-		if terminateErr := controller.terminate(processShutdownGrace); terminateErr != nil {
-			_ = cmd.Process.Kill()
+		abortErr := controller.abort(cmd, processShutdownGrace)
+		if abortErr == nil {
+			abortErr = errors.Join(cmd.Wait(), controller.close())
 		}
-		_ = cmd.Wait()
-		_ = controller.close()
-		return nil, fmt.Errorf("persist %s process ownership: %w", kind, err)
+		return nil, errors.Join(fmt.Errorf("persist %s process ownership: %w", kind, err), abortErr)
 	}
 	go process.reap()
 	return process, nil
+}
+
+func runOwnedProcessStart(start, attach, resume, abort func() error) error {
+	if err := start(); err != nil {
+		return fmt.Errorf("start process: %w", err)
+	}
+	if err := attach(); err != nil {
+		return errors.Join(fmt.Errorf("attach process owner: %w", err), abort())
+	}
+	if err := resume(); err != nil {
+		return errors.Join(fmt.Errorf("resume owned process: %w", err), abort())
+	}
+	return nil
 }
 
 func taskIDForRegistry(registry *processRegistry) string {
@@ -127,34 +162,50 @@ func taskIDForRegistry(registry *processRegistry) string {
 
 func (p *managedProcess) reap() {
 	p.waitErr = p.cmd.Wait()
-	p.terminate()
-	closeErr := p.controller.close()
-	if closeErr != nil {
-		p.terminateErr = errors.Join(p.terminateErr, closeErr)
-	}
-	p.registry.remove(p.record.ChildPID)
+	_ = p.releaseOwnership()
 	close(p.done)
 }
 
-func (p *managedProcess) terminate() error {
-	p.terminateOnce.Do(func() {
-		p.terminateErr = p.controller.terminate(processShutdownGrace)
-	})
-	return p.terminateErr
+func (p *managedProcess) releaseOwnership() error {
+	p.ownershipMu.Lock()
+	if p.ownershipReleased {
+		p.ownershipMu.Unlock()
+		return nil
+	}
+	if err := p.controller.terminate(processShutdownGrace); err != nil {
+		p.ownershipErr = err
+		p.ownershipMu.Unlock()
+		return err
+	}
+	if err := p.controller.close(); err != nil {
+		p.ownershipErr = err
+		p.ownershipMu.Unlock()
+		return err
+	}
+	p.ownershipReleased = true
+	p.ownershipErr = nil
+	p.ownershipMu.Unlock()
+	p.registry.remove(p.record.ChildPID)
+	return nil
 }
 
 func (p *managedProcess) stop() error {
-	terminateErr := p.terminate()
-	if terminateErr != nil && p.cmd.Process != nil {
-		_ = p.cmd.Process.Kill()
+	if err := p.releaseOwnership(); err != nil {
+		return err
 	}
 	<-p.done
-	return errors.Join(terminateErr, p.terminateErr)
+	return p.currentOwnershipError()
 }
 
 func (p *managedProcess) result() error {
 	<-p.done
-	return errors.Join(p.waitErr, p.terminateErr)
+	return errors.Join(p.waitErr, p.currentOwnershipError())
+}
+
+func (p *managedProcess) currentOwnershipError() error {
+	p.ownershipMu.Lock()
+	defer p.ownershipMu.Unlock()
+	return p.ownershipErr
 }
 
 func (r *processRegistry) add(process *managedProcess) error {
@@ -233,6 +284,15 @@ func (r *processRegistry) cleanup() error {
 			cleanupErr = fmt.Errorf("remove process metadata: %w", err)
 		}
 	}
+	if cleanupErr != nil {
+		r.mu.Lock()
+		r.closed = false
+		if err := r.writeLocked(); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("preserve process metadata: %w", err))
+		}
+		r.mu.Unlock()
+		return cleanupErr
+	}
 	liveProcessRegistries.Delete(r.stateDir)
 	return cleanupErr
 }
@@ -277,6 +337,22 @@ func CleanupTask(workDir, taskID string, logger *slog.Logger) error {
 		}
 	}
 	return cleanupErr
+}
+
+func verifyRecordedProcessIdentity(record processRecord) error {
+	// Persisted PID/PGID values are only reusable while their creating proxy
+	// lifetime is still active. Failed live cleanup retains its registry and
+	// owner handle, so records from an earlier proxy are never safe to signal.
+	if record.ProxyPID != os.Getpid() {
+		return fmt.Errorf("process identity is unverifiable: proxy PID %d is not current proxy", record.ProxyPID)
+	}
+	now := time.Now().UTC()
+	if record.StartedAt.IsZero() ||
+		record.StartedAt.Before(proxyLifetimeStartedAt) ||
+		record.StartedAt.After(now.Add(time.Second)) {
+		return fmt.Errorf("process identity is unverifiable: start time is outside current proxy lifetime")
+	}
+	return nil
 }
 
 func validateTaskLocation(workDir, taskID string) (string, string, error) {

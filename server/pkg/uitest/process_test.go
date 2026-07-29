@@ -3,15 +3,19 @@ package uitest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -32,6 +36,10 @@ func TestUITestHelperProcess(t *testing.T) {
 	case "descendant":
 		mustWriteHelperFile(args[1], strconv.Itoa(os.Getpid()))
 		waitForever()
+	case "descendant-resistant":
+		signal.Ignore(syscall.SIGTERM)
+		mustWriteHelperFile(args[1], strconv.Itoa(os.Getpid()))
+		waitForever()
 	case "app":
 		runAppHelper(args[1:])
 	case "setup":
@@ -45,7 +53,11 @@ func TestUITestHelperProcess(t *testing.T) {
 func runAppHelper(args []string) {
 	address, events, descendantPID, behavior := args[0], args[1], args[2], args[3]
 	if descendantPID != "-" {
-		child := exec.Command(os.Args[0], "-test.run=^TestUITestHelperProcess$", "--", "descendant", descendantPID)
+		descendantMode := "descendant"
+		if behavior == "healthy-resistant" {
+			descendantMode = "descendant-resistant"
+		}
+		child := exec.Command(os.Args[0], "-test.run=^TestUITestHelperProcess$", "--", descendantMode, descendantPID)
 		child.Stdout = os.Stdout
 		child.Stderr = os.Stderr
 		if err := child.Start(); err != nil {
@@ -62,9 +74,13 @@ func runAppHelper(args []string) {
 	case "no-health":
 		waitForever()
 	case "healthy":
-		serveHelper(address, events, "")
+		serveHelper(address, events, "", false)
+	case "healthy-resistant":
+		serveHelper(address, events, "", false)
+	case "healthy-exit":
+		serveHelper(address, events, "", true)
 	case "redirect":
-		serveHelper(address, events, args[4])
+		serveHelper(address, events, args[4], false)
 	default:
 		fmt.Fprintln(os.Stderr, "unknown app behavior")
 		os.Exit(2)
@@ -77,7 +93,7 @@ func waitForever() {
 	}
 }
 
-func serveHelper(address, events, redirect string) {
+func serveHelper(address, events, redirect string, exitAfterResponse bool) {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -91,6 +107,12 @@ func serveHelper(address, events, redirect string) {
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
+		if exitAfterResponse {
+			go func() {
+				time.Sleep(50 * time.Millisecond)
+				os.Exit(11)
+			}()
+		}
 	})
 	if err := http.Serve(listener, handler); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -117,6 +139,8 @@ func runSetupHelper(args []string) {
 	case "fail":
 		fmt.Fprintln(os.Stderr, "setup failed")
 		os.Exit(9)
+	case "hang":
+		waitForever()
 	default:
 		fmt.Fprintln(os.Stderr, "unknown setup behavior")
 		os.Exit(2)
@@ -228,6 +252,205 @@ func TestCleanupTaskKillsOnlyExactTaskAndPreservesEvidence(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(first.workDir, ".multica", "ui-test", first.taskID)); !os.IsNotExist(err) {
 		t.Fatalf("task process state remains: %v", err)
 	}
+}
+
+func TestCleanupTaskRetainsUnverifiableStaleMetadataAndDoesNotKillPID(t *testing.T) {
+	workDir := t.TempDir()
+	pidPath := filepath.Join(workDir, "unrelated.pid")
+	unrelated := exec.Command(os.Args[0], "-test.run=^TestUITestHelperProcess$", "--", "descendant", pidPath)
+	if err := unrelated.Start(); err != nil {
+		t.Fatalf("start unrelated helper: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = unrelated.Process.Kill()
+		_ = unrelated.Wait()
+	})
+	pid := readHelperPID(t, pidPath)
+
+	for _, test := range []struct {
+		taskID    string
+		proxyPID  int
+		startedAt time.Time
+	}{
+		{taskID: "other-proxy", proxyPID: os.Getpid() + 1, startedAt: time.Now().UTC()},
+		{taskID: "reused-proxy-pid", proxyPID: os.Getpid(), startedAt: proxyLifetimeStartedAt.Add(-time.Second)},
+	} {
+		t.Run(test.taskID, func(t *testing.T) {
+			stateDir := filepath.Join(workDir, ".multica", "ui-test", test.taskID)
+			if err := os.MkdirAll(stateDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			record := processRecord{
+				TaskID: test.taskID, ProxyPID: test.proxyPID, ChildPID: pid,
+				PGID: pid, Kind: "app", StartedAt: test.startedAt,
+			}
+			data, err := json.Marshal([]processRecord{record})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(stateDir, "processes.json"), data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := CleanupTask(workDir, test.taskID, nil); err == nil {
+				t.Fatal("CleanupTask() succeeded for unverifiable stale metadata")
+			}
+			if !platformProcessAlive(pid) {
+				t.Fatal("CleanupTask killed unrelated reused PID")
+			}
+			if _, err := os.Stat(filepath.Join(stateDir, "processes.json")); err != nil {
+				t.Fatalf("stale metadata was not retained: %v", err)
+			}
+		})
+	}
+}
+
+func TestOwnedProcessStartOrdersAttachBeforeResumeAndAbortsFailures(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		attachErr  error
+		resumeErr  error
+		wantEvents []string
+	}{
+		{name: "success", wantEvents: []string{"start", "attach", "resume"}},
+		{name: "attach failure", attachErr: errors.New("attach"), wantEvents: []string{"start", "attach", "abort"}},
+		{name: "resume failure", resumeErr: errors.New("resume"), wantEvents: []string{"start", "attach", "resume", "abort"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var events []string
+			step := func(name string, err error) func() error {
+				return func() error {
+					events = append(events, name)
+					return err
+				}
+			}
+			err := runOwnedProcessStart(
+				step("start", nil),
+				step("attach", test.attachErr),
+				step("resume", test.resumeErr),
+				step("abort", nil),
+			)
+			if (test.attachErr != nil || test.resumeErr != nil) != (err != nil) {
+				t.Fatalf("runOwnedProcessStart() error = %v", err)
+			}
+			if got, want := strings.Join(events, ","), strings.Join(test.wantEvents, ","); got != want {
+				t.Fatalf("events = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+type retryProcessController struct {
+	mu           sync.Mutex
+	terminateErr error
+	closeErr     error
+	terminations int
+	closes       int
+}
+
+func (c *retryProcessController) terminate(time.Duration) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.terminations++
+	return c.terminateErr
+}
+
+func (c *retryProcessController) close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closes++
+	return c.closeErr
+}
+
+func TestFailedTerminationRetainsRetryableOwnerAndMetadata(t *testing.T) {
+	for _, test := range []struct {
+		name               string
+		terminateErr       error
+		closeErr           error
+		wantCloseAttempts  int
+		wantTerminateCalls int
+	}{
+		{
+			name: "termination failure", terminateErr: errors.New("injected termination failure"),
+			wantCloseAttempts: 1, wantTerminateCalls: 2,
+		},
+		{
+			name: "handle close failure", closeErr: errors.New("injected close failure"),
+			wantCloseAttempts: 2, wantTerminateCalls: 2,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			taskID := strings.ReplaceAll(test.name, " ", "-")
+			registry, err := newProcessRegistry(workDir, taskID, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			controller := &retryProcessController{
+				terminateErr: test.terminateErr,
+				closeErr:     test.closeErr,
+			}
+			done := make(chan struct{})
+			close(done)
+			process := &managedProcess{
+				controller: controller,
+				registry:   registry,
+				done:       done,
+				record: processRecord{
+					TaskID: taskID, ProxyPID: os.Getpid(), ChildPID: 424242,
+					Kind: "app", StartedAt: time.Now().UTC(),
+				},
+			}
+			if err := registry.add(process); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := registry.cleanup(); err == nil {
+				t.Fatal("cleanup succeeded despite injected ownership failure")
+			}
+			if _, ok := registry.processes[process.record.ChildPID]; !ok {
+				t.Fatal("failed process owner was removed from registry")
+			}
+			if _, err := os.Stat(registry.statePath); err != nil {
+				t.Fatalf("failed process metadata was not retained: %v", err)
+			}
+			if _, ok := liveProcessRegistries.Load(registry.stateDir); !ok {
+				t.Fatal("failed process owner was removed from live registry")
+			}
+
+			controller.mu.Lock()
+			controller.terminateErr = nil
+			controller.closeErr = nil
+			controller.mu.Unlock()
+			if err := registry.cleanup(); err != nil {
+				t.Fatalf("retry cleanup error = %v", err)
+			}
+			if controller.terminations != test.wantTerminateCalls {
+				t.Fatalf("termination attempts = %d, want %d", controller.terminations, test.wantTerminateCalls)
+			}
+			if controller.closes != test.wantCloseAttempts {
+				t.Fatalf("close attempts = %d, want %d", controller.closes, test.wantCloseAttempts)
+			}
+			if _, err := os.Stat(registry.stateDir); !os.IsNotExist(err) {
+				t.Fatalf("metadata remains after successful retry: %v", err)
+			}
+		})
+	}
+}
+
+func TestSessionCleanupEscalatesTERMResistantDescendant(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows Job Objects terminate without Unix signal escalation")
+	}
+	fixture := newSessionFixture(t, "resistant", "healthy-resistant", "", 2*time.Second, 0)
+	if err := fixture.session.EnsureReady(context.Background()); err != nil {
+		t.Fatalf("EnsureReady() error = %v", err)
+	}
+	pid := readHelperPID(t, fixture.descendantPID)
+	if err := fixture.session.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	waitProcessGone(t, pid, processShutdownGrace+2*time.Second)
 }
 
 type sessionFixture struct {

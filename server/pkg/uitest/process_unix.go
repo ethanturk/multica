@@ -28,6 +28,12 @@ func (c *platformProcessController) attach(cmd *exec.Cmd) error {
 	return nil
 }
 
+func (*platformProcessController) resume(*exec.Cmd) error { return nil }
+
+func (c *platformProcessController) abort(_ *exec.Cmd, grace time.Duration) error {
+	return c.terminate(grace)
+}
+
 func (c *platformProcessController) terminate(grace time.Duration) error {
 	return terminateUnixProcessGroup(c.pgid, grace)
 }
@@ -42,6 +48,9 @@ func platformProcessGroup(cmd *exec.Cmd) int {
 }
 
 func terminateRecordedProcess(record processRecord, grace time.Duration) error {
+	if err := verifyRecordedProcessIdentity(record); err != nil {
+		return err
+	}
 	pgid := record.PGID
 	if pgid == 0 {
 		pgid = record.ChildPID

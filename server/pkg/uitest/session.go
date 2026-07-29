@@ -128,6 +128,22 @@ func (s *Session) EnsureReady(ctx context.Context) error {
 	return nil
 }
 
+func (s *Session) RunBrowserAction(ctx context.Context, action func(context.Context) error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if action == nil {
+		return lifecycleError(ErrorPolicy, "run browser action", errors.New("browser action is required"))
+	}
+	if err := s.EnsureReady(ctx); err != nil {
+		return err
+	}
+	if cancellation := firstCancellation(ctx, s.context); cancellation != nil {
+		return lifecycleError(ErrorCancelled, "run browser action", cancellation)
+	}
+	return action(ctx)
+}
+
 func (s *Session) Close() error {
 	s.shutdown(context.Canceled)
 	return s.closeErr
@@ -189,7 +205,7 @@ func (s *Session) initialize(ctx context.Context) error {
 	}
 	select {
 	case <-app.done:
-		return lifecycleError(ErrorApplicationStart, "application exited", app.result())
+		return applicationExitError(ctx, s.context, "application exited", app.result())
 	default:
 	}
 	go func() {
@@ -228,13 +244,10 @@ func (s *Session) pollHealth(ctx context.Context, app *managedProcess) error {
 		}
 		select {
 		case <-app.done:
+			return applicationExitError(ctx, s.context, "application exited before health", app.result())
+		case <-healthContext.Done():
 			if cancellation := firstCancellation(ctx, s.context); cancellation != nil {
 				return lifecycleError(ErrorCancelled, "health check", cancellation)
-			}
-			return lifecycleError(ErrorApplicationStart, "application exited before health", app.result())
-		case <-healthContext.Done():
-			if ctx.Err() != nil {
-				return lifecycleError(ErrorCancelled, "health check", context.Cause(ctx))
 			}
 			return lifecycleError(ErrorHealthTimeout, "health check", context.DeadlineExceeded)
 		default:
@@ -264,11 +277,11 @@ func (s *Session) pollHealth(ctx context.Context, app *managedProcess) error {
 		select {
 		case <-app.done:
 			timer.Stop()
-			return lifecycleError(ErrorApplicationStart, "application exited before health", app.result())
+			return applicationExitError(ctx, s.context, "application exited before health", app.result())
 		case <-healthContext.Done():
 			timer.Stop()
-			if ctx.Err() != nil {
-				return lifecycleError(ErrorCancelled, "health check", context.Cause(ctx))
+			if cancellation := firstCancellation(ctx, s.context); cancellation != nil {
+				return lifecycleError(ErrorCancelled, "health check", cancellation)
 			}
 			return lifecycleError(ErrorHealthTimeout, "health check", context.DeadlineExceeded)
 		case <-timer.C:
@@ -295,19 +308,19 @@ func (s *Session) runSetup(ctx context.Context, app *managedProcess, statePath s
 	select {
 	case <-app.done:
 		_ = setup.stop()
+		return applicationExitError(ctx, s.context, "application exited during setup", app.result())
+	case <-setup.done:
 		if cancellation := firstCancellation(ctx, s.context); cancellation != nil {
 			return lifecycleError(ErrorCancelled, "setup", cancellation)
 		}
-		return lifecycleError(ErrorApplicationStart, "application exited during setup", app.result())
-	case <-setup.done:
 		if err := setup.result(); err != nil {
 			return lifecycleError(ErrorSetup, "run setup", err)
 		}
 		return nil
 	case <-setupContext.Done():
 		_ = setup.stop()
-		if ctx.Err() != nil {
-			return lifecycleError(ErrorCancelled, "setup", context.Cause(ctx))
+		if cancellation := firstCancellation(ctx, s.context); cancellation != nil {
+			return lifecycleError(ErrorCancelled, "setup", cancellation)
 		}
 		return lifecycleError(ErrorSetup, "setup timeout", context.DeadlineExceeded)
 	}
@@ -436,4 +449,11 @@ func sessionEndedError(cause error) error {
 		return cause
 	}
 	return lifecycleError(ErrorCancelled, "session ended", cause)
+}
+
+func applicationExitError(ctx, sessionContext context.Context, operation string, result error) error {
+	if cancellation := firstCancellation(ctx, sessionContext); cancellation != nil {
+		return lifecycleError(ErrorCancelled, operation, cancellation)
+	}
+	return lifecycleError(ErrorApplicationStart, operation, result)
 }

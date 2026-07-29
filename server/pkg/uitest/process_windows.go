@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -31,7 +32,8 @@ func platformShellCommand(command string) *exec.Cmd {
 	return exec.Command("cmd.exe", "/d", "/s", "/c", command)
 }
 
-func newPlatformProcessController(_ *exec.Cmd) (*platformProcessController, error) {
+func newPlatformProcessController(cmd *exec.Cmd) (*platformProcessController, error) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_SUSPENDED}
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		return nil, err
@@ -64,6 +66,64 @@ func (c *platformProcessController) attach(cmd *exec.Cmd) error {
 		return fmt.Errorf("assign child to job object: %w", err)
 	}
 	return nil
+}
+
+func (*platformProcessController) resume(cmd *exec.Cmd) error {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
+	if err != nil {
+		return fmt.Errorf("snapshot child threads: %w", err)
+	}
+	defer windows.CloseHandle(snapshot)
+
+	entry := windows.ThreadEntry32{Size: uint32(unsafe.Sizeof(windows.ThreadEntry32{}))}
+	if err := windows.Thread32First(snapshot, &entry); err != nil {
+		return fmt.Errorf("enumerate child threads: %w", err)
+	}
+	resumed := 0
+	for {
+		if entry.OwnerProcessID == uint32(cmd.Process.Pid) {
+			thread, err := windows.OpenThread(windows.THREAD_SUSPEND_RESUME, false, entry.ThreadID)
+			if err != nil {
+				return fmt.Errorf("open suspended child thread: %w", err)
+			}
+			_, resumeErr := windows.ResumeThread(thread)
+			closeErr := windows.CloseHandle(thread)
+			if resumeErr != nil || closeErr != nil {
+				var threadErr error
+				if resumeErr != nil {
+					threadErr = errors.Join(threadErr, fmt.Errorf("resume suspended child thread: %w", resumeErr))
+				}
+				if closeErr != nil {
+					threadErr = errors.Join(threadErr, fmt.Errorf("close child thread handle: %w", closeErr))
+				}
+				return threadErr
+			}
+			resumed++
+		}
+		if err := windows.Thread32Next(snapshot, &entry); err != nil {
+			if errors.Is(err, windows.ERROR_NO_MORE_FILES) {
+				break
+			}
+			return fmt.Errorf("enumerate child threads: %w", err)
+		}
+	}
+	if resumed == 0 {
+		return fmt.Errorf("no suspended thread found for process %d", cmd.Process.Pid)
+	}
+	return nil
+}
+
+func (c *platformProcessController) abort(cmd *exec.Cmd, grace time.Duration) error {
+	var abortErr error
+	if err := c.terminate(grace); err != nil {
+		abortErr = errors.Join(abortErr, err)
+	}
+	if cmd.Process != nil && platformProcessAlive(cmd.Process.Pid) {
+		if err := cmd.Process.Kill(); err != nil {
+			abortErr = errors.Join(abortErr, fmt.Errorf("kill unowned child process: %w", err))
+		}
+	}
+	return abortErr
 }
 
 func (c *platformProcessController) terminate(grace time.Duration) error {
@@ -117,14 +177,19 @@ func (c *platformProcessController) close() error {
 	if active != 0 {
 		return fmt.Errorf("refuse to close job object with %d active processes", active)
 	}
-	err = windows.CloseHandle(c.job)
+	if err := windows.CloseHandle(c.job); err != nil {
+		return err
+	}
 	c.job = 0
-	return err
+	return nil
 }
 
 func platformProcessGroup(_ *exec.Cmd) int { return 0 }
 
 func terminateRecordedProcess(record processRecord, grace time.Duration) error {
+	if err := verifyRecordedProcessIdentity(record); err != nil {
+		return err
+	}
 	if record.ChildPID <= 0 {
 		return nil
 	}

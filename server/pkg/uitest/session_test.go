@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -23,13 +24,15 @@ func TestSessionFirstActionStartsOnceAndOrdersHealthBeforeSetup(t *testing.T) {
 	setup := helperCommand("setup", filepath.Join(workDir, "ordered-events"), "success")
 	fixture := newSessionFixtureAtWorkDir(t, workDir, "ordered", "healthy", setup, 2*time.Second, 0)
 
-	if err := fixture.session.EnsureReady(context.Background()); err != nil {
-		t.Fatalf("first EnsureReady() error = %v", err)
+	if err := fixture.session.RunBrowserAction(context.Background(), func(context.Context) error {
+		appendHelperEvent(fixture.events, "browser")
+		return nil
+	}); err != nil {
+		t.Fatalf("first RunBrowserAction() error = %v", err)
 	}
 	if err := fixture.session.EnsureReady(context.Background()); err != nil {
 		t.Fatalf("second EnsureReady() error = %v", err)
 	}
-	appendHelperEvent(fixture.events, "browser")
 
 	events := readEvents(t, fixture.events)
 	if countEvent(events, "app") != 1 {
@@ -38,6 +41,21 @@ func TestSessionFirstActionStartsOnceAndOrdersHealthBeforeSetup(t *testing.T) {
 	want := []string{"app", "health", "setup", "browser"}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("events = %v, want %v", events, want)
+	}
+}
+
+func TestSessionBrowserActionReturnsProductFailureUnclassified(t *testing.T) {
+	fixture := newSessionFixture(t, "browser-product-failure", "healthy", "", 2*time.Second, 0)
+	productErr := errors.New("product assertion failed")
+	err := fixture.session.RunBrowserAction(context.Background(), func(context.Context) error {
+		return productErr
+	})
+	if !errors.Is(err, productErr) {
+		t.Fatalf("RunBrowserAction() error = %v, want product error", err)
+	}
+	var lifecycleErr *LifecycleError
+	if errors.As(err, &lifecycleErr) {
+		t.Fatalf("product error was classified as lifecycle error: %v", err)
 	}
 }
 
@@ -106,6 +124,62 @@ func TestSessionTerminalFailuresKillDescendants(t *testing.T) {
 			waitProcessGone(t, pid, 7*time.Second)
 		})
 	}
+}
+
+func TestSessionSetupTimeoutAndCancellation(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		cancel    bool
+		wantClass string
+	}{
+		{name: "timeout", wantClass: ErrorSetup},
+		{name: "cancellation", cancel: true, wantClass: ErrorCancelled},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			events := filepath.Join(workDir, "events")
+			setup := helperCommand("setup", events, "hang")
+			fixture := newSessionFixtureAtWorkDir(t, workDir, "setup-terminal", "healthy", setup, 2*time.Second, 0)
+			fixture.session.opts.SetupLimit = 150 * time.Millisecond
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if test.cancel {
+				go func() {
+					_ = waitForEvent(events, "setup", 2*time.Second)
+					cancel()
+				}()
+			}
+			assertLifecycleClass(t, fixture.session.EnsureReady(ctx), test.wantClass)
+			pid := readHelperPID(t, fixture.descendantPID)
+			waitProcessGone(t, pid, 7*time.Second)
+		})
+	}
+}
+
+func TestSessionPostReadyApplicationExitEndsSession(t *testing.T) {
+	fixture := newSessionFixture(t, "post-ready-exit", "healthy-exit", "", 2*time.Second, 0)
+	if err := fixture.session.EnsureReady(context.Background()); err != nil {
+		t.Fatalf("EnsureReady() error = %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		err := fixture.session.EnsureReady(context.Background())
+		if err != nil {
+			assertLifecycleClass(t, err, ErrorApplicationStart)
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("session did not end after post-ready application exit")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestApplicationExitPrefersConcurrentCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(context.DeadlineExceeded)
+	err := applicationExitError(ctx, context.Background(), "health check", errors.New("application exited"))
+	assertLifecycleClass(t, err, ErrorCancelled)
 }
 
 func TestSessionCloseAndTimeoutKillDescendantsAndPreserveLogs(t *testing.T) {
@@ -208,6 +282,24 @@ func waitForFile(path string, limit time.Duration) error {
 	for {
 		if _, err := os.Stat(path); err == nil {
 			return nil
+		}
+		if time.Now().After(deadline) {
+			return os.ErrDeadlineExceeded
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func waitForEvent(path, event string, limit time.Duration) error {
+	deadline := time.Now().Add(limit)
+	for {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			for _, found := range strings.Fields(string(data)) {
+				if found == event {
+					return nil
+				}
+			}
 		}
 		if time.Now().After(deadline) {
 			return os.ErrDeadlineExceeded
