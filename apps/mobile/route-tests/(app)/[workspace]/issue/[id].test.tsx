@@ -2,7 +2,7 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
-import IssueDetail from "./[id]";
+import IssueDetail from "@/app/(app)/[workspace]/issue/[id]";
 
 const mocks = vi.hoisted(() => ({
   alertMock: vi.fn(),

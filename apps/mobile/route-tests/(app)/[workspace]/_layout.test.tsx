@@ -2,7 +2,9 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
-import WorkspaceLayout, { unstable_settings } from "./_layout";
+import WorkspaceLayout, {
+  unstable_settings,
+} from "@/app/(app)/[workspace]/_layout";
 
 const mocks = vi.hoisted(() => ({
   stackScreens: [] as Record<string, any>[],

@@ -2,7 +2,7 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
-import Inbox from "./inbox";
+import Inbox from "@/app/(app)/[workspace]/(tabs)/inbox";
 
 function MockView(props: Record<string, any>) {
   return React.createElement("View", props);

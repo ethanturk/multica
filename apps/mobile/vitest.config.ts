@@ -25,7 +25,7 @@ export default defineConfig({
       "data/**/*.test.ts",
       "data/**/*.test.tsx",
       "components/**/*.test.tsx",
-      "app/**/*.test.tsx",
+      "route-tests/**/*.test.tsx",
     ],
     passWithNoTests: true,
   },
