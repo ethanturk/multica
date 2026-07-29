@@ -1,5 +1,17 @@
 import type { ExpoConfig, ConfigContext } from "expo/config";
 
+const resolveAndroidVersionCode = () => {
+  const rawVersionCode = process.env.ANDROID_VERSION_CODE;
+  if (rawVersionCode === undefined) return 1;
+
+  const versionCode = Number(rawVersionCode);
+  if (!Number.isInteger(versionCode) || versionCode <= 0) {
+    throw new Error("ANDROID_VERSION_CODE must be a positive integer");
+  }
+
+  return versionCode;
+};
+
 /**
  * Dynamic Expo config — replaces app.json so we can read APP_ENV at runtime
  * and switch bundleIdentifier / display name for dev / staging / production.
@@ -56,6 +68,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     },
     android: {
       package: androidPackage,
+      versionCode: resolveAndroidVersionCode(),
       adaptiveIcon: {
         foregroundImage: "./assets/icon.png",
         backgroundColor: "#090909",
