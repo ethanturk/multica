@@ -3,6 +3,7 @@
 package uitest
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -98,6 +99,7 @@ func TestUITestIntegrationRealBrowserPolicy(t *testing.T) {
 		_ = session.Close()
 		t.Fatalf("start pinned Playwright MCP (also validates config schema): %v", err)
 	}
+	var chromiumPIDs []int
 	defer func() {
 		session.registry.mu.Lock()
 		childPIDs := make([]int, 0, len(session.registry.processes))
@@ -126,6 +128,15 @@ func TestUITestIntegrationRealBrowserPolicy(t *testing.T) {
 				t.Errorf("managed child PID %d remained alive after close", pid)
 			}
 		}
+		for _, pid := range chromiumPIDs {
+			deadline := time.Now().Add(2 * time.Second)
+			for platformProcessAlive(pid) && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if platformProcessAlive(pid) {
+				t.Errorf("Chromium descendant PID %d remained alive after close", pid)
+			}
+		}
 	}()
 	axe, err := readManagedAxe(files)
 	if err != nil {
@@ -133,18 +144,30 @@ func TestUITestIntegrationRealBrowserPolicy(t *testing.T) {
 	}
 	proxy := newProxy(session, upstream, axe, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	assertIntegrationOK(t, proxy.route(context.Background(), rpcRequest{
+	assertIntegrationRPCOK(t, proxy.route(context.Background(), rpcRequest{
 		JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "initialize",
 		Params: json.RawMessage(`{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"integration","version":"1"}}`),
 	}))
-	assertIntegrationOK(t, integrationToolCall(proxy, 2, "browser_navigate", map[string]any{"url": baseURL.String()}))
-	assertIntegrationOK(t, integrationToolCall(proxy, 3, "browser_take_screenshot", map[string]any{
+	assertIntegrationToolOK(t, integrationToolCall(proxy, 2, "browser_navigate", map[string]any{"url": baseURL.String()}))
+	screenshot := assertIntegrationToolOK(t, integrationToolCall(proxy, 3, "browser_take_screenshot", map[string]any{
 		"type": "png", "filename": "integration.png",
 	}))
+	screenshotPath := filepath.Join(session.opts.ArtifactDir, "integration.png")
+	if err := validateIntegrationScreenshot(screenshot, screenshotPath); err != nil {
+		t.Fatalf("screenshot capture evidence: %v", err)
+	}
+	browserOwnerPID := integrationBrowserOwnerPID(t, session)
+	chromiumPIDs, err = integrationChromiumDescendantPIDs(browserOwnerPID)
+	if err != nil {
+		t.Fatalf("capture live Chromium descendants: %v", err)
+	}
+	if len(chromiumPIDs) == 0 {
+		t.Fatalf("browser owner PID %d had no live Chromium descendants", browserOwnerPID)
+	}
 	beforePopup := integrationToolCall(proxy, 4, "browser_snapshot", map[string]any{})
-	assertIntegrationOK(t, beforePopup)
+	assertIntegrationToolOK(t, beforePopup)
 	popupRef := integrationSnapshotRef(t, beforePopup.Result)
-	assertIntegrationOK(t, integrationToolCall(proxy, 5, "browser_click", map[string]any{
+	assertIntegrationToolOK(t, integrationToolCall(proxy, 5, "browser_click", map[string]any{
 		"element": "Open external popup",
 		"ref":     popupRef,
 	}))
@@ -156,7 +179,7 @@ func TestUITestIntegrationRealBrowserPolicy(t *testing.T) {
 	redirect := integrationToolCall(proxy, 7, "browser_navigate", map[string]any{"url": baseURL.String() + "/redirect"})
 	assertIntegrationNetworkPolicyBlock(t, redirect, "example.com")
 	tabs := integrationToolCall(proxy, 8, "browser_tabs", map[string]any{"action": "list"})
-	assertIntegrationOK(t, tabs)
+	assertIntegrationToolOK(t, tabs)
 	if strings.Contains(string(tabs.Result), "https://example.com") {
 		t.Fatalf("external popup escaped allowedOrigins: %s", tabs.Result)
 	}
@@ -164,25 +187,227 @@ func TestUITestIntegrationRealBrowserPolicy(t *testing.T) {
 		t.Fatalf("local fixture tab missing after blocked popup: %s", tabs.Result)
 	}
 	snapshot := integrationToolCall(proxy, 9, "browser_snapshot", map[string]any{})
-	assertIntegrationOK(t, snapshot)
+	assertIntegrationToolOK(t, snapshot)
 	if !strings.Contains(integrationResultText(t, snapshot.Result), "external popup attempted") {
 		t.Fatalf("fixture did not prove popup attempt before tab policy assertion: %s", snapshot.Result)
 	}
 	network := integrationToolCall(proxy, 10, "browser_network_requests", map[string]any{"includeStatic": false})
-	assertIntegrationOK(t, network)
+	assertIntegrationToolOK(t, network)
 	if !strings.Contains(string(network.Result), "/missing") ||
 		!strings.Contains(string(network.Result), "503") {
 		t.Fatalf("explicit first-party 503 missing from network output: %s", network.Result)
 	}
 	console := integrationToolCall(proxy, 11, "browser_console_messages", map[string]any{"level": "error"})
-	assertIntegrationOK(t, console)
+	assertIntegrationToolOK(t, console)
 	if !strings.Contains(string(console.Result), "fixture console error") {
 		t.Fatalf("console error missing from output: %s", console.Result)
 	}
 	scan := integrationToolCall(proxy, 12, accessibilityScanTool.Name, map[string]any{})
-	assertIntegrationOK(t, scan)
+	assertIntegrationToolOK(t, scan)
 	if !strings.Contains(string(scan.Result), "button-name") {
 		t.Fatalf("critical Axe fixture missing from scan: %s", scan.Result)
+	}
+}
+
+type integrationToolContent struct {
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	Data     string `json:"data,omitempty"`
+	MIMEType string `json:"mimeType,omitempty"`
+}
+
+type integrationToolResult struct {
+	Content []integrationToolContent `json:"content"`
+	IsError bool                     `json:"isError,omitempty"`
+}
+
+func decodeIntegrationToolResult(response rpcResponse) (integrationToolResult, error) {
+	if response.Error != nil {
+		return integrationToolResult{}, fmt.Errorf(
+			"JSON-RPC error %d: %s",
+			response.Error.Code,
+			response.Error.Message,
+		)
+	}
+	if len(response.Result) == 0 {
+		return integrationToolResult{}, fmt.Errorf("MCP tool result is missing")
+	}
+	var result integrationToolResult
+	if err := json.Unmarshal(response.Result, &result); err != nil {
+		return integrationToolResult{}, fmt.Errorf("decode MCP tool result: %w", err)
+	}
+	if len(result.Content) == 0 {
+		return integrationToolResult{}, fmt.Errorf("MCP tool result content is empty")
+	}
+	var hasContent bool
+	for _, content := range result.Content {
+		switch content.Type {
+		case "text":
+			hasContent = hasContent || strings.TrimSpace(content.Text) != ""
+		case "image":
+			hasContent = hasContent ||
+				(content.Data != "" && strings.HasPrefix(content.MIMEType, "image/"))
+		}
+	}
+	if !hasContent {
+		return integrationToolResult{}, fmt.Errorf("MCP tool result has no supported content")
+	}
+	if result.IsError {
+		return integrationToolResult{}, fmt.Errorf(
+			"MCP tool returned isError: %s",
+			boundedRPCString(integrationToolResultText(result)),
+		)
+	}
+	return result, nil
+}
+
+func integrationToolResultText(result integrationToolResult) string {
+	text := make([]string, 0, len(result.Content))
+	for _, content := range result.Content {
+		if content.Type == "text" && strings.TrimSpace(content.Text) != "" {
+			text = append(text, content.Text)
+		}
+	}
+	return strings.Join(text, "\n")
+}
+
+func validateIntegrationScreenshot(result integrationToolResult, path string) error {
+	filename := strings.ToLower(filepath.Base(path))
+	var captureEvidence bool
+	for _, content := range result.Content {
+		if content.Type == "image" && content.Data != "" && content.MIMEType == "image/png" {
+			captureEvidence = true
+		}
+		text := strings.ToLower(content.Text)
+		if content.Type == "text" &&
+			strings.Contains(text, "screenshot") &&
+			strings.Contains(text, filename) {
+			captureEvidence = true
+		}
+	}
+	if !captureEvidence {
+		return fmt.Errorf("MCP result lacks screenshot capture evidence for %s", filepath.Base(path))
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open screenshot artifact: %w", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat screenshot artifact: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Size() <= 8 {
+		return fmt.Errorf("screenshot artifact is not a non-empty regular PNG")
+	}
+	var header [8]byte
+	if _, err := io.ReadFull(file, header[:]); err != nil {
+		return fmt.Errorf("read screenshot PNG signature: %w", err)
+	}
+	if !bytes.Equal(header[:], []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}) {
+		return fmt.Errorf("screenshot artifact has invalid PNG signature")
+	}
+	return nil
+}
+
+func integrationBrowserOwnerPID(t *testing.T, session *Session) int {
+	t.Helper()
+	session.registry.mu.Lock()
+	defer session.registry.mu.Unlock()
+	for _, process := range session.registry.processes {
+		if process.record.Kind == "browser" && process.record.ChildPID > 0 {
+			return process.record.ChildPID
+		}
+	}
+	t.Fatal("managed browser owner missing from live process registry")
+	return 0
+}
+
+func TestUITestIntegrationRejectsMCPToolErrorsAndEmptyContent(t *testing.T) {
+	tests := []struct {
+		name     string
+		response rpcResponse
+		wantErr  bool
+	}{
+		{
+			name: "content success",
+			response: rpcResponse{
+				JSONRPC: "2.0",
+				Result:  json.RawMessage(`{"content":[{"type":"text","text":"done"}]}`),
+			},
+		},
+		{
+			name: "tool error result",
+			response: rpcResponse{
+				JSONRPC: "2.0",
+				Result:  json.RawMessage(`{"content":[{"type":"text","text":"navigation failed"}],"isError":true}`),
+			},
+			wantErr: true,
+		},
+		{
+			name: "empty content",
+			response: rpcResponse{
+				JSONRPC: "2.0",
+				Result:  json.RawMessage(`{"content":[]}`),
+			},
+			wantErr: true,
+		},
+		{
+			name: "json rpc error",
+			response: rpcResponse{
+				JSONRPC: "2.0",
+				Error: &rpcError{
+					Code: rpcUpstreamError, Message: "failed",
+					Data: rpcErrorData{Class: ErrorBrowser},
+				},
+			},
+			wantErr: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := decodeIntegrationToolResult(test.response)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("decode error = %v, wantErr %v", err, test.wantErr)
+			}
+			if !test.wantErr && len(result.Content) != 1 {
+				t.Fatalf("content count = %d, want one", len(result.Content))
+			}
+		})
+	}
+}
+
+func TestUITestIntegrationScreenshotRequiresCaptureEvidenceAndPNGArtifact(t *testing.T) {
+	artifact := filepath.Join(t.TempDir(), "integration.png")
+	if err := os.WriteFile(artifact, append(
+		[]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'},
+		[]byte("captured")...,
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := decodeIntegrationToolResult(rpcResponse{
+		JSONRPC: "2.0",
+		Result: json.RawMessage(
+			`{"content":[{"type":"text","text":"Screenshot saved to integration.png"}]}`,
+		),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateIntegrationScreenshot(result, artifact); err != nil {
+		t.Fatalf("valid screenshot rejected: %v", err)
+	}
+
+	result.Content[0].Text = "action completed"
+	if err := validateIntegrationScreenshot(result, artifact); err == nil {
+		t.Fatal("screenshot without capture result evidence accepted")
+	}
+	if err := os.WriteFile(artifact, []byte("not a png"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result.Content[0].Text = "Screenshot saved to integration.png"
+	if err := validateIntegrationScreenshot(result, artifact); err == nil {
+		t.Fatal("non-PNG screenshot artifact accepted")
 	}
 }
 
@@ -248,11 +473,20 @@ func integrationToolCall(proxy *Proxy, id int, name string, arguments map[string
 	})
 }
 
-func assertIntegrationOK(t *testing.T, response rpcResponse) {
+func assertIntegrationRPCOK(t *testing.T, response rpcResponse) {
 	t.Helper()
 	if response.Error != nil {
 		t.Fatalf("MCP response error: %#v", response.Error)
 	}
+}
+
+func assertIntegrationToolOK(t *testing.T, response rpcResponse) integrationToolResult {
+	t.Helper()
+	result, err := decodeIntegrationToolResult(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
 
 func reserveIntegrationAddress(t *testing.T) string {

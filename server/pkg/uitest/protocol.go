@@ -10,8 +10,10 @@ import (
 )
 
 const (
-	maxRPCFrameBytes   = 2 * 1024 * 1024
-	rpcDiagnosticBytes = 64 * 1024
+	maxRPCFrameBytes        = 2 * 1024 * 1024
+	rpcDiagnosticBytes      = 64 * 1024
+	rpcResponseReserveBytes = 1024
+	maxRPCIDBytes           = maxRPCFrameBytes - rpcDiagnosticBytes - rpcResponseReserveBytes
 
 	rpcParseError     = -32700
 	rpcInvalidRequest = -32600
@@ -139,6 +141,9 @@ func decodeJSONObject(raw []byte) (map[string]json.RawMessage, error) {
 
 func validRPCID(raw json.RawMessage) bool {
 	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) > maxRPCIDBytes {
+		return false
+	}
 	if bytes.Equal(trimmed, []byte("null")) {
 		return true
 	}
@@ -231,7 +236,7 @@ func responseError(id json.RawMessage, code int, class, message string) rpcRespo
 	if len(id) == 0 {
 		id = json.RawMessage("null")
 	}
-	return rpcResponse{
+	response := rpcResponse{
 		JSONRPC: "2.0",
 		ID:      append(json.RawMessage(nil), id...),
 		Error: &rpcError{
@@ -240,26 +245,50 @@ func responseError(id json.RawMessage, code int, class, message string) rpcRespo
 			Data:    rpcErrorData{Class: class},
 		},
 	}
+	if rpcFrameWithinLimit(response) {
+		return response
+	}
+	return rpcResponse{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage("null"),
+		Error: &rpcError{
+			Code:    rpcInvalidRequest,
+			Message: "request identifier exceeds safe output limit",
+			Data:    rpcErrorData{Class: ErrorPolicy},
+		},
+	}
 }
 
 func boundedUpstreamResponse(response rpcResponse, id json.RawMessage) rpcResponse {
 	response.JSONRPC = "2.0"
 	response.ID = append(json.RawMessage(nil), id...)
 	if response.Error == nil {
-		if len(response.Result) > maxRPCFrameBytes-rpcDiagnosticBytes {
-			return responseError(id, rpcUpstreamError, ErrorBrowser, "upstream response exceeded safe output limit")
+		if rpcFrameWithinLimit(response) {
+			return response
 		}
-		return response
+		return responseError(id, rpcUpstreamError, ErrorBrowser, "upstream response exceeded safe output limit")
 	}
 	response.Error.Message = boundedRPCString(response.Error.Message)
 	response.Error.Data = rpcErrorData{Class: ErrorBrowser}
-	if len(mustMarshalRPC(response)) > maxRPCFrameBytes {
+	if !rpcFrameWithinLimit(response) {
 		return responseError(id, rpcUpstreamError, ErrorBrowser, "upstream error exceeded safe output limit")
 	}
 	return response
 }
 
-func mustMarshalRPC(value any) []byte {
-	data, _ := json.Marshal(value)
-	return data
+func boundedRPCResponse(response rpcResponse) rpcResponse {
+	if rpcFrameWithinLimit(response) {
+		return response
+	}
+	return responseError(
+		response.ID,
+		rpcUpstreamError,
+		ErrorBrowser,
+		"JSON-RPC response exceeded safe output limit",
+	)
+}
+
+func rpcFrameWithinLimit(value any) bool {
+	data, err := json.Marshal(value)
+	return err == nil && len(data) <= maxRPCFrameBytes
 }

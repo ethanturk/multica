@@ -30,6 +30,12 @@ func (b *lockedBuffer) String() string {
 	return b.buffer.String()
 }
 
+func (b *lockedBuffer) Len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Len()
+}
+
 type fakeProxySession struct {
 	mu      sync.Mutex
 	actions int
@@ -477,6 +483,207 @@ func TestProxyRejectsFrameAboveTwoMiB(t *testing.T) {
 	}
 }
 
+func TestRPCIDBoundLeavesRoomForClassifiedErrorAtExactBoundary(t *testing.T) {
+	maxIDBytes := maxRPCFrameBytes - rpcDiagnosticBytes - 1024
+	exactID := json.RawMessage(`"` + strings.Repeat("i", maxIDBytes-2) + `"`)
+	request := []byte(`{"jsonrpc":"2.0","id":` + string(exactID) + `,"method":"ping"}`)
+	decoded, err := decodeRPCRequest(request)
+	if err != nil {
+		t.Fatalf("exact-boundary ID rejected: %v", err)
+	}
+	if string(decoded.ID) != string(exactID) {
+		t.Fatal("exact-boundary ID changed")
+	}
+	if _, err := marshalRPCFrame(responseError(
+		exactID,
+		rpcUpstreamError,
+		ErrorBrowser,
+		strings.Repeat("x", rpcDiagnosticBytes+1),
+	)); err != nil {
+		t.Fatalf("classified error with exact-boundary ID exceeded output frame: %v", err)
+	}
+
+	tooLargeID := json.RawMessage(`"` + strings.Repeat("i", maxIDBytes-1) + `"`)
+	request = []byte(`{"jsonrpc":"2.0","id":` + string(tooLargeID) + `,"method":"ping"}`)
+	if _, err := decodeRPCRequest(request); !errors.Is(err, errInvalidRPCRequest) {
+		t.Fatalf("ID one byte above boundary error = %v, want invalid request", err)
+	}
+}
+
+func TestBoundedUpstreamResponseUsesCompleteEnvelopeAtMaxAndMaxPlusOne(t *testing.T) {
+	id := json.RawMessage(`"boundary"`)
+	base := rpcResponse{JSONRPC: "2.0", ID: id, Result: json.RawMessage(`""`)}
+	baseBytes := mustJSON(t, base)
+	exactResult := json.RawMessage(`"` +
+		strings.Repeat("r", maxRPCFrameBytes-len(baseBytes)) + `"`)
+	exact := rpcResponse{JSONRPC: "2.0", ID: id, Result: exactResult}
+	if got := len(mustJSON(t, exact)); got != maxRPCFrameBytes {
+		t.Fatalf("test envelope size = %d, want %d", got, maxRPCFrameBytes)
+	}
+	bounded := boundedUpstreamResponse(exact, id)
+	if bounded.Error != nil || string(bounded.Result) != string(exactResult) {
+		t.Fatalf("exact-boundary response changed: %#v", bounded.Error)
+	}
+
+	over := rpcResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result: json.RawMessage(`"` +
+			strings.Repeat("r", maxRPCFrameBytes-len(baseBytes)+1) + `"`),
+	}
+	if got := len(mustJSON(t, over)); got != maxRPCFrameBytes+1 {
+		t.Fatalf("test envelope size = %d, want %d", got, maxRPCFrameBytes+1)
+	}
+	bounded = boundedUpstreamResponse(over, id)
+	if bounded.Error == nil || bounded.Error.Code != rpcUpstreamError ||
+		bounded.Error.Data.Class != ErrorBrowser {
+		t.Fatalf("max+1 response = %#v, want classified bounded error", bounded)
+	}
+	if _, err := marshalRPCFrame(bounded); err != nil {
+		t.Fatalf("bounded max+1 response still exceeded output frame: %v", err)
+	}
+}
+
+func TestResponseErrorFallsBackToBoundedNullIDWhenEchoCannotFit(t *testing.T) {
+	hugeID := json.RawMessage(`"` +
+		strings.Repeat("i", maxRPCFrameBytes-128) + `"`)
+	response := responseError(
+		hugeID,
+		rpcUpstreamError,
+		ErrorBrowser,
+		strings.Repeat("x", rpcDiagnosticBytes+1),
+	)
+	code, class := 0, ""
+	if response.Error != nil {
+		code, class = response.Error.Code, response.Error.Data.Class
+	}
+	if string(response.ID) != "null" || response.Error == nil ||
+		response.Error.Code != rpcInvalidRequest ||
+		response.Error.Data.Class != ErrorPolicy {
+		t.Fatalf(
+			"un echoable ID response: id bytes=%d code=%d class=%q, want null-ID invalid request",
+			len(response.ID),
+			code,
+			class,
+		)
+	}
+	if _, err := marshalRPCFrame(response); err != nil {
+		t.Fatalf("null-ID fallback exceeded output frame: %v", err)
+	}
+}
+
+func TestProxyRejectsOversizeIDEchoAndContinues(t *testing.T) {
+	maxIDBytes := maxRPCFrameBytes - rpcDiagnosticBytes - 1024
+	tooLargeID := `"` + strings.Repeat("i", maxIDBytes-1) + `"`
+	upstream := newFakeProxyUpstream()
+	upstream.responses["ping"] = rpcResponse{
+		JSONRPC: "2.0",
+		Result: json.RawMessage(`{"payload":"` +
+			strings.Repeat("r", rpcDiagnosticBytes+2048) + `"}`),
+	}
+	input := `{"jsonrpc":"2.0","id":` + tooLargeID + `,"method":"ping"}` + "\n" +
+		`{"jsonrpc":"2.0","id":2,"method":"ping"}` + "\n"
+	responses := runProxy(t, &fakeProxySession{}, upstream, nil, input)
+	if len(responses) != 2 {
+		t.Fatalf("response count = %d, want invalid ID response plus next response", len(responses))
+	}
+	if responses[0].Error == nil || responses[0].Error.Code != rpcInvalidRequest ||
+		responses[0].Error.Data.Class != ErrorPolicy || string(responses[0].ID) != "null" {
+		t.Fatalf("oversize ID response = %#v, want bounded null-ID invalid request", responses[0])
+	}
+	if responses[1].Error != nil || string(responses[1].ID) != "2" {
+		t.Fatalf("response after oversize ID = %#v, want successful continuation", responses[1])
+	}
+	if calls := upstream.calls(); len(calls) != 1 || string(calls[0].ID) != "2" {
+		t.Fatalf("upstream calls = %#v, want only bounded-ID request", calls)
+	}
+}
+
+func TestProxyBoundsLocallyBuiltResponseAndContinues(t *testing.T) {
+	id := json.RawMessage("1")
+	baseResult := `{"tools":[{"name":"browser_click","description":"","inputSchema":{"type":"object"}}]}`
+	baseResponse := rpcResponse{JSONRPC: "2.0", ID: id, Result: json.RawMessage(baseResult)}
+	paddingBytes := maxRPCFrameBytes - 64 - len(mustJSON(t, baseResponse))
+	if paddingBytes <= 0 {
+		t.Fatal("test response envelope leaves no description padding")
+	}
+	result := `{"tools":[{"name":"browser_click","description":"` +
+		strings.Repeat("d", paddingBytes) +
+		`","inputSchema":{"type":"object"}}]}`
+	upstreamResponse := rpcResponse{JSONRPC: "2.0", ID: id, Result: json.RawMessage(result)}
+	if got := len(mustJSON(t, upstreamResponse)); got != maxRPCFrameBytes-64 {
+		t.Fatalf("upstream test response size = %d, want %d", got, maxRPCFrameBytes-64)
+	}
+
+	upstream := newFakeProxyUpstream()
+	upstream.responses["tools/list"] = upstreamResponse
+	input := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}` + "\n" +
+		`{"jsonrpc":"2.0","id":2,"method":"ping"}` + "\n"
+	responses := runProxy(t, &fakeProxySession{}, upstream, nil, input)
+	if len(responses) != 2 {
+		t.Fatalf("response count = %d, want bounded list error plus next response", len(responses))
+	}
+	if responses[0].Error == nil || responses[0].Error.Code != rpcUpstreamError ||
+		responses[0].Error.Data.Class != ErrorBrowser {
+		t.Fatalf("oversize local response = %#v, want classified bounded error", responses[0])
+	}
+	if responses[1].Error != nil || string(responses[1].ID) != "2" {
+		t.Fatalf("response after oversize local response = %#v, want successful continuation", responses[1])
+	}
+}
+
+func TestProxyForwardsExactMaxNotificationDropsMaxPlusOneAndContinues(t *testing.T) {
+	upstream := newFakeProxyUpstream()
+	clientReader, clientWriter := io.Pipe()
+	var output lockedBuffer
+	proxy := newProxy(&fakeProxySession{}, upstream, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	done := make(chan error, 1)
+	go func() {
+		done <- proxy.Serve(context.Background(), clientReader, &output)
+	}()
+
+	exact := notificationWithEncodedSize(t, "notifications/exact", maxRPCFrameBytes)
+	upstream.events <- exact
+	deadline := time.Now().Add(time.Second)
+	for output.Len() < maxRPCFrameBytes+1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if output.Len() < maxRPCFrameBytes+1 {
+		t.Fatalf("exact-max notification output bytes = %d, want at least %d", output.Len(), maxRPCFrameBytes+1)
+	}
+
+	upstream.events <- notificationWithEncodedSize(t, "notifications/oversized", maxRPCFrameBytes+1)
+	small := rpcRequest{
+		JSONRPC: "2.0",
+		Method:  "notifications/after-oversize",
+		Params:  json.RawMessage(`{}`),
+	}
+	select {
+	case upstream.events <- small:
+	case err := <-done:
+		t.Fatalf("oversize notification terminated proxy: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("proxy did not continue after oversize notification")
+	}
+	deadline = time.Now().Add(time.Second)
+	for !strings.Contains(output.String(), "notifications/after-oversize") &&
+		time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !strings.Contains(output.String(), "notifications/after-oversize") {
+		t.Fatal("small notification after oversize was not forwarded")
+	}
+	if strings.Contains(output.String(), "notifications/oversized") {
+		t.Fatal("max+1 notification reached client")
+	}
+
+	_ = clientWriter.Close()
+	upstream.closeEvents()
+	if err := <-done; err != nil {
+		t.Fatalf("Serve() error = %v", err)
+	}
+}
+
 func TestProxyBoundsAndClassifiesUpstreamErrorsWithoutChangingID(t *testing.T) {
 	upstream := newFakeProxyUpstream()
 	upstream.responses["tools/call"] = rpcResponse{
@@ -500,6 +707,24 @@ func TestProxyBoundsAndClassifiesUpstreamErrorsWithoutChangingID(t *testing.T) {
 	if len(responses[0].Error.Message) > rpcDiagnosticBytes+32 {
 		t.Fatalf("error message length = %d, want bounded", len(responses[0].Error.Message))
 	}
+}
+
+func notificationWithEncodedSize(t *testing.T, method string, size int) rpcRequest {
+	t.Helper()
+	base := rpcRequest{
+		JSONRPC: "2.0",
+		Method:  method,
+		Params:  json.RawMessage(`""`),
+	}
+	baseSize := len(mustJSON(t, base))
+	if size < baseSize {
+		t.Fatalf("notification target size %d is below envelope size %d", size, baseSize)
+	}
+	base.Params = json.RawMessage(`"` + strings.Repeat("n", size-baseSize) + `"`)
+	if got := len(mustJSON(t, base)); got != size {
+		t.Fatalf("notification test frame size = %d, want %d", got, size)
+	}
+	return base
 }
 
 func runProxy(

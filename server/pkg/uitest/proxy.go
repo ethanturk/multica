@@ -158,6 +158,12 @@ func (p *Proxy) Serve(ctx context.Context, input io.Reader, output io.Writer) (s
 				events = nil
 				continue
 			}
+			if !rpcFrameWithinLimit(event) {
+				if p.logger != nil {
+					p.logger.Warn("ui-test: dropped oversized upstream notification", "method", event.Method)
+				}
+				continue
+			}
 			if err := writer.write(serveContext, event); err != nil {
 				cancel()
 				return err
@@ -401,6 +407,9 @@ func newOwnedRPCWriter(output io.Writer) *ownedRPCWriter {
 }
 
 func (w *ownedRPCWriter) write(ctx context.Context, value any) error {
+	if response, ok := value.(rpcResponse); ok {
+		value = boundedRPCResponse(response)
+	}
 	frame, err := marshalRPCFrame(value)
 	if err != nil {
 		return err
