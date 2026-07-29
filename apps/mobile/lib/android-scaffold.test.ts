@@ -57,11 +57,11 @@ describe("android scaffold", () => {
 
   it("re-syncs the Android native project before every variant build", () => {
     expect(mobilePackage.scripts).toMatchObject({
-      "android:sync": "expo prebuild --platform android --no-install",
+      "android:sync": "expo prebuild --clean --platform android --no-install",
       "android:sync:staging":
-        "dotenv -e .env.staging -- cross-env APP_ENV=staging expo prebuild --platform android --no-install",
+        "dotenv -e .env.staging -- cross-env APP_ENV=staging expo prebuild --clean --platform android --no-install",
       "android:sync:prod":
-        "dotenv -e .env.production -- cross-env APP_ENV=production expo prebuild --platform android --no-install",
+        "dotenv -e .env.production -- cross-env APP_ENV=production expo prebuild --clean --platform android --no-install",
       android: "pnpm android:sync && expo run:android",
       "android:staging":
         "pnpm android:sync:staging && dotenv -e .env.staging -- cross-env APP_ENV=staging expo run:android",
