@@ -225,6 +225,41 @@ func TestUIRuntimeLockReleaseDoesNotRemoveSuccessor(t *testing.T) {
 	}
 }
 
+func TestUIRuntimeLockRemovesMarkerBeforeReleasingHandleOwnership(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	root := filepath.Join(t.TempDir(), "ui-test")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manager := testManager(root, now, nil)
+	lockCalls := 0
+	unlockCalls := 0
+	manager.lockFile = func(*os.File) (bool, error) {
+		lockCalls++
+		return true, nil
+	}
+	manager.unlockFile = func(*os.File) error {
+		unlockCalls++
+		if _, err := os.Stat(filepath.Join(root, "install.lock")); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("install marker still exists when handle ownership is released: %v", err)
+		}
+		return nil
+	}
+
+	unlock, err := manager.acquireLock()
+	if err != nil {
+		t.Fatalf("acquireLock() error = %v", err)
+	}
+	unlock()
+
+	if lockCalls != 1 {
+		t.Fatalf("handle lock calls = %d, want 1", lockCalls)
+	}
+	if unlockCalls != 1 {
+		t.Fatalf("handle unlock calls = %d, want 1", unlockCalls)
+	}
+}
+
 func TestUIRuntimeInstallPreservesReadyRuntime(t *testing.T) {
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 	root := filepath.Join(t.TempDir(), "ui-test")
@@ -538,10 +573,12 @@ func testManager(root string, now time.Time, runner CommandRunner) *Manager {
 				return "", errors.New("missing")
 			}
 		},
-		run:      runner,
-		rename:   os.Rename,
-		newToken: randomToken,
-		pid:      123,
+		run:        runner,
+		rename:     os.Rename,
+		newToken:   randomToken,
+		lockFile:   tryExclusiveFileLock,
+		unlockFile: unlockExclusiveFile,
+		pid:        123,
 	}
 }
 

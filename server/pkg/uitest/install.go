@@ -31,24 +31,28 @@ type CommandResult struct {
 type CommandRunner func(context.Context, Command) (CommandResult, error)
 
 type Manager struct {
-	root     string
-	now      func() time.Time
-	lookPath func(string) (string, error)
-	run      CommandRunner
-	rename   func(string, string) error
-	newToken func() (string, error)
-	pid      int
+	root       string
+	now        func() time.Time
+	lookPath   func(string) (string, error)
+	run        CommandRunner
+	rename     func(string, string) error
+	newToken   func() (string, error)
+	lockFile   func(*os.File) (bool, error)
+	unlockFile func(*os.File) error
+	pid        int
 }
 
 func NewManager(root string) *Manager {
 	return &Manager{
-		root:     root,
-		now:      time.Now,
-		lookPath: exec.LookPath,
-		run:      runCommand,
-		rename:   os.Rename,
-		newToken: randomToken,
-		pid:      os.Getpid(),
+		root:       root,
+		now:        time.Now,
+		lookPath:   exec.LookPath,
+		run:        runCommand,
+		rename:     os.Rename,
+		newToken:   randomToken,
+		lockFile:   tryExclusiveFileLock,
+		unlockFile: unlockExclusiveFile,
+		pid:        os.Getpid(),
 	}
 }
 
@@ -154,6 +158,27 @@ func (m *Manager) acquireLock() (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("create install marker token: %w", err)
 	}
+
+	// The stable guard pathname is never unlinked. Its handle lock serializes
+	// every install.lock read, replacement, and removal across processes.
+	guard, err := os.OpenFile(lockPath+".guard", os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open install lock guard: %w", err)
+	}
+	locked, err := m.lockFile(guard)
+	if err != nil {
+		_ = guard.Close()
+		return nil, fmt.Errorf("lock install guard: %w", err)
+	}
+	if !locked {
+		_ = guard.Close()
+		return nil, fmt.Errorf("UI test runtime installation already in progress")
+	}
+	releaseGuard := func() {
+		_ = m.unlockFile(guard)
+		_ = guard.Close()
+	}
+
 	for attempt := 0; attempt < 2; attempt++ {
 		file, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err == nil {
@@ -161,31 +186,41 @@ func (m *Manager) acquireLock() (func(), error) {
 			encodeErr := json.NewEncoder(file).Encode(marker)
 			closeErr := file.Close()
 			if encodeErr != nil || closeErr != nil {
-				_, _ = removeLockIfOwned(lockPath, marker.Token)
+				_, _ = removeOwnedMarker(lockPath, marker.Token)
+				releaseGuard()
 				return nil, errors.Join(encodeErr, closeErr)
 			}
-			return func() { _, _ = removeLockIfOwned(lockPath, marker.Token) }, nil
+			return func() {
+				_, _ = removeOwnedMarker(lockPath, marker.Token)
+				releaseGuard()
+			}, nil
 		}
 		if !errors.Is(err, os.ErrExist) {
+			releaseGuard()
 			return nil, fmt.Errorf("create install marker: %w", err)
 		}
 		data, readErr := os.ReadFile(lockPath)
 		var marker installMarker
 		if readErr != nil || json.Unmarshal(data, &marker) != nil || marker.StartedAt.IsZero() || marker.Token == "" {
+			releaseGuard()
 			return nil, fmt.Errorf("UI test runtime installation already in progress")
 		}
 		age := m.now().Sub(marker.StartedAt)
 		if age >= 0 && age <= lockMaxAge {
+			releaseGuard()
 			return nil, fmt.Errorf("UI test runtime installation already in progress")
 		}
-		removed, err := removeLockIfOwned(lockPath, marker.Token)
+		removed, err := removeOwnedMarker(lockPath, marker.Token)
 		if err != nil {
+			releaseGuard()
 			return nil, fmt.Errorf("remove stale install marker: %w", err)
 		}
 		if !removed {
+			releaseGuard()
 			return nil, fmt.Errorf("UI test runtime installation already in progress")
 		}
 	}
+	releaseGuard()
 	return nil, fmt.Errorf("UI test runtime installation already in progress")
 }
 
@@ -197,7 +232,9 @@ func randomToken() (string, error) {
 	return hex.EncodeToString(value), nil
 }
 
-func removeLockIfOwned(lockPath, token string) (bool, error) {
+// removeOwnedMarker must only be called while install.lock.guard is held, so
+// no cooperating successor can replace the marker between this read and unlink.
+func removeOwnedMarker(lockPath, token string) (bool, error) {
 	data, err := os.ReadFile(lockPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
