@@ -118,7 +118,7 @@ func (c *platformProcessController) abort(cmd *exec.Cmd, grace time.Duration) er
 	if err := c.terminate(grace); err != nil {
 		abortErr = errors.Join(abortErr, err)
 	}
-	if cmd.Process != nil && platformProcessAlive(cmd.Process.Pid) {
+	if cmd != nil && cmd.Process != nil && platformProcessAlive(cmd.Process.Pid) {
 		if err := cmd.Process.Kill(); err != nil {
 			abortErr = errors.Join(abortErr, fmt.Errorf("kill unowned child process: %w", err))
 		}

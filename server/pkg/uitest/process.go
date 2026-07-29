@@ -27,23 +27,19 @@ type processRecord struct {
 	StartedAt time.Time `json:"started_at"`
 }
 
-type processTreeController interface {
-	terminate(time.Duration) error
-	close() error
-}
-
 type processStartController interface {
-	processTreeController
 	attach(*exec.Cmd) error
 	resume(*exec.Cmd) error
 	abort(*exec.Cmd, time.Duration) error
+	close() error
 }
 
 type managedProcess struct {
-	cmd        *exec.Cmd
-	controller processTreeController
-	record     processRecord
-	registry   *processRegistry
+	cmd         *exec.Cmd
+	controller  processStartController
+	record      processRecord
+	registry    *processRegistry
+	registryKey int
 
 	ownershipMu       sync.Mutex
 	ownershipReleased bool
@@ -53,13 +49,14 @@ type managedProcess struct {
 }
 
 type processRegistry struct {
-	mu        sync.Mutex
-	taskID    string
-	stateDir  string
-	statePath string
-	logger    *slog.Logger
-	processes map[int]*managedProcess
-	closed    bool
+	mu           sync.Mutex
+	taskID       string
+	stateDir     string
+	statePath    string
+	logger       *slog.Logger
+	processes    map[int]*managedProcess
+	nextOwnerKey int
+	closed       bool
 }
 
 var liveProcessRegistries sync.Map
@@ -101,26 +98,33 @@ func startManagedProcess(registry *processRegistry, kind, command, workDir strin
 		_ = logFile.Close()
 		return nil, fmt.Errorf("create %s process owner: %w", kind, err)
 	}
-	if err := runOwnedProcessStart(
-		cmd.Start,
-		func() error { return controller.attach(cmd) },
-		func() error { return controller.resume(cmd) },
-		func() error {
-			if err := controller.abort(cmd, processShutdownGrace); err != nil {
-				return err
-			}
-			waitErr := cmd.Wait()
-			closeErr := controller.close()
-			return errors.Join(waitErr, closeErr)
-		},
-	); err != nil {
-		_ = logFile.Close()
-		if cmd.Process == nil {
-			_ = controller.close()
-		}
-		return nil, fmt.Errorf("start and own %s process tree: %w", kind, err)
-	}
+	process, startErr := startManagedCommand(registry, kind, cmd, controller)
 	_ = logFile.Close()
+	if startErr != nil {
+		return nil, fmt.Errorf("start and own %s process tree: %w", kind, startErr)
+	}
+	return process, nil
+}
+
+func startManagedCommand(
+	registry *processRegistry,
+	kind string,
+	cmd *exec.Cmd,
+	controller processStartController,
+) (*managedProcess, error) {
+	if err := cmd.Start(); err != nil {
+		done := make(chan struct{})
+		close(done)
+		process := &managedProcess{
+			cmd: cmd, controller: controller, registry: registry, done: done,
+			record: processRecord{
+				TaskID: taskIDForRegistry(registry), ProxyPID: os.Getpid(),
+				Kind: kind, StartedAt: time.Now().UTC(),
+			},
+		}
+		persistErr := registry.add(process)
+		return nil, managedCommandFailure(fmt.Errorf("start process: %w", err), persistErr, process)
+	}
 
 	process := &managedProcess{
 		cmd: cmd, controller: controller, registry: registry, done: make(chan struct{}),
@@ -131,14 +135,30 @@ func startManagedProcess(registry *processRegistry, kind, command, workDir strin
 		},
 	}
 	if err := registry.add(process); err != nil {
-		abortErr := controller.abort(cmd, processShutdownGrace)
-		if abortErr == nil {
-			abortErr = errors.Join(cmd.Wait(), controller.close())
-		}
-		return nil, errors.Join(fmt.Errorf("persist %s process ownership: %w", kind, err), abortErr)
+		go process.reap()
+		return nil, managedCommandFailure(fmt.Errorf("persist process ownership: %w", err), nil, process)
+	}
+	if err := controller.attach(cmd); err != nil {
+		go process.reap()
+		return nil, managedCommandFailure(fmt.Errorf("attach process owner: %w", err), nil, process)
+	}
+	if err := controller.resume(cmd); err != nil {
+		go process.reap()
+		return nil, managedCommandFailure(fmt.Errorf("resume owned process: %w", err), nil, process)
 	}
 	go process.reap()
 	return process, nil
+}
+
+func managedCommandFailure(primaryErr, persistErr error, process *managedProcess) error {
+	if persistErr != nil {
+		persistErr = fmt.Errorf("persist process ownership: %w", persistErr)
+	}
+	cleanupErr := process.stop()
+	if cleanupErr != nil {
+		cleanupErr = fmt.Errorf("cleanup failed process owner: %w", cleanupErr)
+	}
+	return errors.Join(primaryErr, persistErr, cleanupErr)
 }
 
 func runOwnedProcessStart(start, attach, resume, abort func() error) error {
@@ -172,7 +192,7 @@ func (p *managedProcess) releaseOwnership() error {
 		p.ownershipMu.Unlock()
 		return nil
 	}
-	if err := p.controller.terminate(processShutdownGrace); err != nil {
+	if err := p.controller.abort(p.cmd, processShutdownGrace); err != nil {
 		p.ownershipErr = err
 		p.ownershipMu.Unlock()
 		return err
@@ -185,7 +205,7 @@ func (p *managedProcess) releaseOwnership() error {
 	p.ownershipReleased = true
 	p.ownershipErr = nil
 	p.ownershipMu.Unlock()
-	p.registry.remove(p.record.ChildPID)
+	p.registry.remove(p.registryKey)
 	return nil
 }
 
@@ -214,9 +234,14 @@ func (r *processRegistry) add(process *managedProcess) error {
 	if r.closed {
 		return errors.New("process registry is closed")
 	}
-	r.processes[process.record.ChildPID] = process
+	key := process.record.ChildPID
+	if key <= 0 || r.processes[key] != nil {
+		r.nextOwnerKey--
+		key = r.nextOwnerKey
+	}
+	process.registryKey = key
+	r.processes[key] = process
 	if err := r.writeLocked(); err != nil {
-		delete(r.processes, process.record.ChildPID)
 		return err
 	}
 	return nil

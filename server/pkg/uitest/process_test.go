@@ -355,11 +355,271 @@ func (c *retryProcessController) terminate(time.Duration) error {
 	return c.terminateErr
 }
 
+func (c *retryProcessController) attach(*exec.Cmd) error { return nil }
+
+func (c *retryProcessController) resume(*exec.Cmd) error { return nil }
+
+func (c *retryProcessController) abort(*exec.Cmd, time.Duration) error {
+	return c.terminate(0)
+}
+
 func (c *retryProcessController) close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.closes++
 	return c.closeErr
+}
+
+type startFailureController struct {
+	mu        sync.Mutex
+	attachErr error
+	resumeErr error
+	abortErr  error
+	closeErr  error
+}
+
+func (c *startFailureController) attach(*exec.Cmd) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.attachErr
+}
+
+func (c *startFailureController) resume(*exec.Cmd) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.resumeErr
+}
+
+func (c *startFailureController) abort(cmd *exec.Cmd, _ time.Duration) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.abortErr != nil {
+		return c.abortErr
+	}
+	if cmd != nil && cmd.Process != nil {
+		if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *startFailureController) close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closeErr
+}
+
+func TestManagedCommandRetainsOwnerWhenFailureCleanupFails(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		command     func(*testing.T) *exec.Cmd
+		controller  func() *startFailureController
+		wantPrimary func(*startFailureController) error
+		wantError   func(*startFailureController) error
+	}{
+		{
+			name: "start failure and controller close failure",
+			command: func(t *testing.T) *exec.Cmd {
+				return exec.Command(filepath.Join(t.TempDir(), "missing-ui-test-command"))
+			},
+			controller: func() *startFailureController {
+				return &startFailureController{closeErr: errors.New("injected close failure")}
+			},
+			wantError: func(controller *startFailureController) error { return controller.closeErr },
+		},
+		{
+			name:    "attach failure and abort failure",
+			command: newWaitingHelperCommand,
+			controller: func() *startFailureController {
+				return &startFailureController{
+					attachErr: errors.New("injected attach failure"),
+					abortErr:  errors.New("injected abort failure"),
+				}
+			},
+			wantPrimary: func(controller *startFailureController) error { return controller.attachErr },
+			wantError:   func(controller *startFailureController) error { return controller.abortErr },
+		},
+		{
+			name:    "resume failure and abort failure",
+			command: newWaitingHelperCommand,
+			controller: func() *startFailureController {
+				return &startFailureController{
+					resumeErr: errors.New("injected resume failure"),
+					abortErr:  errors.New("injected abort failure"),
+				}
+			},
+			wantPrimary: func(controller *startFailureController) error { return controller.resumeErr },
+			wantError:   func(controller *startFailureController) error { return controller.abortErr },
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			taskID := strings.ReplaceAll(test.name, " ", "-")
+			registry, err := newProcessRegistry(workDir, taskID, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmd := test.command(t)
+			controller := test.controller()
+			t.Cleanup(func() {
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+				liveProcessRegistries.Delete(registry.stateDir)
+			})
+
+			process, err := startManagedCommand(registry, "app", cmd, controller)
+			if process != nil {
+				t.Fatal("startManagedCommand() returned process on lifecycle failure")
+			}
+			if !errors.Is(err, test.wantError(controller)) {
+				t.Fatalf("startManagedCommand() error = %v, want cleanup error", err)
+			}
+			if !strings.Contains(err.Error(), "cleanup failed process owner") {
+				t.Fatalf("startManagedCommand() error = %v, want cleanup failure context", err)
+			}
+			if test.wantPrimary != nil {
+				if primary := test.wantPrimary(controller); !errors.Is(err, primary) {
+					t.Fatalf("startManagedCommand() error = %v, want primary error %v", err, primary)
+				}
+			} else {
+				var pathErr *os.PathError
+				if !errors.As(err, &pathErr) {
+					t.Fatalf("startManagedCommand() error = %v, want command start path error", err)
+				}
+			}
+			assertRetryableOwner(t, registry)
+			assertPersistedOwner(t, registry, 1)
+			if cmd.Process != nil && !platformProcessAlive(cmd.Process.Pid) {
+				t.Fatal("failed cleanup did not leave process available for retry")
+			}
+
+			controller.mu.Lock()
+			controller.abortErr = nil
+			controller.closeErr = nil
+			controller.mu.Unlock()
+			if err := CleanupTask(workDir, taskID, nil); err != nil {
+				t.Fatalf("CleanupTask() retry error = %v", err)
+			}
+			if _, err := os.Stat(registry.stateDir); !os.IsNotExist(err) {
+				t.Fatalf("metadata remains after retry: %v", err)
+			}
+		})
+	}
+}
+
+func TestManagedCommandKeepsDistinctOwnersForMultipleFailedStarts(t *testing.T) {
+	workDir := t.TempDir()
+	registry, err := newProcessRegistry(workDir, "distinct-failed-starts", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controllers := make([]*startFailureController, 2)
+	for index := range controllers {
+		controller := &startFailureController{closeErr: errors.New("injected close failure")}
+		controllers[index] = controller
+		cmd := exec.Command(filepath.Join(t.TempDir(), "missing-ui-test-command"))
+		if _, err := startManagedCommand(registry, "app", cmd, controller); !errors.Is(err, controller.closeErr) {
+			t.Fatalf("startManagedCommand() error = %v, want close failure", err)
+		}
+	}
+	assertRetryableOwnerCount(t, registry, 2)
+	assertPersistedOwner(t, registry, 2)
+
+	for _, controller := range controllers {
+		controller.mu.Lock()
+		controller.closeErr = nil
+		controller.mu.Unlock()
+	}
+	if err := CleanupTask(workDir, registry.taskID, nil); err != nil {
+		t.Fatalf("CleanupTask() retry error = %v", err)
+	}
+}
+
+func TestManagedCommandRetainsOwnerWhenPersistenceAndAbortFail(t *testing.T) {
+	workDir := t.TempDir()
+	registry, err := newProcessRegistry(workDir, "persist-abort-failure", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(registry.statePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := newWaitingHelperCommand(t)
+	controller := &startFailureController{abortErr: errors.New("injected abort failure")}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		liveProcessRegistries.Delete(registry.stateDir)
+	})
+
+	process, err := startManagedCommand(registry, "app", cmd, controller)
+	if process != nil {
+		t.Fatal("startManagedCommand() returned process after persistence failure")
+	}
+	if err == nil || !errors.Is(err, controller.abortErr) {
+		t.Fatalf("startManagedCommand() error = %v, want persistence and abort failures", err)
+	}
+	if !strings.Contains(err.Error(), "persist process ownership") ||
+		!strings.Contains(err.Error(), "cleanup failed process owner") {
+		t.Fatalf("startManagedCommand() error = %v, want persistence and cleanup context", err)
+	}
+	assertRetryableOwner(t, registry)
+	if !platformProcessAlive(cmd.Process.Pid) {
+		t.Fatal("failed cleanup did not leave process available for retry")
+	}
+
+	if err := os.Remove(registry.statePath); err != nil {
+		t.Fatalf("remove injected metadata directory: %v", err)
+	}
+	controller.mu.Lock()
+	controller.abortErr = nil
+	controller.mu.Unlock()
+	if err := CleanupTask(workDir, registry.taskID, nil); err != nil {
+		t.Fatalf("CleanupTask() retry error = %v", err)
+	}
+}
+
+func newWaitingHelperCommand(t *testing.T) *exec.Cmd {
+	return exec.Command(
+		os.Args[0], "-test.run=^TestUITestHelperProcess$", "--",
+		"descendant", filepath.Join(t.TempDir(), "pid"),
+	)
+}
+
+func assertRetryableOwner(t *testing.T, registry *processRegistry) {
+	t.Helper()
+	assertRetryableOwnerCount(t, registry, 1)
+}
+
+func assertRetryableOwnerCount(t *testing.T, registry *processRegistry, want int) {
+	t.Helper()
+	registry.mu.Lock()
+	count := len(registry.processes)
+	registry.mu.Unlock()
+	if count != want {
+		t.Fatalf("retryable process owners = %d, want %d", count, want)
+	}
+	if _, ok := liveProcessRegistries.Load(registry.stateDir); !ok {
+		t.Fatal("retryable owner not reachable through exact-task cleanup")
+	}
+}
+
+func assertPersistedOwner(t *testing.T, registry *processRegistry, want int) {
+	t.Helper()
+	data, err := os.ReadFile(registry.statePath)
+	if err != nil {
+		t.Fatalf("read process metadata: %v", err)
+	}
+	var records []processRecord
+	if err := json.Unmarshal(data, &records); err != nil {
+		t.Fatalf("decode process metadata: %v", err)
+	}
+	if len(records) != want {
+		t.Fatalf("persisted process owners = %d, want %d", len(records), want)
+	}
 }
 
 func TestFailedTerminationRetainsRetryableOwnerAndMetadata(t *testing.T) {
