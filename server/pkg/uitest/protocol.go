@@ -23,6 +23,8 @@ const (
 )
 
 var errRPCFrameTooLarge = errors.New("JSON-RPC frame exceeds 2 MiB")
+var errInvalidRPCRequest = errors.New("invalid JSON-RPC request")
+var errMalformedRPCJSON = errors.New("malformed JSON-RPC JSON")
 
 type rpcRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -58,6 +60,102 @@ type toolDescriptor struct {
 type toolCallParams struct {
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments,omitempty"`
+}
+
+func decodeRPCRequest(frame []byte) (rpcRequest, error) {
+	if !json.Valid(frame) {
+		return rpcRequest{}, errMalformedRPCJSON
+	}
+	members, err := decodeJSONObject(frame)
+	if err != nil {
+		return rpcRequest{}, errInvalidRPCRequest
+	}
+	for name := range members {
+		switch name {
+		case "jsonrpc", "id", "method", "params":
+		default:
+			return rpcRequest{}, errInvalidRPCRequest
+		}
+	}
+	var request rpcRequest
+	if err := json.Unmarshal(members["jsonrpc"], &request.JSONRPC); err != nil ||
+		request.JSONRPC != "2.0" {
+		return rpcRequest{}, errInvalidRPCRequest
+	}
+	if err := json.Unmarshal(members["method"], &request.Method); err != nil ||
+		request.Method == "" {
+		return rpcRequest{}, errInvalidRPCRequest
+	}
+	if id, ok := members["id"]; ok {
+		if !validRPCID(id) {
+			return rpcRequest{}, errInvalidRPCRequest
+		}
+		request.ID = append(json.RawMessage(nil), id...)
+	}
+	if params, ok := members["params"]; ok {
+		trimmed := bytes.TrimSpace(params)
+		if len(trimmed) == 0 || (trimmed[0] != '{' && trimmed[0] != '[') {
+			return rpcRequest{}, errInvalidRPCRequest
+		}
+		request.Params = append(json.RawMessage(nil), params...)
+	}
+	return request, nil
+}
+
+func decodeJSONObject(raw []byte) (map[string]json.RawMessage, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return nil, errInvalidRPCRequest
+	}
+	members := make(map[string]json.RawMessage)
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, errInvalidRPCRequest
+		}
+		name, ok := token.(string)
+		if !ok {
+			return nil, errInvalidRPCRequest
+		}
+		if _, duplicate := members[name]; duplicate {
+			return nil, errInvalidRPCRequest
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, errInvalidRPCRequest
+		}
+		members[name] = append(json.RawMessage(nil), value...)
+	}
+	token, err = decoder.Token()
+	if err != nil || token != json.Delim('}') {
+		return nil, errInvalidRPCRequest
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return nil, errInvalidRPCRequest
+	}
+	return members, nil
+}
+
+func validRPCID(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if bytes.Equal(trimmed, []byte("null")) {
+		return true
+	}
+	if len(trimmed) == 0 {
+		return false
+	}
+	if trimmed[0] == '"' {
+		var value string
+		return json.Unmarshal(trimmed, &value) == nil
+	}
+	var number json.Number
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.UseNumber()
+	if err := decoder.Decode(&number); err != nil {
+		return false
+	}
+	return number.String() != ""
 }
 
 func readRPCFrame(reader *bufio.Reader) ([]byte, error) {
@@ -99,19 +197,27 @@ func readRPCFrame(reader *bufio.Reader) ([]byte, error) {
 }
 
 func writeRPCFrame(writer io.Writer, value any) error {
-	frame, err := json.Marshal(value)
+	frame, err := marshalRPCFrame(value)
 	if err != nil {
-		return fmt.Errorf("encode JSON-RPC frame: %w", err)
+		return err
 	}
-	if len(frame) > maxRPCFrameBytes {
-		return errRPCFrameTooLarge
-	}
-	frame = append(frame, '\n')
 	written, err := writer.Write(frame)
 	if err == nil && written != len(frame) {
 		err = io.ErrShortWrite
 	}
 	return err
+}
+
+func marshalRPCFrame(value any) ([]byte, error) {
+	frame, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("encode JSON-RPC frame: %w", err)
+	}
+	if len(frame) > maxRPCFrameBytes {
+		return nil, errRPCFrameTooLarge
+	}
+	frame = append(frame, '\n')
+	return frame, nil
 }
 
 func boundedRPCString(value string) string {

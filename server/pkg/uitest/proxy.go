@@ -42,12 +42,15 @@ const (
 
 type browserActionSession interface {
 	RunBrowserAction(context.Context, func(context.Context) error) error
+	Close() error
 }
 
 type proxyUpstream interface {
 	request(context.Context, rpcRequest) (rpcResponse, error)
 	notify(context.Context, rpcRequest) error
 	eventStream() <-chan rpcRequest
+	doneStream() <-chan struct{}
+	terminalError() error
 	Close() error
 }
 
@@ -56,13 +59,13 @@ type Proxy struct {
 	upstream proxyUpstream
 	axe      []byte
 	logger   *slog.Logger
-	writeMu  sync.Mutex
 }
 
 type ServeOptions struct {
 	WorkDir     string
 	TaskID      string
 	Runtime     ReadyRuntime
+	RuntimeRoot string
 	Input       io.Reader
 	Output      io.Writer
 	ErrorOutput io.Writer
@@ -90,7 +93,7 @@ func RunServer(ctx context.Context, options ServeOptions) error {
 		return err
 	}
 	defer session.Close()
-	upstream, files, err := startUpstream(session, options.Runtime, logger)
+	upstream, files, err := startUpstream(session, options.Runtime, options.RuntimeRoot, logger)
 	if err != nil {
 		return err
 	}
@@ -117,28 +120,45 @@ type clientFrame struct {
 	err   error
 }
 
-func (p *Proxy) Serve(ctx context.Context, input io.Reader, output io.Writer) error {
+func (p *Proxy) Serve(ctx context.Context, input io.Reader, output io.Writer) (serveErr error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	serveContext, cancel := context.WithCancel(ctx)
-	defer cancel()
+	writer := newOwnedRPCWriter(output)
+	defer func() {
+		cancel()
+		_ = closeWithCause(input, serveErr)
+		writerErr := writer.shutdown(serveErr)
+		upstreamErr := p.upstream.Close()
+		sessionErr := p.session.Close()
+		if serveErr == nil {
+			serveErr = errors.Join(writerErr, upstreamErr, sessionErr)
+		}
+	}()
 
 	frames := make(chan clientFrame)
 	go readClientFrames(serveContext, input, frames)
 	events := p.upstream.eventStream()
+	upstreamDone := p.upstream.doneStream()
 
 	for {
 		select {
 		case <-ctx.Done():
 			cancel()
 			return ctx.Err()
+		case <-upstreamDone:
+			err := p.upstream.terminalError()
+			if err == nil {
+				err = io.EOF
+			}
+			return err
 		case event, ok := <-events:
 			if !ok {
 				events = nil
 				continue
 			}
-			if err := p.write(output, event); err != nil {
+			if err := writer.write(serveContext, event); err != nil {
 				cancel()
 				return err
 			}
@@ -149,7 +169,7 @@ func (p *Proxy) Serve(ctx context.Context, input io.Reader, output io.Writer) er
 			}
 			if item.err != nil {
 				if errors.Is(item.err, errRPCFrameTooLarge) {
-					if err := p.write(output, responseError(nil, rpcInvalidRequest, ErrorPolicy, item.err.Error())); err != nil {
+					if err := writer.write(serveContext, responseError(nil, rpcInvalidRequest, ErrorPolicy, item.err.Error())); err != nil {
 						cancel()
 						return err
 					}
@@ -158,33 +178,36 @@ func (p *Proxy) Serve(ctx context.Context, input io.Reader, output io.Writer) er
 				cancel()
 				return item.err
 			}
-			var request rpcRequest
-			if err := json.Unmarshal(item.frame, &request); err != nil {
-				if err := p.write(output, responseError(nil, rpcParseError, ErrorPolicy, "parse error")); err != nil {
+			request, err := decodeRPCRequest(item.frame)
+			if err != nil {
+				code := rpcInvalidRequest
+				message := "invalid JSON-RPC request"
+				if errors.Is(err, errMalformedRPCJSON) {
+					code = rpcParseError
+					message = "parse error"
+				}
+				if err := writer.write(serveContext, responseError(nil, code, ErrorPolicy, message)); err != nil {
 					cancel()
 					return err
 				}
 				continue
 			}
-			if request.JSONRPC != "2.0" || request.Method == "" {
-				if len(request.ID) != 0 {
-					if err := p.write(output, responseError(request.ID, rpcInvalidRequest, ErrorPolicy, "invalid JSON-RPC request")); err != nil {
-						cancel()
-						return err
-					}
+			isNotification := len(request.ID) == 0
+			if (request.Method == "notifications/initialized") != isNotification {
+				if err := writer.write(serveContext, responseError(nil, rpcInvalidRequest, ErrorPolicy, "invalid request/notification shape")); err != nil {
+					cancel()
+					return err
 				}
 				continue
 			}
-			if len(request.ID) == 0 {
-				if request.Method == "notifications/initialized" {
-					if err := p.upstream.notify(serveContext, request); err != nil && p.logger != nil {
-						p.logger.Warn("ui-test: forward initialized notification failed", "error", err)
-					}
+			if isNotification {
+				if err := p.upstream.notify(serveContext, request); err != nil && p.logger != nil {
+					p.logger.Warn("ui-test: forward initialized notification failed", "error", err)
 				}
 				continue
 			}
 			response := p.route(serveContext, request)
-			if err := p.write(output, response); err != nil {
+			if err := writer.write(serveContext, response); err != nil {
 				cancel()
 				return err
 			}
@@ -250,8 +273,8 @@ func (p *Proxy) listTools(ctx context.Context, request rpcRequest) rpcResponse {
 }
 
 func (p *Proxy) callTool(ctx context.Context, request rpcRequest) rpcResponse {
-	var call toolCallParams
-	if err := decodeSingleJSON(request.Params, &call); err != nil || call.Name == "" {
+	call, err := decodeToolCall(request.Params)
+	if err != nil {
 		return responseError(request.ID, rpcInvalidParams, ErrorPolicy, "invalid tools/call parameters")
 	}
 	if call.Name == accessibilityScanTool.Name {
@@ -270,16 +293,31 @@ func (p *Proxy) callTool(ctx context.Context, request rpcRequest) rpcResponse {
 		return responseError(request.ID, rpcMethodNotFound, ErrorPolicy, "tool is not permitted: "+call.Name)
 	}
 	if call.Name == "browser_navigate" {
-		var arguments struct {
-			URL string `json:"url"`
-		}
-		if err := decodeSingleJSON(call.Arguments, &arguments); err != nil || arguments.URL == "" {
+		arguments, err := decodeJSONObject(call.Arguments)
+		if err != nil || len(arguments) != 1 {
 			return responseError(request.ID, rpcInvalidParams, ErrorPolicy, "browser_navigate requires a loopback URL")
 		}
-		if _, err := ValidateLoopbackURL(arguments.URL); err != nil {
+		var target string
+		if err := json.Unmarshal(arguments["url"], &target); err != nil || target == "" {
+			return responseError(request.ID, rpcInvalidParams, ErrorPolicy, "browser_navigate requires a loopback URL")
+		}
+		if _, err := ValidateLoopbackURL(target); err != nil {
 			return responseError(request.ID, rpcInvalidParams, ErrorPolicy, err.Error())
 		}
-		return p.runBrowserCall(ctx, request.ID, request, longBrowserCallLimit)
+		safeArguments, err := json.Marshal(map[string]string{"url": target})
+		if err != nil {
+			return responseError(request.ID, rpcInternalError, ErrorBrowser, err.Error())
+		}
+		safeParams, err := json.Marshal(toolCallParams{
+			Name:      "browser_navigate",
+			Arguments: safeArguments,
+		})
+		if err != nil {
+			return responseError(request.ID, rpcInternalError, ErrorBrowser, err.Error())
+		}
+		sanitized := request
+		sanitized.Params = safeParams
+		return p.runBrowserCall(ctx, request.ID, sanitized, longBrowserCallLimit)
 	}
 	return p.runBrowserCall(ctx, request.ID, request, defaultBrowserCallLimit)
 }
@@ -327,33 +365,142 @@ func (p *Proxy) forward(ctx context.Context, request rpcRequest, limit time.Dura
 	return boundedUpstreamResponse(response, request.ID)
 }
 
-func (p *Proxy) write(output io.Writer, value any) error {
-	p.writeMu.Lock()
-	defer p.writeMu.Unlock()
-	return writeRPCFrame(output, value)
-}
-
 func emptyArguments(raw json.RawMessage) bool {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return true
 	}
-	var arguments map[string]json.RawMessage
-	return decodeSingleJSON(raw, &arguments) == nil && len(arguments) == 0
+	arguments, err := decodeJSONObject(raw)
+	return err == nil && len(arguments) == 0
 }
 
-func decodeSingleJSON(raw json.RawMessage, destination any) error {
+type outboundRPCFrame struct {
+	data   []byte
+	result chan error
+}
+
+type ownedRPCWriter struct {
+	output io.Writer
+	queue  chan outboundRPCFrame
+	stop   chan struct{}
+	done   chan struct{}
+
+	stopOnce sync.Once
+	mu       sync.Mutex
+	err      error
+}
+
+func newOwnedRPCWriter(output io.Writer) *ownedRPCWriter {
+	writer := &ownedRPCWriter{
+		output: output,
+		queue:  make(chan outboundRPCFrame, upstreamNotificationBuffer),
+		stop:   make(chan struct{}),
+		done:   make(chan struct{}),
+	}
+	go writer.run()
+	return writer
+}
+
+func (w *ownedRPCWriter) write(ctx context.Context, value any) error {
+	frame, err := marshalRPCFrame(value)
+	if err != nil {
+		return err
+	}
+	item := outboundRPCFrame{data: frame, result: make(chan error, 1)}
+	select {
+	case w.queue <- item:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-w.done:
+		return w.terminalError()
+	}
+	select {
+	case err := <-item.result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-w.done:
+		return w.terminalError()
+	}
+}
+
+func (w *ownedRPCWriter) run() {
+	defer close(w.done)
+	for {
+		select {
+		case <-w.stop:
+			return
+		case item := <-w.queue:
+			written, err := w.output.Write(item.data)
+			if err == nil && written != len(item.data) {
+				err = io.ErrShortWrite
+			}
+			if err != nil {
+				w.mu.Lock()
+				w.err = err
+				w.mu.Unlock()
+			}
+			item.result <- err
+			if err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (w *ownedRPCWriter) shutdown(cause error) error {
+	w.stopOnce.Do(func() {
+		close(w.stop)
+	})
+	closeErr := closeWithCause(w.output, cause)
+	if _, closable := w.output.(io.Closer); closable {
+		<-w.done
+	} else {
+		select {
+		case <-w.done:
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	if cause != nil {
+		return nil
+	}
+	return errors.Join(closeErr, w.terminalError())
+}
+
+func (w *ownedRPCWriter) terminalError() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.err
+}
+
+func closeWithCause(value any, cause error) error {
+	if closer, ok := value.(interface{ CloseWithError(error) error }); ok {
+		return closer.CloseWithError(cause)
+	}
+	if closer, ok := value.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
+}
+
+func decodeToolCall(raw json.RawMessage) (toolCallParams, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		raw = json.RawMessage("{}")
 	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	if err := decoder.Decode(destination); err != nil {
-		return err
+	members, err := decodeJSONObject(raw)
+	if err != nil {
+		return toolCallParams{}, err
 	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return fmt.Errorf("multiple JSON values")
+	for name := range members {
+		if name != "name" && name != "arguments" {
+			return toolCallParams{}, errInvalidRPCRequest
 		}
-		return err
 	}
-	return nil
+	var call toolCallParams
+	if err := json.Unmarshal(members["name"], &call.Name); err != nil || call.Name == "" {
+		return toolCallParams{}, errInvalidRPCRequest
+	}
+	if arguments, ok := members["arguments"]; ok {
+		call.Arguments = append(json.RawMessage(nil), arguments...)
+	}
+	return call, nil
 }

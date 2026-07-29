@@ -80,7 +80,7 @@ func TestAxeManagedReadIsBoundedAndRejectsChangedFile(t *testing.T) {
 	if err := os.WriteFile(fixture.axePath, []byte("fixed axe"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	files, err := resolveRuntimeFiles(fixture.runtime)
+	files, err := resolveRuntimeFiles(fixture.runtime, fixture.trustedRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,15 +97,20 @@ func TestAxeManagedReadIsBoundedAndRejectsChangedFile(t *testing.T) {
 }
 
 type runtimeFixture struct {
-	runtime  ReadyRuntime
-	manifest readyManifest
-	cliPath  string
-	axePath  string
+	runtime     ReadyRuntime
+	trustedRoot string
+	manifest    readyManifest
+	cliPath     string
+	axePath     string
 }
 
 func newRuntimeFixture(t *testing.T) runtimeFixture {
 	t.Helper()
-	directory := filepath.Join(t.TempDir(), "runtimes", PlaywrightMCPVersion)
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Join(root, "runtimes", PlaywrightMCPVersion)
 	cliPath := filepath.Join(directory, "node_modules", "@playwright", "mcp", "cli.js")
 	axePath := filepath.Join(directory, "node_modules", "axe-core", "axe.min.js")
 	playwrightPath := filepath.Join(directory, "node_modules", ".bin", "playwright")
@@ -115,6 +120,14 @@ func newRuntimeFixture(t *testing.T) runtimeFixture {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(path, []byte("fixture"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for path, version := range map[string]string{
+		filepath.Join(directory, "node_modules", "@playwright", "mcp", "package.json"): PlaywrightMCPVersion,
+		filepath.Join(directory, "node_modules", "axe-core", "package.json"):           AxeCoreVersion,
+	} {
+		if err := os.WriteFile(path, []byte(`{"version":"`+version+`"}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -130,10 +143,11 @@ func newRuntimeFixture(t *testing.T) runtimeFixture {
 	}
 	writeReadyManifest(t, directory, manifest)
 	return runtimeFixture{
-		runtime:  ReadyRuntime{Directory: directory},
-		manifest: manifest,
-		cliPath:  cliPath,
-		axePath:  axePath,
+		runtime:     ReadyRuntime{Directory: directory},
+		trustedRoot: filepath.Dir(filepath.Dir(directory)),
+		manifest:    manifest,
+		cliPath:     cliPath,
+		axePath:     axePath,
 	}
 }
 

@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -28,11 +30,18 @@ func TestUITestIntegrationApplication(t *testing.T) {
 		_, _ = io.WriteString(writer, `<!doctype html>
 <title>UI test fixture</title>
 <button id="critical"></button>
+<button id="open-popup" onclick="
+document.getElementById('popup-attempted').textContent = 'external popup attempted';
+window.open('https://example.com', '_blank');
+">Open external popup</button>
+<p id="popup-attempted">popup not attempted</p>
 <script>
 console.error("fixture console error");
 fetch("/missing");
-window.open("https://example.com", "_blank");
 </script>`)
+	})
+	mux.HandleFunc("/missing", func(writer http.ResponseWriter, _ *http.Request) {
+		http.Error(writer, "intentional first-party failure", http.StatusServiceUnavailable)
 	})
 	mux.HandleFunc("/redirect", func(writer http.ResponseWriter, request *http.Request) {
 		http.Redirect(writer, request, "https://example.com", http.StatusFound)
@@ -51,8 +60,9 @@ func TestUITestIntegrationRealBrowserPolicy(t *testing.T) {
 	if runtimeDir == "" {
 		t.Skip("ready runtime required: run `multica ui-test install`, then set MULTICA_UI_TEST_RUNTIME_DIR to its runtimes/0.0.78 directory; this test never installs")
 	}
+	runtimeRoot := filepath.Dir(filepath.Dir(runtimeDir))
 	readyRuntime := ReadyRuntime{Directory: runtimeDir}
-	files, err := resolveRuntimeFiles(readyRuntime)
+	files, err := resolveRuntimeFiles(readyRuntime, runtimeRoot)
 	if err != nil {
 		t.Skipf("ready runtime required at MULTICA_UI_TEST_RUNTIME_DIR; this test never installs: %v", err)
 	}
@@ -78,12 +88,26 @@ func TestUITestIntegrationRealBrowserPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	upstream, _, err := startUpstream(session, readyRuntime, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	upstream, _, err := startUpstream(
+		session,
+		readyRuntime,
+		runtimeRoot,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
 	if err != nil {
 		_ = session.Close()
 		t.Fatalf("start pinned Playwright MCP (also validates config schema): %v", err)
 	}
 	defer func() {
+		session.registry.mu.Lock()
+		childPIDs := make([]int, 0, len(session.registry.processes))
+		for pid := range session.registry.processes {
+			childPIDs = append(childPIDs, pid)
+		}
+		session.registry.mu.Unlock()
+		if len(childPIDs) < 2 {
+			t.Errorf("managed process registry contained %d children before close, want app and browser owner", len(childPIDs))
+		}
 		if err := upstream.Close(); err != nil {
 			t.Errorf("close upstream: %v", err)
 		}
@@ -92,6 +116,15 @@ func TestUITestIntegrationRealBrowserPolicy(t *testing.T) {
 		}
 		if _, err := os.Stat(taskStateDir(workDir, "integration")); !os.IsNotExist(err) {
 			t.Errorf("managed children/process metadata remain after close: %v", err)
+		}
+		for _, pid := range childPIDs {
+			deadline := time.Now().Add(2 * time.Second)
+			for platformProcessAlive(pid) && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if platformProcessAlive(pid) {
+				t.Errorf("managed child PID %d remained alive after close", pid)
+			}
 		}
 	}()
 	axe, err := readManagedAxe(files)
@@ -108,34 +141,100 @@ func TestUITestIntegrationRealBrowserPolicy(t *testing.T) {
 	assertIntegrationOK(t, integrationToolCall(proxy, 3, "browser_take_screenshot", map[string]any{
 		"type": "png", "filename": "integration.png",
 	}))
+	beforePopup := integrationToolCall(proxy, 4, "browser_snapshot", map[string]any{})
+	assertIntegrationOK(t, beforePopup)
+	popupRef := integrationSnapshotRef(t, beforePopup.Result)
+	assertIntegrationOK(t, integrationToolCall(proxy, 5, "browser_click", map[string]any{
+		"element": "Open external popup",
+		"ref":     popupRef,
+	}))
 
-	external := integrationToolCall(proxy, 4, "browser_navigate", map[string]any{"url": "https://example.com"})
+	external := integrationToolCall(proxy, 6, "browser_navigate", map[string]any{"url": "https://example.com"})
 	if external.Error == nil || external.Error.Data.Class != ErrorPolicy {
 		t.Fatalf("external direct navigation was not blocked locally: %#v", external)
 	}
-	redirect := integrationToolCall(proxy, 5, "browser_navigate", map[string]any{"url": baseURL.String() + "/redirect"})
-	if redirect.Error == nil && !strings.Contains(strings.ToLower(string(redirect.Result)), "blocked") {
-		t.Fatalf("external redirect was not blocked by allowedOrigins: %#v", redirect)
-	}
-	tabs := integrationToolCall(proxy, 6, "browser_tabs", map[string]any{"action": "list"})
+	redirect := integrationToolCall(proxy, 7, "browser_navigate", map[string]any{"url": baseURL.String() + "/redirect"})
+	assertIntegrationNetworkPolicyBlock(t, redirect, "example.com")
+	tabs := integrationToolCall(proxy, 8, "browser_tabs", map[string]any{"action": "list"})
 	assertIntegrationOK(t, tabs)
 	if strings.Contains(string(tabs.Result), "https://example.com") {
 		t.Fatalf("external popup escaped allowedOrigins: %s", tabs.Result)
 	}
-	network := integrationToolCall(proxy, 7, "browser_network_requests", map[string]any{"includeStatic": false})
-	assertIntegrationOK(t, network)
-	if !strings.Contains(string(network.Result), "/missing") {
-		t.Fatalf("first-party failed request missing from network output: %s", network.Result)
+	if !strings.Contains(string(tabs.Result), address) {
+		t.Fatalf("local fixture tab missing after blocked popup: %s", tabs.Result)
 	}
-	console := integrationToolCall(proxy, 8, "browser_console_messages", map[string]any{"level": "error"})
+	snapshot := integrationToolCall(proxy, 9, "browser_snapshot", map[string]any{})
+	assertIntegrationOK(t, snapshot)
+	if !strings.Contains(integrationResultText(t, snapshot.Result), "external popup attempted") {
+		t.Fatalf("fixture did not prove popup attempt before tab policy assertion: %s", snapshot.Result)
+	}
+	network := integrationToolCall(proxy, 10, "browser_network_requests", map[string]any{"includeStatic": false})
+	assertIntegrationOK(t, network)
+	if !strings.Contains(string(network.Result), "/missing") ||
+		!strings.Contains(string(network.Result), "503") {
+		t.Fatalf("explicit first-party 503 missing from network output: %s", network.Result)
+	}
+	console := integrationToolCall(proxy, 11, "browser_console_messages", map[string]any{"level": "error"})
 	assertIntegrationOK(t, console)
 	if !strings.Contains(string(console.Result), "fixture console error") {
 		t.Fatalf("console error missing from output: %s", console.Result)
 	}
-	scan := integrationToolCall(proxy, 9, accessibilityScanTool.Name, map[string]any{})
+	scan := integrationToolCall(proxy, 12, accessibilityScanTool.Name, map[string]any{})
 	assertIntegrationOK(t, scan)
 	if !strings.Contains(string(scan.Result), "button-name") {
 		t.Fatalf("critical Axe fixture missing from scan: %s", scan.Result)
+	}
+}
+
+func integrationSnapshotRef(t *testing.T, result json.RawMessage) string {
+	t.Helper()
+	text := integrationResultText(t, result)
+	match := regexp.MustCompile(`button "Open external popup" \[ref=([^\]]+)\]`).FindStringSubmatch(text)
+	if len(match) != 2 {
+		t.Fatalf("popup button ref missing from accessibility snapshot: %s", result)
+	}
+	return match[1]
+}
+
+func integrationResultText(t *testing.T, result json.RawMessage) string {
+	t.Helper()
+	var value any
+	if err := json.Unmarshal(result, &value); err != nil {
+		t.Fatalf("decode MCP result: %v", err)
+	}
+	var parts []string
+	var visit func(any)
+	visit = func(item any) {
+		switch item := item.(type) {
+		case string:
+			parts = append(parts, item)
+		case []any:
+			for _, child := range item {
+				visit(child)
+			}
+		case map[string]any:
+			for _, child := range item {
+				visit(child)
+			}
+		}
+	}
+	visit(value)
+	return strings.Join(parts, "\n")
+}
+
+func assertIntegrationNetworkPolicyBlock(t *testing.T, response rpcResponse, destination string) {
+	t.Helper()
+	data, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := strings.ToLower(string(data))
+	hasPolicyReason := strings.Contains(evidence, "blocked") ||
+		strings.Contains(evidence, "not allowed") ||
+		strings.Contains(evidence, "allowed origin") ||
+		strings.Contains(evidence, "origin policy")
+	if !strings.Contains(evidence, strings.ToLower(destination)) || !hasPolicyReason {
+		t.Fatalf("navigation lacked destination-specific network policy rejection evidence: %s", data)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -221,12 +222,56 @@ func TestUpstreamRejectsServerInitiatedRequestAndForwardsNotification(t *testing
 	}
 }
 
+func TestUpstreamReaderAloneClosesNotificationStreamAfterFailure(t *testing.T) {
+	serverOutputReader, serverOutputWriter := io.Pipe()
+	serverInputReader, serverInputWriter := io.Pipe()
+	upstream := newUpstream(serverOutputReader, serverInputWriter, nil)
+	defer serverInputReader.Close()
+	defer upstream.Close()
+
+	writeNotification := func(sequence int) {
+		t.Helper()
+		if err := writeRPCFrame(serverOutputWriter, rpcRequest{
+			JSONRPC: "2.0",
+			Method:  "notifications/message",
+			Params:  json.RawMessage(`{"sequence":` + strconv.Itoa(sequence) + `}`),
+		}); err != nil {
+			t.Fatalf("write notification %d: %v", sequence, err)
+		}
+	}
+	writeNotification(1)
+	if event := <-upstream.eventStream(); !strings.Contains(string(event.Params), `"sequence":1`) {
+		t.Fatalf("first notification = %s", event.Params)
+	}
+
+	upstream.fail(errors.New("forced concurrent failure"))
+	writeNotification(2)
+	if err := serverOutputWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case _, ok := <-upstream.eventStream():
+		if ok {
+			t.Fatal("notification stream remained open after reader exit")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("notification stream did not close after reader exit")
+	}
+}
+
 func TestUpstreamConfigUsesCanonicalManagedPathsAndFixedPolicy(t *testing.T) {
 	fixture := newRuntimeFixture(t)
 	workDir := t.TempDir()
 	stateDir := taskStateDir(workDir, "task-1")
 	artifactDir := taskArtifactDir(workDir, "task-1")
-	paths, err := prepareUpstreamFiles(fixture.runtime, workDir, stateDir, artifactDir, Viewport{Width: 1440, Height: 900})
+	paths, err := prepareUpstreamFiles(
+		fixture.runtime,
+		fixture.trustedRoot,
+		workDir,
+		stateDir,
+		artifactDir,
+		Viewport{Width: 1440, Height: 900},
+	)
 	if err != nil {
 		t.Fatalf("prepareUpstreamFiles() error = %v", err)
 	}
@@ -289,6 +334,7 @@ func TestUpstreamConfigRejectsTaskPathSymlinkEscape(t *testing.T) {
 	}
 	_, err := prepareUpstreamFiles(
 		fixture.runtime,
+		fixture.trustedRoot,
 		workDir,
 		stateDir,
 		taskArtifactDir(workDir, "task-escape"),
@@ -304,8 +350,75 @@ func TestUpstreamManagedRuntimeRejectsEscapingManifestPath(t *testing.T) {
 	manifest := fixture.manifest
 	manifest.AxePath = "../outside.js"
 	writeReadyManifest(t, fixture.runtime.Directory, manifest)
-	if _, err := resolveRuntimeFiles(fixture.runtime); err == nil || !strings.Contains(err.Error(), "Axe path") {
+	if _, err := resolveRuntimeFiles(fixture.runtime, fixture.trustedRoot); err == nil || !strings.Contains(err.Error(), "Axe") {
 		t.Fatalf("resolveRuntimeFiles() error = %v, want Axe path rejection", err)
+	}
+}
+
+func TestUpstreamManagedRuntimeRequiresExactPinnedDirectoryUnderTrustedRoot(t *testing.T) {
+	fixture := newRuntimeFixture(t)
+	if _, err := resolveRuntimeFiles(fixture.runtime, t.TempDir()); err == nil ||
+		!strings.Contains(err.Error(), "trusted UI test root") {
+		t.Fatalf("resolveRuntimeFiles() error = %v, want trusted-root rejection", err)
+	}
+}
+
+func TestUpstreamManagedRuntimeRejectsAlternateSelfAssertedCLIPath(t *testing.T) {
+	fixture := newRuntimeFixture(t)
+	alternate := filepath.Join(fixture.runtime.Directory, "alternate", "cli.js")
+	if err := os.MkdirAll(filepath.Dir(alternate), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(alternate, []byte("malicious"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := fixture.manifest
+	manifest.MCPCLIPath = "alternate/cli.js"
+	writeReadyManifest(t, fixture.runtime.Directory, manifest)
+	if _, err := resolveRuntimeFiles(fixture.runtime, fixture.trustedRoot); err == nil ||
+		!strings.Contains(err.Error(), "fixed managed path") {
+		t.Fatalf("resolveRuntimeFiles() error = %v, want fixed CLI path rejection", err)
+	}
+}
+
+func TestUpstreamManagedRuntimeRejectsSelfAssertedBrowserOutsideManagedDirectory(t *testing.T) {
+	fixture := newRuntimeFixture(t)
+	alternate := filepath.Join(fixture.runtime.Directory, "alternate", "browser")
+	if err := os.MkdirAll(filepath.Dir(alternate), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(alternate, []byte("malicious"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := fixture.manifest
+	manifest.BrowserPath = "alternate/browser"
+	writeReadyManifest(t, fixture.runtime.Directory, manifest)
+	if _, err := resolveRuntimeFiles(fixture.runtime, fixture.trustedRoot); err == nil ||
+		!strings.Contains(err.Error(), "Chromium") {
+		t.Fatalf("resolveRuntimeFiles() error = %v, want managed Chromium path rejection", err)
+	}
+}
+
+func TestUpstreamManagedRuntimeRejectsSymlinkedReadyManifest(t *testing.T) {
+	fixture := newRuntimeFixture(t)
+	readyPath := filepath.Join(fixture.runtime.Directory, "ready.json")
+	external := filepath.Join(t.TempDir(), "ready.json")
+	data, err := os.ReadFile(readyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(external, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(readyPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, readyPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := resolveRuntimeFiles(fixture.runtime, fixture.trustedRoot); err == nil ||
+		!strings.Contains(err.Error(), "ready manifest") {
+		t.Fatalf("resolveRuntimeFiles() error = %v, want symlinked ready rejection", err)
 	}
 }
 

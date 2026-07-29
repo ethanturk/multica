@@ -33,6 +33,7 @@ func (b *lockedBuffer) String() string {
 type fakeProxySession struct {
 	mu      sync.Mutex
 	actions int
+	closes  int
 	err     error
 }
 
@@ -52,18 +53,37 @@ func (s *fakeProxySession) actionCount() int {
 	return s.actions
 }
 
+func (s *fakeProxySession) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closes++
+	return nil
+}
+
+func (s *fakeProxySession) closeCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closes
+}
+
 type fakeProxyUpstream struct {
 	mu            sync.Mutex
 	requests      []rpcRequest
 	notifications []rpcRequest
 	responses     map[string]rpcResponse
 	events        chan rpcRequest
+	done          chan struct{}
+	terminalErr   error
+	closes        int
+	eventClose    sync.Once
+	doneClose     sync.Once
 }
 
 func newFakeProxyUpstream() *fakeProxyUpstream {
 	return &fakeProxyUpstream{
 		responses: map[string]rpcResponse{},
 		events:    make(chan rpcRequest),
+		done:      make(chan struct{}),
 	}
 }
 
@@ -86,7 +106,38 @@ func (u *fakeProxyUpstream) notify(_ context.Context, request rpcRequest) error 
 }
 
 func (u *fakeProxyUpstream) eventStream() <-chan rpcRequest { return u.events }
-func (u *fakeProxyUpstream) Close() error                   { return nil }
+func (u *fakeProxyUpstream) doneStream() <-chan struct{}    { return u.done }
+
+func (u *fakeProxyUpstream) terminalError() error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.terminalErr
+}
+
+func (u *fakeProxyUpstream) Close() error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.closes++
+	return nil
+}
+
+func (u *fakeProxyUpstream) closeCount() int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.closes
+}
+
+func (u *fakeProxyUpstream) crash(err error) {
+	u.mu.Lock()
+	u.terminalErr = err
+	u.mu.Unlock()
+	u.eventClose.Do(func() { close(u.events) })
+	u.doneClose.Do(func() { close(u.done) })
+}
+
+func (u *fakeProxyUpstream) closeEvents() {
+	u.eventClose.Do(func() { close(u.events) })
+}
 
 func (u *fakeProxyUpstream) calls() []rpcRequest {
 	u.mu.Lock()
@@ -216,6 +267,55 @@ func TestProxyRejectsExternalNavigateBeforeSessionAndUpstream(t *testing.T) {
 	}
 }
 
+func TestProxyNavigateRejectsUnknownDuplicateAndNonStringArguments(t *testing.T) {
+	tests := map[string]string{
+		"unknown":   `{"url":"http://127.0.0.1:3000","extra":"forwarded"}`,
+		"duplicate": `{"url":"http://127.0.0.1:3000","url":"http://localhost:3000"}`,
+		"number":    `{"url":3000}`,
+		"array":     `{"url":["http://127.0.0.1:3000"]}`,
+	}
+	for name, arguments := range tests {
+		t.Run(name, func(t *testing.T) {
+			upstream := newFakeProxyUpstream()
+			session := &fakeProxySession{}
+			responses := runProxy(t, session, upstream, nil,
+				`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"browser_navigate","arguments":`+
+					arguments+`}}`+"\n")
+			if len(responses) != 1 || responses[0].Error == nil ||
+				responses[0].Error.Code != rpcInvalidParams {
+				t.Fatalf("response = %#v, want invalid params", responses)
+			}
+			if session.actionCount() != 0 || len(upstream.calls()) != 0 {
+				t.Fatal("invalid navigation reached session or upstream")
+			}
+		})
+	}
+}
+
+func TestProxyNavigateReconstructsSanitizedUpstreamArguments(t *testing.T) {
+	upstream := newFakeProxyUpstream()
+	responses := runProxy(t, &fakeProxySession{}, upstream, nil,
+		`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"browser_navigate","arguments":{"url":"http://127.0.0.1:3000"}}}`+"\n")
+	if len(responses) != 1 || responses[0].Error != nil {
+		t.Fatalf("response = %#v", responses)
+	}
+	calls := upstream.calls()
+	if len(calls) != 1 {
+		t.Fatalf("upstream calls = %d, want one", len(calls))
+	}
+	var call struct {
+		Name      string                     `json:"name"`
+		Arguments map[string]json.RawMessage `json:"arguments"`
+	}
+	if err := json.Unmarshal(calls[0].Params, &call); err != nil {
+		t.Fatal(err)
+	}
+	if call.Name != "browser_navigate" || len(call.Arguments) != 1 ||
+		string(call.Arguments["url"]) != `"http://127.0.0.1:3000"` {
+		t.Fatalf("sanitized call = %#v", call)
+	}
+}
+
 func TestProxyFirstPermittedCallRunsSessionReadiness(t *testing.T) {
 	upstream := newFakeProxyUpstream()
 	session := &fakeProxySession{}
@@ -226,6 +326,50 @@ func TestProxyFirstPermittedCallRunsSessionReadiness(t *testing.T) {
 	}
 	if session.actionCount() != 1 {
 		t.Fatalf("session actions = %d, want 1", session.actionCount())
+	}
+}
+
+func TestProxyReturnsInvalidRequestForValidJSONWithInvalidEnvelope(t *testing.T) {
+	tests := map[string]string{
+		"empty object":             `{}`,
+		"wrong version":            `{"jsonrpc":"1.0","method":"ping"}`,
+		"boolean id":               `{"jsonrpc":"2.0","id":true,"method":"ping"}`,
+		"object id":                `{"jsonrpc":"2.0","id":{},"method":"ping"}`,
+		"array id":                 `{"jsonrpc":"2.0","id":[],"method":"ping"}`,
+		"duplicate id":             `{"jsonrpc":"2.0","id":1,"id":2,"method":"ping"}`,
+		"duplicate method":         `{"jsonrpc":"2.0","id":1,"method":"ping","method":"tools/list"}`,
+		"non-string method":        `{"jsonrpc":"2.0","id":1,"method":7}`,
+		"array envelope":           `[]`,
+		"scalar params":            `{"jsonrpc":"2.0","id":1,"method":"ping","params":true}`,
+		"request method no id":     `{"jsonrpc":"2.0","method":"ping"}`,
+		"notification method id":   `{"jsonrpc":"2.0","id":1,"method":"notifications/initialized"}`,
+		"unknown notification":     `{"jsonrpc":"2.0","method":"notifications/unknown"}`,
+		"duplicate jsonrpc member": `{"jsonrpc":"2.0","jsonrpc":"2.0","id":1,"method":"ping"}`,
+	}
+	for name, input := range tests {
+		t.Run(name, func(t *testing.T) {
+			upstream := newFakeProxyUpstream()
+			responses := runProxy(t, &fakeProxySession{}, upstream, nil, input+"\n")
+			if len(responses) != 1 || responses[0].Error == nil ||
+				responses[0].Error.Code != rpcInvalidRequest {
+				t.Fatalf("responses = %#v, want one -32600 response", responses)
+			}
+			if string(responses[0].ID) != "null" {
+				t.Fatalf("invalid-request ID = %s, want null", responses[0].ID)
+			}
+			if len(upstream.calls()) != 0 {
+				t.Fatal("invalid envelope reached upstream")
+			}
+		})
+	}
+}
+
+func TestProxyReturnsParseErrorOnlyForMalformedJSON(t *testing.T) {
+	responses := runProxy(t, &fakeProxySession{}, newFakeProxyUpstream(), nil, "{\n")
+	if len(responses) != 1 || responses[0].Error == nil ||
+		responses[0].Error.Code != rpcParseError ||
+		string(responses[0].ID) != "null" {
+		t.Fatalf("responses = %#v, want one -32700 response with null ID", responses)
 	}
 }
 
@@ -250,13 +394,75 @@ func TestProxyForwardsBoundedUpstreamNotification(t *testing.T) {
 	if err := clientWriter.Close(); err != nil {
 		t.Fatal(err)
 	}
-	close(upstream.events)
+	upstream.closeEvents()
 	if err := <-done; err != nil {
 		t.Fatalf("Serve() error = %v", err)
 	}
 	if !strings.Contains(output.String(), `"method":"notifications/message"`) {
 		t.Fatalf("output = %q, want upstream notification", output.String())
 	}
+}
+
+func TestProxyCancellationUnblocksClosableOutputAndClosesOwners(t *testing.T) {
+	upstream := newFakeProxyUpstream()
+	session := &fakeProxySession{}
+	clientReader, clientWriter := io.Pipe()
+	outputReader, outputWriter := io.Pipe()
+	proxy := newProxy(session, upstream, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- proxy.Serve(ctx, clientReader, outputWriter)
+	}()
+	if _, err := io.WriteString(clientWriter, `{"jsonrpc":"2.0","id":1,"method":"ping"}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	waitForProxyCalls(t, upstream, 1)
+
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Serve() error = %v, want cancellation", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		_ = outputReader.Close()
+		_ = clientWriter.Close()
+		<-done
+		t.Fatal("Serve() remained blocked writing to a full client pipe after cancellation")
+	}
+	if session.closeCount() != 1 || upstream.closeCount() != 1 {
+		t.Fatalf("close counts: session=%d upstream=%d, want one each", session.closeCount(), upstream.closeCount())
+	}
+	_ = outputReader.Close()
+	_ = clientWriter.Close()
+}
+
+func TestProxyIdleUpstreamEOFTerminatesOpenClientAndClosesOwners(t *testing.T) {
+	upstream := newFakeProxyUpstream()
+	session := &fakeProxySession{}
+	clientReader, clientWriter := io.Pipe()
+	proxy := newProxy(session, upstream, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	done := make(chan error, 1)
+	go func() {
+		done <- proxy.Serve(context.Background(), clientReader, io.Discard)
+	}()
+
+	upstream.crash(io.EOF)
+	select {
+	case err := <-done:
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("Serve() error = %v, want upstream EOF", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		_ = clientWriter.Close()
+		<-done
+		t.Fatal("Serve() ignored idle upstream EOF while client input remained open")
+	}
+	if session.closeCount() != 1 || upstream.closeCount() != 1 {
+		t.Fatalf("close counts: session=%d upstream=%d, want one each", session.closeCount(), upstream.closeCount())
+	}
+	_ = clientWriter.Close()
 }
 
 func TestProxyRejectsFrameAboveTwoMiB(t *testing.T) {
@@ -304,7 +510,7 @@ func runProxy(
 	input string,
 ) []rpcResponse {
 	t.Helper()
-	close(upstream.(*fakeProxyUpstream).events)
+	upstream.(*fakeProxyUpstream).closeEvents()
 	var output bytes.Buffer
 	proxy := newProxy(session, upstream, axe, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err := proxy.Serve(context.Background(), strings.NewReader(input), &output); err != nil {
@@ -322,6 +528,17 @@ func runProxy(
 		responses = append(responses, response)
 	}
 	return responses
+}
+
+func waitForProxyCalls(t *testing.T, upstream *fakeProxyUpstream, count int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for len(upstream.calls()) < count && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := len(upstream.calls()); got < count {
+		t.Fatalf("upstream calls = %d, want at least %d", got, count)
+	}
 }
 
 func mustJSON(t *testing.T, value any) []byte {

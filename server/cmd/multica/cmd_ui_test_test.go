@@ -145,9 +145,74 @@ func TestUITestServeRequiresTaskAndReadyRuntime(t *testing.T) {
 	}
 }
 
+func TestUITestServeRejectsRuntimeOutsideSelectedProfile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("MULTICA_UI_TEST_WORKDIR", t.TempDir())
+	t.Setenv("MULTICA_UI_TEST_TASK_ID", "task-untrusted")
+	t.Setenv("MULTICA_UI_TEST_RUNTIME_DIR", t.TempDir())
+	called := false
+	restore := replaceUITestServer(func(context.Context, uitest.ServeOptions) error {
+		called = true
+		return nil
+	})
+	defer restore()
+
+	cmd, _, _ := executeUITestCommand(t, "--profile", "trusted", "ui-test", "serve")
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "selected profile") {
+		t.Fatalf("serve error = %v, want selected-profile runtime rejection", err)
+	}
+	if called {
+		t.Fatal("server ran with a runtime outside the selected profile")
+	}
+}
+
+func TestUITestServeRejectsSymlinkedManagedRuntime(t *testing.T) {
+	home := canonicalUITestPath(t, t.TempDir())
+	expected := filepath.Join(
+		uitest.RootForProfile(home, ""),
+		"runtimes",
+		uitest.PlaywrightMCPVersion,
+	)
+	if err := os.MkdirAll(filepath.Dir(expected), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), expected); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("MULTICA_UI_TEST_WORKDIR", t.TempDir())
+	t.Setenv("MULTICA_UI_TEST_TASK_ID", "task-symlink")
+	t.Setenv("MULTICA_UI_TEST_RUNTIME_DIR", expected)
+	called := false
+	restore := replaceUITestServer(func(context.Context, uitest.ServeOptions) error {
+		called = true
+		return nil
+	})
+	defer restore()
+
+	cmd, _, _ := executeUITestCommand(t, "ui-test", "serve")
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("serve error = %v, want symlink rejection", err)
+	}
+	if called {
+		t.Fatal("server ran with a symlinked managed runtime")
+	}
+}
+
 func TestUITestServePassesCanonicalEnvironmentAndProtocolStreams(t *testing.T) {
+	home := canonicalUITestPath(t, t.TempDir())
 	workDir := t.TempDir()
-	runtimeDir := t.TempDir()
+	runtimeDir := filepath.Join(
+		uitest.RootForProfile(home, ""),
+		"runtimes",
+		uitest.PlaywrightMCPVersion,
+	)
+	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
 	t.Setenv("MULTICA_UI_TEST_WORKDIR", workDir)
 	t.Setenv("MULTICA_UI_TEST_TASK_ID", "task-7")
 	t.Setenv("MULTICA_UI_TEST_RUNTIME_DIR", runtimeDir)
@@ -170,6 +235,9 @@ func TestUITestServePassesCanonicalEnvironmentAndProtocolStreams(t *testing.T) {
 	if got.WorkDir != canonicalWorkDir || got.TaskID != "task-7" || got.Runtime.Directory != canonicalRuntimeDir {
 		t.Fatalf("serve options = %#v", got)
 	}
+	if got.RuntimeRoot != uitest.RootForProfile(home, "") {
+		t.Fatalf("runtime root = %q, want selected profile root", got.RuntimeRoot)
+	}
 	if got.Input != cmd.InOrStdin() {
 		t.Fatal("serve input is not command stdin")
 	}
@@ -181,9 +249,19 @@ func TestUITestServePassesCanonicalEnvironmentAndProtocolStreams(t *testing.T) {
 }
 
 func TestUITestServeFallsBackToCurrentDirectoryWhenWorkdirAbsent(t *testing.T) {
+	home := canonicalUITestPath(t, t.TempDir())
+	runtimeDir := filepath.Join(
+		uitest.RootForProfile(home, ""),
+		"runtimes",
+		uitest.PlaywrightMCPVersion,
+	)
+	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
 	t.Setenv("MULTICA_UI_TEST_WORKDIR", "")
 	t.Setenv("MULTICA_UI_TEST_TASK_ID", "task-openclaw")
-	t.Setenv("MULTICA_UI_TEST_RUNTIME_DIR", t.TempDir())
+	t.Setenv("MULTICA_UI_TEST_RUNTIME_DIR", runtimeDir)
 	var got uitest.ServeOptions
 	restore := replaceUITestServer(func(_ context.Context, options uitest.ServeOptions) error {
 		got = options
@@ -203,9 +281,19 @@ func TestUITestServeFallsBackToCurrentDirectoryWhenWorkdirAbsent(t *testing.T) {
 }
 
 func TestUITestServeReturnsCancellationWithoutProtocolNoise(t *testing.T) {
+	home := canonicalUITestPath(t, t.TempDir())
+	runtimeDir := filepath.Join(
+		uitest.RootForProfile(home, ""),
+		"runtimes",
+		uitest.PlaywrightMCPVersion,
+	)
+	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
 	t.Setenv("MULTICA_UI_TEST_WORKDIR", t.TempDir())
 	t.Setenv("MULTICA_UI_TEST_TASK_ID", "task-cancel")
-	t.Setenv("MULTICA_UI_TEST_RUNTIME_DIR", t.TempDir())
+	t.Setenv("MULTICA_UI_TEST_RUNTIME_DIR", runtimeDir)
 	restore := replaceUITestServer(func(context.Context, uitest.ServeOptions) error {
 		return context.Canceled
 	})
@@ -247,4 +335,13 @@ func replaceUITestServer(server func(context.Context, uitest.ServeOptions) error
 	return func() {
 		runUITestServer = previous
 	}
+}
+
+func canonicalUITestPath(t *testing.T, path string) string {
+	t.Helper()
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonical
 }

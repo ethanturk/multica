@@ -50,20 +50,22 @@ type Upstream struct {
 	pending map[string]chan upstreamResult
 	err     error
 
-	nextID    atomic.Uint64
-	events    chan rpcRequest
-	done      chan struct{}
-	closeOnce sync.Once
+	nextID     atomic.Uint64
+	events     chan rpcRequest
+	done       chan struct{}
+	readerDone chan struct{}
+	closeOnce  sync.Once
 }
 
 func newUpstream(reader io.ReadCloser, writer io.WriteCloser, stop func() error) *Upstream {
 	upstream := &Upstream{
-		reader:  reader,
-		writer:  writer,
-		stop:    stop,
-		pending: make(map[string]chan upstreamResult),
-		events:  make(chan rpcRequest, upstreamNotificationBuffer),
-		done:    make(chan struct{}),
+		reader:     reader,
+		writer:     writer,
+		stop:       stop,
+		pending:    make(map[string]chan upstreamResult),
+		events:     make(chan rpcRequest, upstreamNotificationBuffer),
+		done:       make(chan struct{}),
+		readerDone: make(chan struct{}),
 	}
 	go upstream.readLoop()
 	return upstream
@@ -126,6 +128,13 @@ func (u *Upstream) notify(ctx context.Context, request rpcRequest) error {
 }
 
 func (u *Upstream) eventStream() <-chan rpcRequest { return u.events }
+func (u *Upstream) doneStream() <-chan struct{}    { return u.done }
+
+func (u *Upstream) terminalError() error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.err
+}
 
 func (u *Upstream) Close() error {
 	var closeErr error
@@ -135,6 +144,7 @@ func (u *Upstream) Close() error {
 			closeErr = errors.Join(closeErr, u.stop())
 		}
 		u.fail(closeErr)
+		<-u.readerDone
 	})
 	if closeErr == nil {
 		u.mu.Lock()
@@ -196,6 +206,8 @@ func (u *Upstream) writeContext(ctx context.Context, value any) error {
 }
 
 func (u *Upstream) readLoop() {
+	defer close(u.readerDone)
+	defer close(u.events)
 	reader := bufio.NewReaderSize(u.reader, 64*1024)
 	for {
 		frame, err := readRPCFrame(reader)
@@ -205,6 +217,11 @@ func (u *Upstream) readLoop() {
 		}
 		if len(frame) == 0 {
 			continue
+		}
+		select {
+		case <-u.done:
+			return
+		default:
 		}
 		var message upstreamWireMessage
 		if err := json.Unmarshal(frame, &message); err != nil {
@@ -278,7 +295,6 @@ func (u *Upstream) fail(err error) {
 		waiter <- upstreamResult{err: err}
 	}
 	close(u.done)
-	close(u.events)
 }
 
 type runtimeFiles struct {
@@ -313,28 +329,52 @@ type upstreamConfig struct {
 	AllowUnrestrictedFileAccess bool `json:"allowUnrestrictedFileAccess"`
 }
 
-func resolveRuntimeFiles(runtime ReadyRuntime) (runtimeFiles, error) {
-	if runtime.Directory == "" {
-		return runtimeFiles{}, fmt.Errorf("ready UI test runtime directory is required")
-	}
-	absolute, err := filepath.Abs(runtime.Directory)
+func resolveRuntimeFiles(runtime ReadyRuntime, trustedRoot string) (runtimeFiles, error) {
+	canonical, err := exactTrustedRuntimeDirectory(runtime.Directory, trustedRoot)
 	if err != nil {
-		return runtimeFiles{}, fmt.Errorf("resolve UI test runtime directory: %w", err)
+		return runtimeFiles{}, err
 	}
-	canonical, err := filepath.EvalSymlinks(absolute)
+	ready, err := openRegularManagedFile(filepath.Join(canonical, "ready.json"))
 	if err != nil {
-		return runtimeFiles{}, fmt.Errorf("resolve UI test runtime directory: %w", err)
+		return runtimeFiles{}, fmt.Errorf("open regular ready manifest: %w", err)
 	}
-	if status := inspectRuntime(canonical); status.Status != StatusReady {
-		return runtimeFiles{}, fmt.Errorf("UI test runtime is not ready: %s", status.Error)
-	}
-	data, err := os.ReadFile(filepath.Join(canonical, "ready.json"))
+	data, err := io.ReadAll(io.LimitReader(ready, diagnosticLimit+1))
+	closeErr := ready.Close()
 	if err != nil {
-		return runtimeFiles{}, fmt.Errorf("read ready UI test runtime: %w", err)
+		return runtimeFiles{}, fmt.Errorf("read ready manifest: %w", err)
+	}
+	if closeErr != nil {
+		return runtimeFiles{}, fmt.Errorf("close ready manifest: %w", closeErr)
+	}
+	if len(data) > diagnosticLimit {
+		return runtimeFiles{}, fmt.Errorf("ready manifest exceeds %d bytes", diagnosticLimit)
 	}
 	var manifest readyManifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return runtimeFiles{}, fmt.Errorf("decode ready UI test runtime: %w", err)
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&manifest); err != nil {
+		return runtimeFiles{}, fmt.Errorf("decode ready manifest: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return runtimeFiles{}, fmt.Errorf("decode ready manifest: multiple JSON values")
+	}
+	if manifest.MCPVersion != PlaywrightMCPVersion ||
+		manifest.AxeVersion != AxeCoreVersion ||
+		manifest.Browser != "chromium" ||
+		manifest.InstalledAt.IsZero() {
+		return runtimeFiles{}, fmt.Errorf("ready manifest does not match pinned runtime")
+	}
+	wantCLI := filepath.ToSlash(filepath.Join("node_modules", "@playwright", "mcp", "cli.js"))
+	wantAxe := filepath.ToSlash(filepath.Join("node_modules", "axe-core", "axe.min.js"))
+	wantPlaywright := filepath.ToSlash(filepath.Join("node_modules", ".bin", "playwright"))
+	if manifest.MCPCLIPath != wantCLI {
+		return runtimeFiles{}, fmt.Errorf("Playwright MCP CLI must use fixed managed path %q", wantCLI)
+	}
+	if manifest.AxePath != wantAxe {
+		return runtimeFiles{}, fmt.Errorf("Axe must use fixed managed path %q", wantAxe)
+	}
+	if manifest.PlaywrightPath != wantPlaywright {
+		return runtimeFiles{}, fmt.Errorf("Playwright CLI must use fixed managed path %q", wantPlaywright)
 	}
 	cli, err := managedPath(canonical, manifest.MCPCLIPath)
 	if err != nil {
@@ -344,24 +384,129 @@ func resolveRuntimeFiles(runtime ReadyRuntime) (runtimeFiles, error) {
 	if err != nil {
 		return runtimeFiles{}, fmt.Errorf("Axe path: %w", err)
 	}
-	browsers, err := filepath.EvalSymlinks(filepath.Join(canonical, "browsers"))
+	for label, path := range map[string]string{
+		"Playwright MCP CLI": cli,
+		"Axe":                axe,
+	} {
+		file, err := openRegularManagedFile(path)
+		if err != nil {
+			return runtimeFiles{}, fmt.Errorf("%s is not a regular managed file: %w", label, err)
+		}
+		if err := file.Close(); err != nil {
+			return runtimeFiles{}, fmt.Errorf("close %s: %w", label, err)
+		}
+	}
+	for label, metadata := range map[string]struct {
+		path string
+		want string
+	}{
+		"Playwright MCP": {
+			path: filepath.Join(canonical, "node_modules", "@playwright", "mcp", "package.json"),
+			want: PlaywrightMCPVersion,
+		},
+		"Axe": {
+			path: filepath.Join(canonical, "node_modules", "axe-core", "package.json"),
+			want: AxeCoreVersion,
+		},
+	} {
+		if err := verifyManagedPackageVersion(metadata.path, metadata.want); err != nil {
+			return runtimeFiles{}, fmt.Errorf("%s package: %w", label, err)
+		}
+	}
+	expectedBrowsers := filepath.Join(canonical, "browsers")
+	browsers, err := filepath.EvalSymlinks(expectedBrowsers)
 	if err != nil {
 		return runtimeFiles{}, fmt.Errorf("browser directory: %w", err)
+	}
+	if browsers != expectedBrowsers {
+		return runtimeFiles{}, fmt.Errorf("browser directory contains a symlink")
 	}
 	relative, err := filepath.Rel(canonical, browsers)
 	if err != nil || relative == ".." || filepath.IsAbs(relative) ||
 		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return runtimeFiles{}, fmt.Errorf("browser directory escapes runtime")
 	}
+	browserExecutable, err := managedPath(canonical, manifest.BrowserPath)
+	if err != nil || !pathWithin(browsers, browserExecutable) {
+		return runtimeFiles{}, fmt.Errorf("Chromium path is outside fixed managed browser directory")
+	}
+	browserFile, err := openRegularManagedFile(browserExecutable)
+	if err != nil {
+		return runtimeFiles{}, fmt.Errorf("Chromium is not a regular managed file: %w", err)
+	}
+	if err := browserFile.Close(); err != nil {
+		return runtimeFiles{}, fmt.Errorf("close Chromium: %w", err)
+	}
 	return runtimeFiles{RuntimeDir: canonical, MCPCLI: cli, Axe: axe, Browsers: browsers}, nil
+}
+
+func exactTrustedRuntimeDirectory(runtimeDirectory, trustedRoot string) (string, error) {
+	if runtimeDirectory == "" || trustedRoot == "" {
+		return "", fmt.Errorf("ready runtime and trusted UI test root are required")
+	}
+	root, err := filepath.Abs(trustedRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve trusted UI test root: %w", err)
+	}
+	root = filepath.Clean(root)
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve trusted UI test root: %w", err)
+	}
+	if canonicalRoot != root {
+		return "", fmt.Errorf("trusted UI test root contains a symlink")
+	}
+	expected := filepath.Join(root, "runtimes", PlaywrightMCPVersion)
+	supplied, err := filepath.Abs(runtimeDirectory)
+	if err != nil {
+		return "", fmt.Errorf("resolve UI test runtime directory: %w", err)
+	}
+	supplied = filepath.Clean(supplied)
+	if supplied != expected {
+		return "", fmt.Errorf("runtime is outside trusted UI test root or not pinned version %s", PlaywrightMCPVersion)
+	}
+	canonical, err := filepath.EvalSymlinks(supplied)
+	if err != nil {
+		return "", fmt.Errorf("resolve UI test runtime directory: %w", err)
+	}
+	if canonical != expected {
+		return "", fmt.Errorf("managed runtime directory contains a symlink")
+	}
+	return canonical, nil
+}
+
+func verifyManagedPackageVersion(path, want string) error {
+	file, err := openRegularManagedFile(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, diagnosticLimit+1))
+	if err != nil {
+		return err
+	}
+	if len(data) > diagnosticLimit {
+		return fmt.Errorf("package metadata exceeds %d bytes", diagnosticLimit)
+	}
+	var metadata struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return err
+	}
+	if metadata.Version != want {
+		return fmt.Errorf("version is %q, want %q", metadata.Version, want)
+	}
+	return nil
 }
 
 func prepareUpstreamFiles(
 	runtime ReadyRuntime,
+	trustedRoot string,
 	workDir, stateDir, artifactDir string,
 	viewport Viewport,
 ) (upstreamPaths, error) {
-	files, err := resolveRuntimeFiles(runtime)
+	files, err := resolveRuntimeFiles(runtime, trustedRoot)
 	if err != nil {
 		return upstreamPaths{}, err
 	}
@@ -438,9 +583,15 @@ func prepareUpstreamFiles(
 	}, nil
 }
 
-func startUpstream(session *Session, runtime ReadyRuntime, logger *slog.Logger) (*Upstream, runtimeFiles, error) {
+func startUpstream(
+	session *Session,
+	runtime ReadyRuntime,
+	trustedRoot string,
+	logger *slog.Logger,
+) (*Upstream, runtimeFiles, error) {
 	paths, err := prepareUpstreamFiles(
 		runtime,
+		trustedRoot,
 		session.opts.WorkDir,
 		taskStateDir(session.opts.WorkDir, session.opts.TaskID),
 		session.opts.ArtifactDir,
