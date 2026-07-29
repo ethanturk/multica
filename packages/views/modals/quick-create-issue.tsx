@@ -341,8 +341,8 @@ export function AgentCreatePanel({
   const uploadGate = useUploadGate(editorRef);
   // Coordinator-owned uploads in the shared draft pool (MUL-5181, L2): a file
   // pasted into the prompt survives dialog close and mode switches, aborts on
-  // logout, and reads `interrupted` after a reload. `gate` widens the editor
-  // gate with the pool's placeholders.
+  // logout, and is dropped after a reload. `gate` widens the editor gate with
+  // the pool's placeholders.
   const {
     attachments: pendingAttachments,
     handleUpload: handleUploadFile,

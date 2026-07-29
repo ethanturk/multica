@@ -277,7 +277,7 @@ export function ChatInput({
     [makeUploadBinding, draftKey],
   );
   // Coordinator-owned uploads (MUL-5181 L2): survive window close, abort on
-  // logout, read `interrupted` after a reload. `gate` widens the editor gate
+  // logout, are dropped after a reload. `gate` widens the editor gate
   // with the draft's placeholders so a REOPENED composer over a still-running
   // upload cannot send past it.
   const {

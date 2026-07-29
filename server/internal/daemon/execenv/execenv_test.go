@@ -4730,7 +4730,7 @@ func TestInjectRuntimeConfigBriefKeepsStaticCatchUpRead(t *testing.T) {
 	}
 	s := string(data)
 
-	if !strings.Contains(s, "multica issue comment list "+issueID+" --recent 10 --output json") {
+	if !strings.Contains(s, "multica issue comment list "+issueID+" --roots-only --summary --output json") {
 		t.Errorf("brief must keep the static catch-up read\n---\n%s", s)
 	}
 	if strings.Contains(s, "--recent 20") {
@@ -4800,11 +4800,11 @@ func TestInjectRuntimeConfigBriefOmitsResumedThreadAnchor(t *testing.T) {
 	}
 }
 
-// TestInjectRuntimeConfigAssignmentTriggerMentionsRecent pins that the
+// TestInjectRuntimeConfigAssignmentTriggerScansRootsFirst pins that the
 // assignment-triggered Workflow keeps comment catch-up mandatory while bounding
-// the mandatory first read to the recent active-thread window. Older context
-// stays reachable through explicit pagination.
-func TestInjectRuntimeConfigAssignmentTriggerMentionsRecent(t *testing.T) {
+// the mandatory first read to a roots scan. Older context stays reachable
+// through explicit pagination.
+func TestInjectRuntimeConfigAssignmentTriggerScansRootsFirst(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -4820,17 +4820,20 @@ func TestInjectRuntimeConfigAssignmentTriggerMentionsRecent(t *testing.T) {
 	// Mandatory comment catch-up must stay, but the required first read is
 	// bounded to recent active threads instead of the full flat timeline.
 	for _, want := range []string{
-		"multica issue comment list issue-1 --recent 10 --output json",
+		"multica issue comment list issue-1 --roots-only --summary --output json",
 		"this is mandatory, not optional",
 		"Skipping this step is the most common cause",
 	} {
 		if !strings.Contains(s, want) {
-			t.Errorf("assignment Workflow regressed mandatory recent-first catch-up, missing %q\n---\n%s", want, s)
+			t.Errorf("assignment Workflow regressed mandatory scan-first catch-up, missing %q\n---\n%s", want, s)
 		}
 	}
-	// Older context must remain reachable through pagination.
+	// Older context must remain reachable through pagination. The cursor label
+	// and flags are documented in `## Available Commands` rather than restated
+	// inside the step (MUL-5372), so assert the label itself, not the literal
+	// `Next thread cursor: ...` stderr line the old step-3 copy quoted.
 	for _, want := range []string{
-		"Next thread cursor:",
+		"Next thread cursor",
 		"--before",
 		"--before-id",
 	} {
@@ -4854,6 +4857,69 @@ func TestInjectRuntimeConfigAssignmentTriggerMentionsRecent(t *testing.T) {
 	} {
 		if strings.Contains(s, banned) {
 			t.Errorf("assignment Workflow regressed to replacement-style --recent phrasing %q\n---\n%s", banned, s)
+		}
+	}
+}
+
+// TestInjectRuntimeConfigCatchUpScansRootsFirst locks in MUL-5372: the
+// mandatory step-3 catch-up leads with a bounded `--roots-only --summary` scan
+// and an explicit per-thread drill-down, instead of making `--recent 10` the
+// required first read. `--recent N` caps threads, not comments — it returns every
+// descendant of each thread — so as the mandatory read it handed every run the
+// issue's entire comment history, and duplicated the bounded thread read the
+// per-turn message already points at on comment-triggered turns.
+//
+// It also pins the placement rule: the workflow step names only the reads it
+// mandates, while flag semantics (including the saturation trap) live once in
+// `## Available Commands`. Restating them per step is what bloated the step.
+func TestInjectRuntimeConfigCatchUpScansRootsFirst(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if _, err := InjectRuntimeConfig(dir, "claude", TaskContextForEnv{IssueID: "issue-1"}); err != nil {
+		t.Fatalf("InjectRuntimeConfig failed: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("read CLAUDE.md: %v", err)
+	}
+	s := string(data)
+
+	for _, want := range []string{
+		// The cheap scan is the first thing step 3 asks for.
+		"multica issue comment list issue-1 --roots-only --summary --output json",
+		// ...followed by an explicit, bounded drill-down.
+		"multica issue comment list issue-1 --thread <thread-id> --tail 30 --output json",
+		// The saturation semantics that made --recent 10 misleading are stated
+		// once, in the flag reference rather than in the step.
+		"caps THREADS, not comments",
+		"no per-thread cap",
+		"fewer than N root threads",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("brief missing bounded catch-up guidance %q\n---\n%s", want, s)
+		}
+	}
+
+	// The workflow steps must not hand the agent a ready-to-paste bulk read;
+	// that is what made the mandatory step pull whole histories.
+	if strings.Contains(s, "multica issue comment list issue-1 --recent") {
+		t.Errorf("workflow steps must not present an issue-scoped --recent command\n---\n%s", s)
+	}
+	// The saturation warning belongs to the flag reference, which introduces
+	// the flag generically as `--recent N`.
+	if !strings.Contains(s, "--recent N") {
+		t.Errorf("Available Commands must still document --recent N\n---\n%s", s)
+	}
+
+	// The catch-up stays mandatory — this change is about payload shape, not
+	// about letting agents skip context and act on stale instructions.
+	for _, want := range []string{
+		"this is mandatory, not optional",
+		"Skipping this step is the most common cause",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("step 3 must stay mandatory, missing %q\n---\n%s", want, s)
 		}
 	}
 }

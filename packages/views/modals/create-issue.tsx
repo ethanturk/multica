@@ -340,8 +340,8 @@ export function ManualCreatePanel({
   // carry a stripped body across).
   const uploadGate = useUploadGate(descEditorRef);
   // Coordinator-owned uploads in the shared pool (MUL-5181, L2): a file picked
-  // here survives dialog close, aborts on logout, and reads `interrupted`
-  // after a reload. `gate` widens the editor gate with the pool's placeholders.
+  // here survives dialog close, aborts on logout, and is dropped after a
+  // reload. `gate` widens the editor gate with the pool's placeholders.
   const {
     attachments: draftAttachments,
     handleUpload,

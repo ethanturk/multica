@@ -777,7 +777,7 @@ func (h *Handler) DeleteAgentRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(activeAgents) > 0 {
-		writeJSON(w, http.StatusConflict, runtimeHasActiveAgentsResponse(activeAgents))
+		writeJSON(w, http.StatusConflict, h.runtimeHasActiveAgentsResponse(activeAgents))
 		return
 	}
 
@@ -903,10 +903,10 @@ func (h *Handler) DeleteAgentRuntime(w http.ResponseWriter, r *http.Request) {
 //
 // Front-end branches on `code`. The caller picks which code to send; this
 // helper just normalises the agent serialisation and the error string.
-func runtimeHasActiveAgentsResponse(agents []db.Agent) map[string]any {
+func (h *Handler) runtimeHasActiveAgentsResponse(agents []db.Agent) map[string]any {
 	resp := make([]AgentResponse, len(agents))
 	for i, a := range agents {
-		resp[i] = agentToResponse(a)
+		resp[i] = h.agentToResponse(a)
 	}
 	return map[string]any{
 		"error":         "cannot delete runtime: it has active agents bound to it. Archive or reassign the agents first.",
@@ -1038,7 +1038,7 @@ func (h *Handler) ArchiveAgentsAndDeleteRuntime(w http.ResponseWriter, r *http.R
 		// shared response helper but overrides the code to a planning
 		// signal so the dialog can distinguish "you opened from a stale
 		// page" from "the plan you confirmed just changed under you".
-		body := runtimeHasActiveAgentsResponse(currentActive)
+		body := h.runtimeHasActiveAgentsResponse(currentActive)
 		body["code"] = "runtime_delete_plan_changed"
 		body["error"] = "the active agent set changed; please review and confirm again."
 		writeJSON(w, http.StatusConflict, body)
@@ -1164,7 +1164,7 @@ func (h *Handler) ArchiveAgentsAndDeleteRuntime(w http.ResponseWriter, r *http.R
 	}
 	for _, a := range archivedAgents {
 		h.publish(protocol.EventAgentArchived, wsID, "member", userID, map[string]any{
-			"agent": agentToResponse(a),
+			"agent": h.agentToResponse(a),
 		})
 	}
 	h.publish(protocol.EventDaemonRegister, wsID, "member", userID, map[string]any{

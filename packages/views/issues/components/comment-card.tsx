@@ -30,7 +30,6 @@ import { copyText } from "@multica/ui/lib/clipboard";
 import { useActorName } from "@multica/core/workspace/hooks";
 import { useTimeAgo } from "../../i18n";
 import { ContentEditor, type ContentEditorRef, ReadonlyContent, useFileDropZone, FileDropOverlay, Attachment as AttachmentRenderer, AttachmentDownloadProvider, useUploadGate, useComposerSubmit } from "../../editor";
-import { PASTE_AS_FILE_THRESHOLD } from "../../editor/paste-as-file";
 import { useCommentUploads } from "./use-comment-uploads";
 import { FileUploadButton } from "@multica/ui/components/common/file-upload-button";
 import { api, dispatchReasonCode } from "@multica/core/api";
@@ -673,7 +672,6 @@ function CommentRow({
               }}
               onSubmit={edit.saveEdit}
               onUploadFile={edit.handleUpload}
-              pasteAsFileThreshold={PASTE_AS_FILE_THRESHOLD}
               onUploadingChange={edit.onUploadingChange}
               debounceMs={100}
               currentIssueId={issueId}
@@ -983,7 +981,6 @@ function CommentCardImpl({
                     }}
                     onSubmit={edit.saveEdit}
                     onUploadFile={edit.handleUpload}
-                    pasteAsFileThreshold={PASTE_AS_FILE_THRESHOLD}
                     onUploadingChange={edit.onUploadingChange}
                     debounceMs={100}
                     currentIssueId={issueId}

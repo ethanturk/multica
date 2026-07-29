@@ -43,6 +43,54 @@ type batchFixture struct {
 	// succeeds. It receives the executable path and the 1-based attempt count
 	// for that path, and returns a non-nil error to fail that attempt.
 	probeErr func(path string, attempt int) error
+	// registerFail, when non-nil, makes /api/daemon/register return 500. A
+	// non-empty string key scopes the failure to that workspace ID; the empty
+	// string key fails every workspace. Used to exercise the discovery retry
+	// paths (MUL-5439).
+	registerFail map[string]bool
+	// profilesFail makes the runtime-profiles route return 500, reproducing the
+	// best-effort profile fetch failing while a discovery-driven registration
+	// is in flight.
+	profilesFail bool
+}
+
+// failRegister toggles register failure for every workspace.
+func (fx *batchFixture) failRegister(fail bool) {
+	fx.mu.Lock()
+	defer fx.mu.Unlock()
+	if fx.registerFail == nil {
+		fx.registerFail = make(map[string]bool)
+	}
+	fx.registerFail[""] = fail
+}
+
+// failRegisterFor toggles register failure for one workspace.
+func (fx *batchFixture) failRegisterFor(workspaceID string, fail bool) {
+	fx.mu.Lock()
+	defer fx.mu.Unlock()
+	if fx.registerFail == nil {
+		fx.registerFail = make(map[string]bool)
+	}
+	fx.registerFail[workspaceID] = fail
+}
+
+func (fx *batchFixture) registerShouldFail(workspaceID string) bool {
+	fx.mu.Lock()
+	defer fx.mu.Unlock()
+	return fx.registerFail[""] || fx.registerFail[workspaceID]
+}
+
+// failProfiles toggles failure of the custom runtime profiles fetch.
+func (fx *batchFixture) failProfiles(fail bool) {
+	fx.mu.Lock()
+	defer fx.mu.Unlock()
+	fx.profilesFail = fail
+}
+
+func (fx *batchFixture) profilesShouldFail() bool {
+	fx.mu.Lock()
+	defer fx.mu.Unlock()
+	return fx.profilesFail
 }
 
 type registeredCall struct {
@@ -133,6 +181,11 @@ func newBatchFixture(t *testing.T) *batchFixture {
 				Runtimes    []map[string]string `json:"runtimes"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
+			if fx.registerShouldFail(body.WorkspaceID) {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"error":"injected register failure"}`))
+				return
+			}
 			call := registeredCall{workspaceID: body.WorkspaceID}
 			var resp RegisterResponse
 			for _, rt := range body.Runtimes {
@@ -151,6 +204,11 @@ func newBatchFixture(t *testing.T) *batchFixture {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(resp)
 		case strings.HasSuffix(r.URL.Path, "/runtime-profiles"):
+			if fx.profilesShouldFail() {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"error":"injected profiles failure"}`))
+				return
+			}
 			workspaceID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/daemon/workspaces/"), "/runtime-profiles")
 			fx.mu.Lock()
 			profiles := fx.profiles[workspaceID]

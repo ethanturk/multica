@@ -1509,3 +1509,87 @@ describe("ApiClient", () => {
     });
   });
 });
+
+describe("ApiClient model discovery response schema", () => {
+  const completed = {
+    id: "req-1",
+    runtime_id: "rt-1",
+    status: "completed",
+    supported: true,
+    created_at: "2026-07-29T00:00:00Z",
+    updated_at: "2026-07-29T00:00:01Z",
+    models: [{ id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" }],
+  };
+
+  function stubJSON(body: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+  }
+
+  it("parses a live completed discovery", async () => {
+    stubJSON(completed);
+
+    const result = await new ApiClient("https://api.example.test")
+      .initiateListModels("rt-1");
+
+    expect(result).toMatchObject({
+      status: "completed",
+      supported: true,
+      models: [{ id: "claude-sonnet-4-6" }],
+    });
+  });
+
+  it("keeps the cache markers on a server-cached snapshot", async () => {
+    stubJSON({ ...completed, cached: true, cached_at: "2026-07-29T00:00:00Z" });
+
+    const result = await new ApiClient("https://api.example.test")
+      .initiateListModels("rt-1");
+
+    expect(result.cached).toBe(true);
+    expect(result.cached_at).toBe("2026-07-29T00:00:00Z");
+  });
+
+  // The picker drives a state machine off `status`, so a malformed body must
+  // become an explicit failure — not a fabricated empty catalog, and not an
+  // endless "discovering models" spinner.
+  it("degrades a malformed initiate response to an explicit failure", async () => {
+    stubJSON({ status: 7, models: "nope" });
+
+    const result = await new ApiClient("https://api.example.test")
+      .initiateListModels("rt-1");
+
+    expect(result.status).toBe("failed");
+    expect(result.supported).toBe(true);
+    expect(result.error).toBe("invalid model discovery response");
+    expect(result.runtime_id).toBe("rt-1");
+  });
+
+  it("degrades a malformed poll response to an explicit failure", async () => {
+    stubJSON("not-an-object");
+
+    const result = await new ApiClient("https://api.example.test")
+      .getListModelsResult("rt-1", "req-9");
+
+    expect(result.status).toBe("failed");
+    expect(result.id).toBe("req-9");
+    expect(result.runtime_id).toBe("rt-1");
+  });
+
+  it("stays usable against a backend that omits supported", async () => {
+    const { supported: _omitted, ...withoutSupported } = completed;
+    stubJSON(withoutSupported);
+
+    const result = await new ApiClient("https://api.example.test")
+      .getListModelsResult("rt-1", "req-1");
+
+    expect(result.supported).toBe(true);
+    expect(result.status).toBe("completed");
+  });
+});
