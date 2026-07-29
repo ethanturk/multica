@@ -113,6 +113,19 @@ func TestProjectClaudeLevels_PerModelSubset(t *testing.T) {
 	if !reflect.DeepEqual(values, superset) {
 		t.Fatalf("projectClaudeLevels for Opus: got %v, want %v", values, superset)
 	}
+	// Opus 5 declares `xhigh_effort` + `max_effort` upstream, so it keeps the
+	// full superset like the rest of the Opus family. Without an entry here it
+	// would fall through to "no allow-list" and coincidentally get the same
+	// levels — this pins the mapping so a later Sonnet-style restriction on the
+	// fallback path can't silently widen it.
+	got = projectClaudeLevels(superset, claudeModelEffortAllow["claude-opus-5"])
+	values = values[:0]
+	for _, lvl := range got {
+		values = append(values, lvl.Value)
+	}
+	if !reflect.DeepEqual(values, superset) {
+		t.Fatalf("projectClaudeLevels for Opus 5: got %v, want %v", values, superset)
+	}
 }
 
 // ── Codex discovery argv ────────────────────────────────────────────
@@ -232,6 +245,9 @@ func TestParseCodexModelCatalog(t *testing.T) {
 					{"effort": "max", "description": "Maximum"},
 					{"effort": "ultra", "description": "Delegates"},
 					{"effort": "future", "description": "New CLI value"}
+				],
+				"service_tiers": [
+					{"id": "priority", "name": "Fast", "description": "1.5x speed, increased usage"}
 				]
 			},
 			{
@@ -260,6 +276,9 @@ func TestParseCodexModelCatalog(t *testing.T) {
 	}
 	if got[0].Thinking == nil || got[0].Thinking.DefaultLevel != "low" || !hasThinkingLevel(got[0].Thinking, "max") || !hasThinkingLevel(got[0].Thinking, "ultra") || !hasThinkingLevel(got[0].Thinking, "future") {
 		t.Errorf("unexpected per-model thinking catalog: %+v", got[0].Thinking)
+	}
+	if len(got[0].ServiceTiers) != 1 || got[0].ServiceTiers[0].ID != "priority" || got[0].ServiceTiers[0].Name != "Fast" {
+		t.Errorf("unexpected service-tier catalog: %+v", got[0].ServiceTiers)
 	}
 	if got[1].ID != "no-reasoning" || got[1].Thinking != nil {
 		t.Errorf("model without reasoning should remain selectable without a thinking picker: %+v", got[1])
@@ -496,7 +515,7 @@ func TestValidateThinkingLevel_EmptyModelResolvesToDefault(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-script fake binary requires a POSIX shell")
 	}
-	t.Parallel()
+	// This test resets the package-global thinking cache, so it must remain serial.
 
 	// We need a `claude` whose --help advertises the full superset
 	// (low/medium/high/xhigh/max) so per-model projection actually has
@@ -551,7 +570,7 @@ func TestValidateThinkingLevel_ExplicitModel(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-script fake binary requires a POSIX shell")
 	}
-	t.Parallel()
+	// This test resets the package-global thinking cache, so it must remain serial.
 	fakeClaude := writeFakeClaudeHelpBinary(t)
 	resetThinkingCacheForTests()
 	defer resetThinkingCacheForTests()
@@ -565,6 +584,19 @@ func TestValidateThinkingLevel_ExplicitModel(t *testing.T) {
 	}
 	if !ok {
 		t.Errorf("xhigh should be valid on opus-4-7; got false")
+	}
+
+	// The whole Opus effort range round-trips on Opus 5, which is the point of
+	// adding it to the catalog: an agent pinned to it can still carry a
+	// persisted thinking_level without the daemon dropping the flag.
+	for _, level := range []string{"low", "medium", "high", "xhigh", "max"} {
+		ok, err := ValidateThinkingLevel(ctx, "claude", fakeClaude, "claude-opus-5", level)
+		if err != nil {
+			t.Fatalf("unexpected err for opus-5 %q: %v", level, err)
+		}
+		if !ok {
+			t.Errorf("%q should be valid on opus-5; got false", level)
+		}
 	}
 
 	// xhigh is NOT valid on Sonnet — should fail.
@@ -637,7 +669,7 @@ func TestValidateThinkingLevel_PreEffortCLIRejectsAllLevels(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-script fake binary requires a POSIX shell")
 	}
-	t.Parallel()
+	// This test resets the package-global thinking cache, so it must remain serial.
 
 	// End-to-end guard for the daemon's pre-execution check against a CLI
 	// that predates --effort: the catalog must offer no levels, so any
@@ -776,8 +808,8 @@ func writeFakeCodexModelsBinary(t *testing.T) string {
 		"if [ \"$1\" = \"debug\" ]; then\n" +
 		"cat <<'EOF'\n" +
 		`{"models":[` +
-		`{"slug":"gpt-5.6-sol","default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}]},` +
-		`{"slug":"gpt-5.6-terra","default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}]},` +
+		`{"slug":"gpt-5.6-sol","default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}],"service_tiers":[{"id":"priority","name":"Fast","description":"1.5x speed"}]},` +
+		`{"slug":"gpt-5.6-terra","default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}],"service_tiers":[{"id":"priority","name":"Fast"}]},` +
 		`{"slug":"gpt-5.6-luna","default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"}]}` +
 		`]}` + "\n" +
 		"EOF\n" +
@@ -788,10 +820,55 @@ func writeFakeCodexModelsBinary(t *testing.T) string {
 	return path
 }
 
+func TestValidateServiceTierCodexPerModelCatalog(t *testing.T) {
+	t.Parallel()
+	fake := writeFakeCodexModelsBinary(t)
+	for _, tc := range []struct {
+		provider string
+		model    string
+		tier     string
+		want     bool
+	}{
+		{provider: "codex", model: "gpt-5.6-sol", tier: "priority", want: true},
+		{provider: "codex", model: "gpt-5.6-luna", tier: "priority", want: false},
+		{provider: "codex", model: "", tier: "priority", want: false},
+		{provider: "claude", model: "gpt-5.6-sol", tier: "priority", want: false},
+		{provider: "codex", model: "gpt-5.6-sol", tier: "", want: true},
+	} {
+		got, err := ValidateServiceTier(context.Background(), tc.provider, fake, tc.model, tc.tier)
+		if err != nil {
+			t.Fatalf("ValidateServiceTier(%q, %q, %q): %v", tc.provider, tc.model, tc.tier, err)
+		}
+		if got != tc.want {
+			t.Errorf("ValidateServiceTier(%q, %q, %q) = %v, want %v", tc.provider, tc.model, tc.tier, got, tc.want)
+		}
+	}
+}
+
+func TestIsKnownServiceTier(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		provider string
+		value    string
+		want     bool
+	}{
+		{provider: "codex", value: "", want: true},
+		{provider: "claude", value: "", want: true},
+		{provider: "codex", value: "priority", want: true},
+		{provider: "codex", value: "future.fast", want: true},
+		{provider: "codex", value: "../priority", want: false},
+		{provider: "claude", value: "priority", want: false},
+	} {
+		if got := IsKnownServiceTier(tc.provider, tc.value); got != tc.want {
+			t.Errorf("IsKnownServiceTier(%q, %q) = %v, want %v", tc.provider, tc.value, got, tc.want)
+		}
+	}
+}
+
 // ── Cache key invalidation ───────────────────────────────────────────
 
 func TestThinkingCacheKeyDistinct(t *testing.T) {
-	t.Parallel()
+	// This test resets the package-global thinking cache, so it must remain serial.
 	resetThinkingCacheForTests()
 	defer resetThinkingCacheForTests()
 
@@ -803,15 +880,24 @@ func TestThinkingCacheKeyDistinct(t *testing.T) {
 	thinkingCachePut(b, map[string]*ModelThinking{"x": {DefaultLevel: "b"}})
 	thinkingCachePut(c, map[string]*ModelThinking{"x": {DefaultLevel: "c"}})
 
-	if got, _ := thinkingCacheGet(a); got["x"].DefaultLevel != "a" {
-		t.Errorf("cache key A: got %q, want a", got["x"].DefaultLevel)
+	assertLevel := func(name string, key thinkingCacheKey, want string) {
+		t.Helper()
+		models, ok := thinkingCacheGet(key)
+		if !ok {
+			t.Fatalf("cache key %s: entry missing", name)
+		}
+		model, ok := models["x"]
+		if !ok || model == nil {
+			t.Fatalf("cache key %s: model x missing", name)
+		}
+		if model.DefaultLevel != want {
+			t.Errorf("cache key %s: got %q, want %q", name, model.DefaultLevel, want)
+		}
 	}
-	if got, _ := thinkingCacheGet(b); got["x"].DefaultLevel != "b" {
-		t.Errorf("cache key B: got %q, want b", got["x"].DefaultLevel)
-	}
-	if got, _ := thinkingCacheGet(c); got["x"].DefaultLevel != "c" {
-		t.Errorf("cache key C: got %q, want c", got["x"].DefaultLevel)
-	}
+
+	assertLevel("A", a, "a")
+	assertLevel("B", b, "b")
+	assertLevel("C", c, "c")
 }
 
 // ── Shared injection fixture (Trump's MUL-2339 constraint) ───────────
@@ -969,6 +1055,30 @@ func TestApplyCodexReasoningEffort_PreservesPreExistingConfig(t *testing.T) {
 	if cfg["model_reasoning_effort"] != "high" {
 		t.Errorf("reasoning effort not injected: %+v", cfg)
 	}
+}
+
+func TestApplyCodexServiceTier_ThreePoints(t *testing.T) {
+	t.Parallel()
+	for _, tier := range []string{"", "priority", "future-fast"} {
+		t.Run(tier, func(t *testing.T) {
+			for _, params := range []map[string]any{
+				{"model": "gpt-5.6-sol", "cwd": "/work"},
+				{"threadId": "prior", "cwd": "/work"},
+				{"threadId": "thread", "input": []map[string]any{{"type": "text", "text": "hi"}}},
+			} {
+				applyCodexServiceTier(params, tier)
+				got, exists := params["serviceTier"]
+				if tier == "" {
+					if exists {
+						t.Errorf("empty tier emitted serviceTier=%v", got)
+					}
+				} else if !exists || got != tier {
+					t.Errorf("serviceTier = %v (exists=%v), want %q", got, exists, tier)
+				}
+			}
+		})
+	}
+	applyCodexServiceTier(nil, "priority")
 }
 
 // ── End-to-end: build*Args + thinking_level wiring ───────────────────

@@ -3,6 +3,7 @@
  * Keep the exported shape stable for callers/tests, but always report `ok`.
  */
 export const MIN_QUICK_CREATE_CLI_VERSION = "0.2.21";
+export const MIN_QUICK_CREATE_FIELDS_CLI_VERSION = "0.4.3";
 
 export type CliVersionState = "ok" | "too_old" | "missing";
 
@@ -42,6 +43,32 @@ export function checkQuickCreateCliVersion(detected: string | undefined | null):
   return { state: "ok", current, min: MIN_QUICK_CREATE_CLI_VERSION };
 }
 
+/** Capability gate for explicit quick-create priority and due-date fields. */
+export function checkQuickCreateFieldsCliVersion(
+  detected: string | undefined | null,
+): CliVersionCheck {
+  return checkCliVersion(detected, MIN_QUICK_CREATE_FIELDS_CLI_VERSION);
+}
+
+function checkCliVersion(
+  detected: string | undefined | null,
+  minimum: string,
+): CliVersionCheck {
+  const current = (detected ?? "").trim();
+  if (DEV_DESCRIBE_RE.test(current)) {
+    return { state: "ok", current, min: minimum };
+  }
+  const parsed = current ? parseSemver(current) : null;
+  if (!parsed) {
+    return { state: "missing", current, min: minimum };
+  }
+  const min = parseSemver(minimum)!;
+  if (lessThan(parsed, min)) {
+    return { state: "too_old", current, min: minimum };
+  }
+  return { state: "ok", current, min: minimum };
+}
+
 /** Pull `cli_version` off a runtime row's loosely-typed metadata bag. */
 export function readRuntimeCliVersion(metadata: Record<string, unknown> | undefined): string {
   const v = metadata?.cli_version;
@@ -70,10 +97,37 @@ export const MIN_HANDOFF_CLI_VERSION = "0.3.28";
  * round-trip, exactly like the quick-create version gate.
  */
 export function handoffSupported(detected: string | undefined | null): boolean {
+  return meetsMinCliVersion(detected, MIN_HANDOFF_CLI_VERSION);
+}
+
+/**
+ * First release whose daemon renders the chat session's project context
+ * (description + resources) into the run brief (PR #5765, ships in v0.4.10).
+ * Older daemons still receive and honor the project's repos — the server
+ * pre-extracts those into the generic `repos` claim field — but silently skip
+ * the Project Context section, so the durable description never reaches the
+ * agent. SOFT gate: selecting a project always works; the UI only warns.
+ *
+ * Frontend-only constant: unlike handoff there is no server preview endpoint
+ * computing this, so there is no server twin to keep in lockstep with.
+ */
+export const MIN_CHAT_PROJECT_CONTEXT_CLI_VERSION = "0.4.10";
+
+/**
+ * Whether a daemon-reported CLI version is new enough to inject a chat
+ * session's project description into the run brief. Same degrade rules as
+ * `handoffSupported`: missing / unparsable / below-minimum are `false`,
+ * dev-built daemons (git-describe shape) always pass.
+ */
+export function chatProjectContextSupported(detected: string | undefined | null): boolean {
+  return meetsMinCliVersion(detected, MIN_CHAT_PROJECT_CONTEXT_CLI_VERSION);
+}
+
+function meetsMinCliVersion(detected: string | undefined | null, minimum: string): boolean {
   const current = (detected ?? "").trim();
   if (!current) return false;
   if (DEV_DESCRIBE_RE.test(current)) return true;
   const parsed = parseSemver(current);
   if (!parsed) return false;
-  return !lessThan(parsed, parseSemver(MIN_HANDOFF_CLI_VERSION)!);
+  return !lessThan(parsed, parseSemver(minimum)!);
 }

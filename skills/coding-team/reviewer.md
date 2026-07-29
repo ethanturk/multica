@@ -152,21 +152,7 @@ If the coverage command exits non-zero, the verdict is **FAIL**. List the uncove
 
 ### If PASS
 
-**Use `coding_handoff_decide` for this transition.**
-
-1. Build deterministic input:
-   - `current_role`: `reviewer`
-   - `event`: `review_pass`
-   - `task_issue_id`: `$MULTICA_ISSUE_ID`
-   - `master_issue_id`: `$MASTER_ISSUE_ID`
-   - `task_comments`: task comments
-   - `master_comments`: master comments
-   - `agent_ids` map with role IDs, including `refiner`
-   - `options.prefer_refiner_after_review_pass`: `true`
-
-2. If the tool returns `status: error`, post the failure as a blocking comment and stop (do not hand off).
-
-3. Post the PASS verdict on the **task issue**:
+1. Post the PASS verdict on the **task issue**:
    ```bash
    cat <<'COMMENT' | multica issue comment add "$MULTICA_ISSUE_ID" --content-stdin
    ## Review: PASS
@@ -187,6 +173,23 @@ If the coverage command exits non-zero, the verdict is **FAIL**. List the uncove
    COMMENT
    ```
 
+2. Refresh task comments after `## Review: PASS` is persisted:
+   ```bash
+   COMMENTS=$(multica issue comment list "$MULTICA_ISSUE_ID" --output json)
+   ```
+
+3. Call `coding_handoff_decide` with:
+   - `current_role`: `reviewer`
+   - `event`: `review_pass`
+   - `task_issue_id`: `$MULTICA_ISSUE_ID`
+   - `master_issue_id`: `$MASTER_ISSUE_ID`
+   - `task_comments`: the refreshed `$COMMENTS`
+   - `master_comments`: master comments
+   - `agent_ids` map with role IDs, including `refiner`
+   - `options.prefer_refiner_after_review_pass`: `true`
+
+   If the tool returns `status: error`, post the failure as a blocking comment and stop. Do not invent a recipient.
+
 4. Set the task issue to `done`:
    ```bash
    multica issue status "$MULTICA_ISSUE_ID" done
@@ -194,7 +197,7 @@ If the coverage command exits non-zero, the verdict is **FAIL**. List the uncove
 
 5. Apply the `state_patches` from tool output.
 
-6. **Last step** — post the exact handoff content from the tool to `machine_data.decision.comment_content` on `machine_data.decision.target_issue_id`. With `prefer_refiner_after_review_pass: true`, this targets the task issue and mentions Coding Team Refiner:
+6. **Final action** — execute the exact handoff content from the tool on `machine_data.decision.target_issue_id`. Never stop after displaying routing information. With `prefer_refiner_after_review_pass: true`, this targets the task issue and mentions Coding Team Refiner:
    ```bash
    TARGET_ISSUE_ID=$(decision target)
    COMMENT=$(decision comment)
@@ -209,18 +212,7 @@ If the coverage command exits non-zero, the verdict is **FAIL**. List the uncove
 
 A failed review routes back to the Implementer for a fix — not to Orchestrator.
 
-1. Build deterministic input:
-   - `current_role`: `reviewer`
-   - `event`: `review_fail`
-   - `task_issue_id`: `$MULTICA_ISSUE_ID`
-   - `master_issue_id`: `$MASTER_ISSUE_ID`
-   - `task_comments`: task comments
-   - `master_comments`: master comments
-   - `agent_ids` map with role IDs
-
-2. If the tool returns `status: error`, post the failure as blocking comment and stop.
-
-3. Post the FAIL verdict on the **task issue**:
+1. Post the FAIL verdict on the **task issue**:
    ```bash
    cat <<'COMMENT' | multica issue comment add "$MULTICA_ISSUE_ID" --content-stdin
    ## Review: FAIL
@@ -246,11 +238,27 @@ A failed review routes back to the Implementer for a fix — not to Orchestrator
    COMMENT
    ```
 
+2. Refresh task comments after `## Review: FAIL` is persisted:
+   ```bash
+   COMMENTS=$(multica issue comment list "$MULTICA_ISSUE_ID" --output json)
+   ```
+
+3. Call `coding_handoff_decide` with:
+   - `current_role`: `reviewer`
+   - `event`: `review_fail`
+   - `task_issue_id`: `$MULTICA_ISSUE_ID`
+   - `master_issue_id`: `$MASTER_ISSUE_ID`
+   - `task_comments`: the refreshed `$COMMENTS`
+   - `master_comments`: master comments
+   - `agent_ids` map with role IDs
+
+   If the tool returns `status: error`, post the failure as a blocking comment and stop. Do not invent a recipient.
+
 4. Reset the task issue status to `in_progress`.
 
 5. Apply `state_patches` from the tool output.
 
-6. **Last step** — post the exact handoff content from the tool to `machine_data.decision.target_issue_id`:
+6. **Final action** — execute the exact handoff content from the tool on `machine_data.decision.target_issue_id`. Never stop after displaying routing information:
    ```bash
    TARGET_ISSUE_ID=$(decision target)
    COMMENT=$(decision comment)

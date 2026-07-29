@@ -233,19 +233,24 @@ func TestRepoCheckoutUsesTaskScopedProjectRefByDefault(t *testing.T) {
 
 	const workspaceID = "ws-checkout"
 	const repoURL = "https://github.com/org/repo.git"
+	const checkoutURL = "https://anything:secret@github.com/org/repo.git"
 	cache := &recordingRepoCache{lookupPath: "/cache/org/repo.git"}
 	d := newRepoCheckoutTestDaemon(t, workspaceID, repoURL, cache)
 	d.registerTaskRepos(workspaceID, "task-1", []RepoData{{URL: repoURL, Ref: "release/v2"}})
 
 	rec := httptest.NewRecorder()
-	body := strings.NewReader(`{"url":"` + repoURL + `","workspace_id":"` + workspaceID + `","workdir":"/tmp/work","task_id":"task-1"}`)
+	body := strings.NewReader(`{"url":"` + checkoutURL + `","workspace_id":"` + workspaceID + `","workdir":"/tmp/work","task_id":"task-1"}`)
 	d.repoCheckoutHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/repo/checkout", body))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if got := cache.lastCreateParams().Ref; got != "release/v2" {
+	params := cache.lastCreateParams()
+	if got := params.Ref; got != "release/v2" {
 		t.Fatalf("CreateWorktree Ref = %q, want release/v2", got)
+	}
+	if params.RepoURL != repoURL {
+		t.Fatalf("CreateWorktree RepoURL = %q, want credentials stripped", params.RepoURL)
 	}
 }
 
@@ -267,6 +272,46 @@ func TestRepoCheckoutExplicitRefOverridesProjectDefault(t *testing.T) {
 	}
 	if got := cache.lastCreateParams().Ref; got != "hotfix" {
 		t.Fatalf("CreateWorktree Ref = %q, want explicit hotfix", got)
+	}
+}
+
+func TestRepoCheckoutForwardsIsolatedMode(t *testing.T) {
+	t.Parallel()
+
+	const workspaceID = "ws-checkout"
+	const repoURL = "https://github.com/org/repo.git"
+	cache := &recordingRepoCache{lookupPath: "/cache/org/repo.git"}
+	d := newRepoCheckoutTestDaemon(t, workspaceID, repoURL, cache)
+
+	rec := httptest.NewRecorder()
+	body := strings.NewReader(`{"url":"` + repoURL + `","workspace_id":"` + workspaceID + `","workdir":"/tmp/work","task_id":"task-1","checkout_mode":"isolated"}`)
+	d.repoCheckoutHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/repo/checkout", body))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !cache.lastCreateParams().IsolatedGitMetadata {
+		t.Fatal("isolated checkout_mode was not forwarded to repo cache")
+	}
+}
+
+func TestRepoCheckoutRejectsUnknownMode(t *testing.T) {
+	t.Parallel()
+
+	const workspaceID = "ws-checkout"
+	const repoURL = "https://github.com/org/repo.git"
+	cache := &recordingRepoCache{lookupPath: "/cache/org/repo.git"}
+	d := newRepoCheckoutTestDaemon(t, workspaceID, repoURL, cache)
+
+	rec := httptest.NewRecorder()
+	body := strings.NewReader(`{"url":"` + repoURL + `","workspace_id":"` + workspaceID + `","workdir":"/tmp/work","task_id":"task-1","checkout_mode":"unsafe"}`)
+	d.repoCheckoutHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/repo/checkout", body))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := cache.lastCreateParams(); got != (repocache.WorktreeParams{}) {
+		t.Fatalf("invalid checkout mode reached repo cache: %+v", got)
 	}
 }
 

@@ -1,21 +1,29 @@
 "use client";
 
-import { useEffect, useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import type { QueryKey } from "@tanstack/react-query";
+import { api } from "@multica/core/api";
 import type {
   Issue,
   IssueAssigneeGroup,
   IssueStatus,
+  IssueTableFacetSpec,
+  IssueTableFacetsResponse,
+  IssueTableGroupsRequest,
+  IssueTableQuerySpec,
   Project,
 } from "@multica/core/types";
+import { workspaceWorkingAgentsOptions } from "@multica/core/agents";
 import { useWorkspaceId } from "@multica/core/hooks";
+import { ALL_STATUSES } from "@multica/core/issues/config";
 import { dateOnlyToLocalDate } from "@multica/core/issues/date";
 import type {
   AssigneeGroupedIssuesFilter,
   IssueSortParam,
   MyIssuesFilter,
 } from "@multica/core/issues/queries";
+import { issueTableFacetsOptions } from "@multica/core/issues/queries";
 import {
   buildIssueSurfaceQueryPlan,
   type IssueSurfaceQueryPlan,
@@ -27,8 +35,8 @@ import { propertyIdFromViewKey } from "@multica/core/issues/stores/view-store";
 import { useViewStore } from "@multica/core/issues/stores/view-store-context";
 import type { IssueFilters } from "../utils/filter";
 import type { ChildProgress } from "../components/list-row";
+import { IssueTableExportIntegrityError } from "../components/table-view-model";
 import type { IssueSurfaceMode } from "./types";
-import type { IssueSurfaceActivity } from "./activity";
 import type { IssueSurfaceActions } from "./actions-context";
 import {
   type IssueSurfaceSelection,
@@ -40,11 +48,20 @@ import {
   type MoveIssueUpdates,
 } from "./use-issue-surface-actions";
 import { useIssueSurfaceData } from "./use-issue-surface-data";
+import {
+  useIssueStatusBranches,
+  type IssueStatusPagination,
+} from "./use-issue-status-branches";
+import {
+  useIssueGroupBranches,
+  type IssueGroupBranches,
+} from "./use-issue-group-branches";
 
 interface UseIssueSurfaceControllerInput {
   scope: IssueScope;
   modes: IssueSurfaceMode[];
   createDefaults?: IssueCreateDefaults;
+  search?: string;
 }
 
 export interface IssueSurfaceController {
@@ -57,6 +74,10 @@ export interface IssueSurfaceController {
   projectIssues: Issue[];
   issues: Issue[];
   swimlaneIssues: Issue[];
+  /** The rows the agents-working filter would leave on screen. Feeds the
+   *  header chip so its count IS the post-click row count (MUL-4884). */
+  /** See IssueSurfaceData.workingScopeIssues — undefined means UNKNOWN. */
+  workingScopeIssues: Issue[] | undefined;
   filteredGanttIssues: Issue[];
   assigneeGroups?: IssueAssigneeGroup[];
   assigneeGroupQueryKey?: QueryKey;
@@ -68,12 +89,34 @@ export interface IssueSurfaceController {
   ganttIssues: Issue[];
   visibleStatuses: IssueStatus[];
   hiddenStatuses: IssueStatus[];
-  activeFilters: Omit<IssueFilters, "statusFilters" | "runningIssueIds">;
-  activity: IssueSurfaceActivity;
+  /** Exact server counts plus cursor controls for List/status Board. */
+  statusPagination?: IssueStatusPagination;
+  /** Exact group catalog plus independent row cursors for Assignee/Property
+   * Board and compound Swimlane cells. */
+  groupBranches?: IssueGroupBranches;
+  activeFilters: Omit<IssueFilters, "statusFilters">;
   actions: IssueSurfaceActions;
   selection: IssueSurfaceSelection;
   childProgressMap: Map<string, ChildProgress>;
   projectMap: Map<string, Project>;
+  resolveTableExportLookups: (needs: {
+    projects: boolean;
+    childProgress: boolean;
+  }) => Promise<{
+    projectMap: Map<string, Project>;
+    childProgressMap: Map<string, ChildProgress>;
+  }>;
+  tableSearch: string;
+  /** Canonical server-owned Table membership. */
+  tableQuerySpec: IssueTableQuerySpec;
+  /** Exact disjunctive counts for the active server-backed filter submenu. */
+  tableFacetCounts?: IssueTableFacetsResponse;
+  /** Whether scopedIssues is a complete client window for local count use. */
+  facetCountsExact: boolean;
+  /** Load one server facet when its filter submenu is opened. */
+  setActiveTableFacet: (facet: IssueTableFacetSpec | null) => void;
+  setTableSearch: (query: string) => void;
+  exportTableIssues: () => Promise<Issue[]>;
   isLoading: boolean;
   /** See IssueSurfaceData.isRefreshing — placeholder-backed revalidation. */
   isRefreshing: boolean;
@@ -105,10 +148,25 @@ function issueDateFilterToApiParams(filter: IssueDateFilter | null) {
   };
 }
 
+function useDebouncedTableSearch(value: string, delayMs = 250) {
+  const [debouncedValue, setDebouncedValue] = useState(value.trim());
+
+  useEffect(() => {
+    const timer = window.setTimeout(
+      () => setDebouncedValue(value.trim()),
+      delayMs,
+    );
+    return () => window.clearTimeout(timer);
+  }, [delayMs, value]);
+
+  return debouncedValue;
+}
+
 export function useIssueSurfaceController({
   scope,
   modes,
   createDefaults,
+  search = "",
 }: UseIssueSurfaceControllerInput): IssueSurfaceController {
   const wsId = useWorkspaceId();
   const queryPlan = useMemo<IssueSurfaceQueryPlan>(
@@ -135,8 +193,12 @@ export function useIssueSurfaceController({
   const propertyFilters = useViewStore((s) => s.propertyFilters);
   const agentRunningFilter = useViewStore((s) => s.agentRunningFilter);
   const showSubIssues = useViewStore((s) => s.showSubIssues);
+  const ganttShowCompleted = useViewStore((s) => s.ganttShowCompleted);
   const cardProperties = useViewStore((s) => s.cardProperties);
   const swimlaneGrouping = useViewStore((s) => s.swimlaneGrouping);
+  const tableColumns = useViewStore((s) => s.tableColumns);
+  const listCollapsedStatuses = useViewStore((s) => s.listCollapsedStatuses);
+  const [tableSearch, setTableSearch] = useState("");
 
   const allowedModes = useMemo(() => new Set<IssueSurfaceMode>(modes), [modes]);
   const fallbackMode = modes[0] ?? "list";
@@ -208,14 +270,43 @@ export function useIssueSurfaceController({
     };
   }, [dateParams, effectivePropertyFilters, propertySortId, rawPropertySortId, sortBy, sortDirection]);
 
-  const selection = useCreateIssueSurfaceSelection(
-    scopeKey,
-    `${scopeKey}:${effectiveViewMode}`,
-  );
-
+  const groupingPropertyId = propertyIdFromViewKey(grouping);
+  const activeGroupingProperty = groupingPropertyId
+    ? workspaceProperties.find(
+        (property) =>
+          property.id === groupingPropertyId && property.type === "select",
+      ) ?? null
+    : null;
+  const effectiveGrouping =
+    groupingPropertyId && catalogSettled && !activeGroupingProperty
+      ? "status"
+      : grouping;
   const usesAssigneeBoard =
-    effectiveViewMode === "board" && grouping === "assignee";
+    effectiveViewMode === "board" && effectiveGrouping === "assignee";
   const usesGantt = effectiveViewMode === "gantt" && !!projectId;
+  const usesTable = effectiveViewMode === "table";
+  const activeSearch = usesTable ? tableSearch : search;
+  const debouncedActiveSearch = useDebouncedTableSearch(activeSearch);
+  const usesServerStatusSurface =
+    effectiveViewMode === "list" ||
+    (effectiveViewMode === "board" && effectiveGrouping === "status");
+  const usesServerGroupSurface =
+    (effectiveViewMode === "board" && effectiveGrouping !== "status") ||
+    effectiveViewMode === "swimlane";
+  const usesServerFacets =
+    usesTable || usesServerStatusSurface || usesServerGroupSurface;
+  const serverStatuses = useMemo<IssueStatus[]>(
+    () => {
+      const visible =
+        statusFilters.length > 0
+          ? ALL_STATUSES.filter((status) => statusFilters.includes(status))
+          : [...ALL_STATUSES];
+      return effectiveViewMode === "list"
+        ? visible.filter((status) => !listCollapsedStatuses.includes(status))
+        : visible;
+    },
+    [effectiveViewMode, listCollapsedStatuses, statusFilters],
+  );
 
   const projectFilterState = useMemo(
     () => ({
@@ -227,28 +318,333 @@ export function useIssueSurfaceController({
   const { projectFilters: viewProjectFilters, includeNoProject: viewIncludeNoProject } =
     projectFilterState;
 
+  const workingAgentMineRelation =
+    scope.type === "my"
+      ? scope.relation === "all"
+        ? "any"
+        : scope.relation
+      : undefined;
+  const { data: workspaceWorkingAgents = [] } = useQuery(
+    workspaceWorkingAgentsOptions(wsId, "issue", workingAgentMineRelation),
+  );
+  const workingIssueIDs = useMemo(() => {
+    const issueIDs = new Set<string>();
+    for (const agent of workspaceWorkingAgents) {
+      for (const issueID of agent.issue_ids) issueIDs.add(issueID);
+    }
+    return issueIDs;
+  }, [workspaceWorkingAgents]);
+
+  const tableQuerySpec = useMemo<IssueTableQuerySpec>(() => {
+    let queryScope: IssueTableQuerySpec["scope"];
+    switch (scope.type) {
+      case "workspace":
+        queryScope = {
+          kind: "workspace",
+          ...(scope.actorKind === "members"
+            ? { assignee_types: ["member" as const] }
+            : scope.actorKind === "agents"
+              ? { assignee_types: ["agent" as const, "squad" as const] }
+              : {}),
+        };
+        break;
+      case "project":
+        queryScope = { kind: "project", project_id: scope.projectId };
+        break;
+      case "my":
+        queryScope = {
+          kind: "my",
+          relation: scope.relation === "all" ? "any" : scope.relation,
+        };
+        break;
+      case "actor":
+        queryScope = {
+          kind: scope.relation === "assigned" ? "assignee" : "creator",
+          actor: { type: scope.actorType, id: scope.actorId },
+        };
+        break;
+      case "team":
+        throw new Error("Team issue scope is not supported by the Table query");
+    }
+
+    const date =
+      dateParams.date_field && dateParams.date_start && dateParams.date_end
+        ? {
+            field: dateParams.date_field,
+            start: dateParams.date_start,
+            end: dateParams.date_end,
+          }
+        : undefined;
+    return {
+      scope: queryScope,
+      filters: {
+        ...(statusFilters.length > 0 ? { statuses: statusFilters } : {}),
+        ...(priorityFilters.length > 0 ? { priorities: priorityFilters } : {}),
+        ...(assigneeFilters.length > 0 ? { assignees: assigneeFilters } : {}),
+        ...(includeNoAssignee ? { include_no_assignee: true } : {}),
+        ...(creatorFilters.length > 0 ? { creators: creatorFilters } : {}),
+        ...(viewProjectFilters.length > 0
+          ? { project_ids: viewProjectFilters }
+          : {}),
+        ...(viewIncludeNoProject ? { include_no_project: true } : {}),
+        ...(labelFilters.length > 0 ? { label_ids: labelFilters } : {}),
+        ...(Object.keys(effectivePropertyFilters).length > 0
+          ? { properties: effectivePropertyFilters }
+          : {}),
+        ...(date ? { date } : {}),
+        ...(agentRunningFilter
+          ? { working_issue_ids: [...workingIssueIDs] }
+          : {}),
+        include_sub_issues: showSubIssues,
+      },
+      ...(debouncedActiveSearch ? { search: debouncedActiveSearch } : {}),
+      sort: {
+        field: sort.sort_by ?? "position",
+        direction: sort.sort_direction ?? "asc",
+      },
+    };
+  }, [
+    agentRunningFilter,
+    assigneeFilters,
+    creatorFilters,
+    dateParams,
+    debouncedActiveSearch,
+    effectivePropertyFilters,
+    includeNoAssignee,
+    labelFilters,
+    priorityFilters,
+    scope,
+    showSubIssues,
+    sort.sort_by,
+    sort.sort_direction,
+    statusFilters,
+    viewIncludeNoProject,
+    viewProjectFilters,
+    workingIssueIDs,
+  ]);
+
+  const [activeTableFacet, setActiveTableFacet] =
+    useState<IssueTableFacetSpec | null>(null);
+  const requestedFacets = useMemo<IssueTableFacetSpec[]>(() => {
+    const facets: IssueTableFacetSpec[] = [];
+    if (usesServerStatusSurface) facets.push({ kind: "status" });
+    if (
+      activeTableFacet &&
+      !facets.some(
+        (facet) =>
+          facet.kind === activeTableFacet.kind &&
+          (facet.kind !== "property" ||
+            activeTableFacet.kind !== "property" ||
+            facet.property_id === activeTableFacet.property_id),
+      )
+    ) {
+      facets.push(activeTableFacet);
+    }
+    // The request shape remains total while disabled.
+    return facets.length > 0 ? facets : [{ kind: "status" }];
+  }, [activeTableFacet, usesServerStatusSurface]);
+  const tableFacetRequest = useMemo(
+    () => ({
+      query: tableQuerySpec,
+      facets: requestedFacets,
+      // Status surfaces consume the facet total as their authoritative empty
+      // state. Table rows/groups already own the displayed total.
+      include_total: usesServerStatusSurface,
+    }),
+    [requestedFacets, tableQuerySpec, usesServerStatusSurface],
+  );
+  const tableFacetsQuery = useQuery({
+    ...issueTableFacetsOptions(wsId, tableFacetRequest),
+    placeholderData: keepPreviousData,
+    // Counts are only visible inside one open filter submenu. Eagerly loading
+    // every custom-property facet made a Table mount issue up to 47 SQL
+    // statements and repeatedly scan the issue table after invalidation.
+    enabled:
+      usesServerStatusSurface ||
+      ((usesTable || usesServerGroupSurface) && activeTableFacet !== null),
+  });
+  useEffect(() => {
+    if (!usesServerFacets) setActiveTableFacet(null);
+  }, [usesServerFacets]);
+  const requestActiveTableFacet = useCallback(
+    (facet: IssueTableFacetSpec | null) => {
+      setActiveTableFacet(usesServerFacets ? facet : null);
+    },
+    [usesServerFacets],
+  );
+  const serverStatusBranches = useIssueStatusBranches({
+    wsId,
+    query: tableQuerySpec,
+    statuses: serverStatuses,
+    facets: tableFacetsQuery.data,
+    facetsPending: tableFacetsQuery.isPending,
+    facetsFetching: tableFacetsQuery.isFetching,
+    enabled: usesServerStatusSurface,
+  });
+  const serverGroupSpec = useMemo<IssueTableGroupsRequest["group"]>(() => {
+    if (effectiveViewMode === "swimlane") {
+      return {
+        kind: "compound",
+        primary: swimlaneGrouping,
+        secondary: "status",
+        secondary_values: serverStatuses,
+      };
+    }
+    const propertyId = propertyIdFromViewKey(effectiveGrouping);
+    if (propertyId) {
+      return {
+        kind: "property",
+        property_id: propertyId,
+        include_empty: true,
+      };
+    }
+    return { kind: "assignee" };
+  }, [
+    effectiveGrouping,
+    effectiveViewMode,
+    serverStatuses,
+    swimlaneGrouping,
+  ]);
+  const serverGroupQuery = useMemo<IssueTableQuerySpec>(() => {
+    if (effectiveViewMode !== "swimlane") return tableQuerySpec;
+    const { statuses: _statuses, ...filters } = tableQuerySpec.filters;
+    return { ...tableQuerySpec, filters };
+  }, [effectiveViewMode, tableQuerySpec]);
+  const serverGroupBranches = useIssueGroupBranches({
+    wsId,
+    query: serverGroupQuery,
+    group: serverGroupSpec,
+    secondaryValues:
+      effectiveViewMode === "swimlane" ? serverStatuses : undefined,
+    observeEmptyBranches:
+      effectiveViewMode === "swimlane" ||
+      (effectiveViewMode === "board" && activeGroupingProperty !== null),
+    enabled: usesServerGroupSurface,
+  });
+
+  // Selection is only meaningful within the current membership window: batch
+  // actions act on selected ids while export/common-field consumers intersect
+  // with visible rows, so a selection that survives a membership change lets
+  // "1 selected" mean different sets to different consumers (round-2 review
+  // P1#2). Reset whenever any membership-affecting input changes. Sort is
+  // excluded on purpose — reordering does not change membership. The live
+  // running set is also excluded: while the agents-working filter is on, a
+  // task finishing should not wipe the user's selection mid-action.
+  const membershipKey = useMemo(
+    () =>
+      JSON.stringify([
+        statusFilters,
+        priorityFilters,
+        assigneeFilters,
+        includeNoAssignee,
+        creatorFilters,
+        viewProjectFilters,
+        viewIncludeNoProject,
+        labelFilters,
+        effectivePropertyFilters,
+        agentRunningFilter,
+        showSubIssues,
+        dateParams,
+        debouncedActiveSearch,
+      ]),
+    [
+      agentRunningFilter,
+      assigneeFilters,
+      creatorFilters,
+      dateParams,
+      debouncedActiveSearch,
+      effectivePropertyFilters,
+      includeNoAssignee,
+      labelFilters,
+      priorityFilters,
+      showSubIssues,
+      statusFilters,
+      viewIncludeNoProject,
+      viewProjectFilters,
+    ],
+  );
+  const selection = useCreateIssueSurfaceSelection(
+    scopeKey,
+    `${scopeKey}:${effectiveViewMode}:${membershipKey}`,
+  );
+
   const data = useIssueSurfaceData({
     wsId,
     queryPlan,
     projectId,
     usesAssigneeBoard,
     usesGantt,
+    usesTable,
+    serverStatusBranches,
+    serverGroupBranches,
+    ganttShowCompleted,
     sort,
     statusFilters,
     priorityFilters,
     assigneeFilters,
     includeNoAssignee,
+    agentRunningFilter,
     creatorFilters,
     projectFilters: viewProjectFilters,
     includeNoProject: viewIncludeNoProject,
     labelFilters,
     propertyFilters: effectivePropertyFilters,
-    agentRunningFilter,
+    workingIssueIDs,
     showSubIssues,
     loadProjects:
       cardProperties.project ||
+      (usesTable && tableColumns.some((column) => column.key === "project")) ||
       (effectiveViewMode === "swimlane" && swimlaneGrouping === "project"),
   });
+
+  const exportTableIssues = useCallback(async () => {
+    const issues: Issue[] = [];
+    const seenIssueIds = new Set<string>();
+    const seenCursors = new Set<string>();
+    let fingerprint: string | null = null;
+    let expectedTotal: number | null = null;
+    let cursor: string | null = null;
+    do {
+      if (cursor !== null) {
+        if (seenCursors.has(cursor)) throw new IssueTableExportIntegrityError();
+        seenCursors.add(cursor);
+      }
+      const page = await api.listIssueTableRows({
+        query: tableQuerySpec,
+        group: { kind: "none" },
+        group_key: null,
+        hierarchy: { enabled: false },
+        parent_id: null,
+        page: { limit: 100, cursor },
+      });
+      // parseWithFallback deliberately protects interactive views from schema
+      // drift with an empty response. Export must fail closed instead: an empty
+      // fingerprint is the fallback sentinel and must never create a truncated
+      // CSV that looks successful.
+      if (!page.query_fingerprint) throw new IssueTableExportIntegrityError();
+      fingerprint ??= page.query_fingerprint;
+      if (cursor === null) expectedTotal = page.total;
+      if (
+        page.query_fingerprint !== fingerprint ||
+        page.group_key !== null ||
+        page.parent_id !== null
+      ) {
+        throw new IssueTableExportIntegrityError();
+      }
+      for (const row of page.rows) {
+        if (seenIssueIds.has(row.issue.id)) {
+          throw new IssueTableExportIntegrityError();
+        }
+        seenIssueIds.add(row.issue.id);
+        issues.push(row.issue);
+      }
+      cursor = page.next_cursor;
+    } while (cursor);
+    if (issues.length !== (expectedTotal ?? 0)) {
+      throw new IssueTableExportIntegrityError();
+    }
+    return issues;
+  }, [tableQuerySpec]);
 
   const { actions, openCreateIssue, moveIssue } = useIssueSurfaceActions({
     createDefaults: resolvedCreateDefaults,
@@ -261,10 +657,36 @@ export function useIssueSurfaceController({
     viewMode: effectiveViewMode,
     allowGantt: allowedModes.has("gantt") && !!projectId,
     ...data,
+    statusPagination: usesServerStatusSurface
+      ? data.statusPagination
+      : undefined,
+    groupBranches: usesServerGroupSurface
+      ? serverGroupBranches
+      : undefined,
+    // Keep TableView mounted for an empty search result so its local search
+    // control remains available to refine or clear the query. Include the
+    // debounced value as well to avoid a brief empty-screen flash while a
+    // cleared query is waiting to re-fetch the unsearched window.
+    isEmpty:
+      data.isEmpty &&
+      !data.isRefreshing &&
+      !(usesTable && (tableSearch.trim() || debouncedActiveSearch)),
     sort,
     actions,
     selection,
+    tableSearch,
+    tableQuerySpec,
+    tableFacetCounts:
+      usesServerStatusSurface ||
+      ((usesTable || usesServerGroupSurface) && activeTableFacet !== null)
+        ? tableFacetsQuery.data
+        : undefined,
+    facetCountsExact:
+      !usesTable && !usesServerStatusSurface && !usesServerGroupSurface,
+    setActiveTableFacet: requestActiveTableFacet,
+    setTableSearch,
     openCreateIssue,
     moveIssue,
+    exportTableIssues,
   };
 }

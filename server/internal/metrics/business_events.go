@@ -36,6 +36,7 @@ type businessEventMetrics struct {
 	teamInviteAccepted              *prometheus.CounterVec
 	onboardingStarted               *prometheus.CounterVec
 	onboardingQuestionnaireSubmit   *prometheus.CounterVec
+	onboardingSourceSubmit          *prometheus.CounterVec
 	onboardingCompleted             *prometheus.CounterVec
 	cloudWaitlistJoined             *prometheus.CounterVec
 	issueCreated                    *prometheus.CounterVec
@@ -62,6 +63,7 @@ type businessEventMetrics struct {
 	cloudRuntimeRequestDurationSecs *prometheus.HistogramVec
 	feedbackSubmitted               *prometheus.CounterVec
 	contactSalesSubmitted           *prometheus.CounterVec
+	chatOutputLocalPath             *prometheus.CounterVec
 }
 
 func newBusinessEventMetrics() *businessEventMetrics {
@@ -90,6 +92,10 @@ func newBusinessEventMetrics() *businessEventMetrics {
 			Name: "multica_onboarding_questionnaire_submitted_total",
 			Help: "Total onboarding questionnaires submitted.",
 		}, metricLabels("multica_onboarding_questionnaire_submitted_total")),
+		onboardingSourceSubmit: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "multica_onboarding_source_submitted_total",
+			Help: "Total acquisition-source answers or declines recorded (workspace backfill prompt).",
+		}, metricLabels("multica_onboarding_source_submitted_total")),
 		onboardingCompleted: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "multica_onboarding_completed_total",
 			Help: "Total onboarding flows completed.",
@@ -197,6 +203,10 @@ func newBusinessEventMetrics() *businessEventMetrics {
 			Name: "multica_contact_sales_submitted_total",
 			Help: "Total contact-sales inquiries submitted.",
 		}, metricLabels("multica_contact_sales_submitted_total")),
+		chatOutputLocalPath: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "multica_chat_output_local_path_total",
+			Help: "Total agent chat replies that referenced a runtime-local path, by evidence kind. Observation only — the reply is still delivered.",
+		}, metricLabels("multica_chat_output_local_path_total")),
 	}
 }
 
@@ -211,6 +221,7 @@ func (e *businessEventMetrics) collectors() []prometheus.Collector {
 		e.teamInviteAccepted,
 		e.onboardingStarted,
 		e.onboardingQuestionnaireSubmit,
+		e.onboardingSourceSubmit,
 		e.onboardingCompleted,
 		e.cloudWaitlistJoined,
 		e.issueCreated,
@@ -237,6 +248,7 @@ func (e *businessEventMetrics) collectors() []prometheus.Collector {
 		e.cloudRuntimeRequestDurationSecs,
 		e.feedbackSubmitted,
 		e.contactSalesSubmitted,
+		e.chatOutputLocalPath,
 	}
 }
 
@@ -284,6 +296,8 @@ func (m *BusinessMetrics) IncForEvent(ev analytics.Event) {
 		m.events.onboardingStarted.WithLabelValues(NormalizePlatform(stringProp(ev.Properties, "platform"))).Inc()
 	case analytics.EventOnboardingQuestionnaireSubmit:
 		m.events.onboardingQuestionnaireSubmit.WithLabelValues().Inc()
+	case analytics.EventOnboardingSourceSubmit:
+		m.events.onboardingSourceSubmit.WithLabelValues().Inc()
 	case analytics.EventOnboardingCompleted:
 		m.events.onboardingCompleted.WithLabelValues(NormalizeOnboardingPath(stringProp(ev.Properties, "completion_path"))).Inc()
 	case analytics.EventCloudWaitlistJoined:
@@ -434,6 +448,22 @@ func (m *BusinessMetrics) RecordCloudRuntimeRequest(op, status string, durationS
 	if durationSeconds >= 0 {
 		m.events.cloudRuntimeRequestDurationSecs.WithLabelValues(op).Observe(durationSeconds)
 	}
+}
+
+// RecordChatOutputLocalPath counts a chat reply that referenced a runtime-local
+// path, by evidence kind ("file_url" / "workdir_path").
+//
+// Observation only: the reply is delivered either way. The server cannot judge
+// these paths the way the CLI lint can — it has no access to the daemon's
+// filesystem to stat them — so this measures whether the MUL-4899 prompt
+// contract is landing, and must never gate delivery on a lexical guess. The
+// label is a closed enum precisely so no fragment of the path or reply body can
+// reach Prometheus.
+func (m *BusinessMetrics) RecordChatOutputLocalPath(kind string) {
+	if m == nil || m.events == nil {
+		return
+	}
+	m.events.chatOutputLocalPath.WithLabelValues(NormalizeChatOutputLocalPathKind(kind)).Inc()
 }
 
 // RecordDaemonWSMessageReceived counts an inbound daemon WS message by handler kind.

@@ -15,12 +15,19 @@ var MinVersions = map[string]string{
 	"codex":   "0.100.0", // app-server --listen stdio:// added in 0.100.0
 	"copilot": "1.0.0",   // --output-format json envelope stable from 1.0.x
 	"grok":    "0.2.89",  // ACP + authenticate/session-load/set_model/MCP and --effort thinking flag
+	"qwen":    "0.20.0",  // stream-json protocol captured and verified against Qwen Code 0.20.0
 }
 
 // MinQuickCreateCLIVersion is retained for compatibility in API responses and
 // shared tests, but agent-mode issue creation no longer rejects daemon-reported
 // CLI versions based on this threshold.
 const MinQuickCreateCLIVersion = "0.2.21"
+
+// MinQuickCreateFieldsCLIVersion is the first daemon release that carries
+// explicit quick-create priority and due-date fields from the claim response
+// into the generated issue-create prompt. Basic quick-create remains on the
+// older floor above; only requests using these optional fields need this gate.
+const MinQuickCreateFieldsCLIVersion = "0.4.3"
 
 // MinHandoffCLIVersion is the lowest multica CLI version whose daemon renders
 // the assignment handoff note into the run's opening prompt + issue_context.md
@@ -72,6 +79,32 @@ var devDescribeRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+-\d+-g[0-9a-fA-F]+`)
 // unparsable values alike so agent-mode issue creation depends on runtime
 // capability rather than version metadata.
 func CheckMinCLIVersion(detected string) error {
+	return nil
+}
+
+// CheckMinCLIVersionFor applies the quick-create version policy against a
+// caller-provided capability floor. It preserves the dev-build exemption so
+// feature-specific server and frontend gates agree with the base gate.
+func CheckMinCLIVersionFor(detected, minimum string) error {
+	d := strings.TrimSpace(detected)
+	if d == "" {
+		return ErrCLIVersionMissing
+	}
+	if devDescribeRe.MatchString(d) {
+		return nil
+	}
+	parsed, err := parseSemver(d)
+	if err != nil {
+		return ErrCLIVersionMissing
+	}
+	min, err := parseSemver(minimum)
+	if err != nil {
+		// Misconfiguration in the constant itself — fail closed as missing.
+		return ErrCLIVersionMissing
+	}
+	if parsed.lessThan(min) {
+		return ErrCLIVersionTooOld
+	}
 	return nil
 }
 

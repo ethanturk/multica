@@ -73,6 +73,9 @@ type AgentResponse struct {
 	// for this agent (empty = use runtime default). The picker is per-runtime
 	// per-model; the API never normalizes across providers. See MUL-2339.
 	ThinkingLevel string `json:"thinking_level"`
+	// ServiceTier is the runtime-native Codex execution tier persisted for
+	// this agent (empty = inherit local Codex configuration).
+	ServiceTier string `json:"service_tier"`
 	// ComposioToolkitAllowlist is the subset of Composio toolkit slugs this
 	// agent is allowed to mount as MCP at task dispatch — for ANY run that
 	// passes the agent's invocation permission, using the agent OWNER's
@@ -84,14 +87,15 @@ type AgentResponse struct {
 	// members infer another member's integration footprint. Redacted to
 	// `nil` + `composio_toolkit_allowlist_redacted=true` for non-owners,
 	// mirroring the existing mcp_config redaction contract.
-	ComposioToolkitAllowlist         []string            `json:"composio_toolkit_allowlist,omitempty"`
-	ComposioToolkitAllowlistRedacted bool                `json:"composio_toolkit_allowlist_redacted,omitempty"`
-	OwnerID                          *string             `json:"owner_id"`
-	Skills                           []AgentSkillSummary `json:"skills"`
-	CreatedAt                        string              `json:"created_at"`
-	UpdatedAt                        string              `json:"updated_at"`
-	ArchivedAt                       *string             `json:"archived_at"`
-	ArchivedBy                       *string             `json:"archived_by"`
+	ComposioToolkitAllowlist         []string               `json:"composio_toolkit_allowlist,omitempty"`
+	ComposioToolkitAllowlistRedacted bool                   `json:"composio_toolkit_allowlist_redacted,omitempty"`
+	OwnerID                          *string                `json:"owner_id"`
+	Skills                           []AgentSkillSummary    `json:"skills"`
+	DisabledRuntimeSkills            []DisabledRuntimeSkill `json:"disabled_runtime_skills"`
+	CreatedAt                        string                 `json:"created_at"`
+	UpdatedAt                        string                 `json:"updated_at"`
+	ArchivedAt                       *string                `json:"archived_at"`
+	ArchivedBy                       *string                `json:"archived_by"`
 }
 
 // runtimeConfigGatewayTokenMask is the placeholder the API substitutes for
@@ -172,9 +176,11 @@ func agentToResponse(a db.Agent) AgentResponse {
 		MaxConcurrentTasks:       a.MaxConcurrentTasks,
 		Model:                    a.Model.String,
 		ThinkingLevel:            a.ThinkingLevel.String,
+		ServiceTier:              a.ServiceTier.String,
 		ComposioToolkitAllowlist: composioAllowlist,
 		OwnerID:                  uuidToPtr(a.OwnerID),
 		Skills:                   []AgentSkillSummary{},
+		DisabledRuntimeSkills:    decodeDisabledRuntimeSkills(a.DisabledRuntimeSkills),
 		CreatedAt:                timestampToString(a.CreatedAt),
 		UpdatedAt:                timestampToString(a.UpdatedAt),
 		ArchivedAt:               timestampToPtr(a.ArchivedAt),
@@ -284,32 +290,38 @@ type AgentTaskResponse struct {
 	// as `## Workspace Context` so every agent running in this workspace —
 	// regardless of issue / chat / autopilot / quick-create — sees the same
 	// shared context. Empty when the workspace owner hasn't set it.
-	WorkspaceContext   string                  `json:"workspace_context,omitempty"`
-	ThreadName         string                  `json:"thread_name,omitempty"` // semantic title for provider-native session/thread history
-	Status             string                  `json:"status"`
-	Priority           int32                   `json:"priority"`
-	DispatchedAt       *string                 `json:"dispatched_at"`
-	StartedAt          *string                 `json:"started_at"`
-	CompletedAt        *string                 `json:"completed_at"`
-	Result             any                     `json:"result"`
-	Error              *string                 `json:"error"`
-	FailureReason      string                  `json:"failure_reason,omitempty"` // see TaskService.MaybeRetryFailedTask
-	Attempt            int32                   `json:"attempt"`
-	MaxAttempts        int32                   `json:"max_attempts"`
-	ParentTaskID       *string                 `json:"parent_task_id,omitempty"`
-	IsLeaderTask       bool                    `json:"is_leader_task,omitempty"`
-	Agent              *TaskAgentData          `json:"agent,omitempty"`
-	ConnectedApps      []ConnectedAppData      `json:"connected_apps,omitempty"` // daemon-claim only: per-run app capabilities mounted through runtime MCP overlays
-	Repos              []RepoData              `json:"repos,omitempty"`
-	DeterministicTools []DeterministicToolData `json:"deterministic_tools,omitempty"` // workspace-authored sandboxed tools for the agent tool plane
-	ProjectID          string                  `json:"project_id,omitempty"`          // issue's project, when present
-	ProjectTitle       string                  `json:"project_title,omitempty"`       // for surfacing in agent context
-	ProjectDescription string                  `json:"project_description,omitempty"` // durable project-level context injected into the brief
-	ProjectResources   []ProjectResourceData   `json:"project_resources,omitempty"`   // resources attached to the project
-	CreatedAt          string                  `json:"created_at"`
-	PriorSessionID     string                  `json:"prior_session_id,omitempty"` // session ID from a previous task on same issue
-	PriorWorkDir       string                  `json:"prior_work_dir,omitempty"`   // work_dir from a previous task on same issue
-	WorkDir            string                  `json:"work_dir,omitempty"`         // local working directory pinned for this task; populated once the daemon reports it
+	WorkspaceContext              string                `json:"workspace_context,omitempty"`
+	ThreadName                    string                `json:"thread_name,omitempty"` // semantic title for provider-native session/thread history
+	Status                        string                `json:"status"`
+	Priority                      int32                 `json:"priority"`
+	DispatchedAt                  *string               `json:"dispatched_at"`
+	StartedAt                     *string               `json:"started_at"`
+	CompletedAt                   *string               `json:"completed_at"`
+	Result                        any                   `json:"result"`
+	Error                         *string               `json:"error"`
+	FailureReason                 string                `json:"failure_reason,omitempty"` // see TaskService.MaybeRetryFailedTask
+	Attempt                       int32                 `json:"attempt"`
+	MaxAttempts                   int32                 `json:"max_attempts"`
+	ParentTaskID                  *string               `json:"parent_task_id,omitempty"`
+	IsLeaderTask                  bool                  `json:"is_leader_task,omitempty"`
+	Agent                         *TaskAgentData        `json:"agent,omitempty"`
+	ConnectedApps                 []ConnectedAppData    `json:"connected_apps,omitempty"` // daemon-claim only: per-run app capabilities mounted through runtime MCP overlays
+	Repos                         []RepoData            `json:"repos,omitempty"`
+	DeterministicTools            []DeterministicToolData `json:"deterministic_tools,omitempty"` // workspace-authored sandboxed tools for the agent tool plane
+	ProjectID                     string                `json:"project_id,omitempty"` // issue's project, when present
+	ProjectTitle                  string                `json:"project_title,omitempty"` // for surfacing in agent context
+	ProjectDescription            string                `json:"project_description,omitempty"` // durable project-level context injected into the brief
+	ProjectResources              []ProjectResourceData `json:"project_resources,omitempty"` // resources attached to the project
+	CreatedAt                     string                `json:"created_at"`
+	PriorSessionID                string                `json:"prior_session_id,omitempty"` // session ID from a previous task on same issue
+	PriorWorkDir                  string                `json:"prior_work_dir,omitempty"` // work_dir from a previous task on same issue
+	// PriorSessionResumeUnavailable is set when a more recent Codex session was
+	// withheld because its rollout was missing (MUL-5305); PriorSessionID (if
+	// any) is then an older fallback. The daemon surfaces the continuity gap in
+	// the brief even when that older session resumes cleanly. omitempty keeps it
+	// off the wire for the common (no-gap) case and for old daemons.
+	PriorSessionResumeUnavailable bool   `json:"prior_session_resume_unavailable,omitempty"`
+	WorkDir                       string `json:"work_dir,omitempty"` // local working directory pinned for this task; populated once the daemon reports it
 	// RelativeWorkDir is a privacy-safe display form of WorkDir intended for
 	// the UI. For standard tasks it strips the daemon's workspaces root so
 	// the user sees `<wsUUID>/<taskShort>/workdir`; for local_directory
@@ -345,6 +357,8 @@ type AgentTaskResponse struct {
 	AutopilotSource          string                 `json:"autopilot_source,omitempty"`            // manual, schedule, webhook, or api
 	AutopilotTriggerPayload  json.RawMessage        `json:"autopilot_trigger_payload,omitempty"`   // optional trigger payload for webhook/api runs
 	QuickCreatePrompt        string                 `json:"quick_create_prompt,omitempty"`         // user's natural-language input for quick-create tasks
+	QuickCreatePriority      string                 `json:"quick_create_priority,omitempty"`       // explicit priority selected in quick-create
+	QuickCreateDueDate       string                 `json:"quick_create_due_date,omitempty"`       // explicit calendar due date selected in quick-create
 	QuickCreateAttachmentIDs []string               `json:"quick_create_attachment_ids,omitempty"` // attachment ids uploaded in the quick-create prompt and bound on issue create
 	HandoffNote              string                 `json:"handoff_note,omitempty"`                // assignment handoff instruction; rendered into the run's opening prompt + issue_context.md (omitempty so old daemons ignore it)
 	SquadID                  string                 `json:"squad_id,omitempty"`                    // for quick-create tasks where the picker was a squad; Agent is still the resolved leader
@@ -564,16 +578,18 @@ type CoalescedCommentData struct {
 // TaskAgentData holds agent info included in claim responses so the daemon
 // can set up the execution environment (branch naming, skill files, instructions).
 type TaskAgentData struct {
-	ID            string                      `json:"id"`
-	Name          string                      `json:"name"`
-	Instructions  string                      `json:"instructions"`
-	Skills        []service.AgentSkillData    `json:"skills,omitempty"`
-	SkillRefs     []service.AgentSkillRefData `json:"skill_refs,omitempty"`
-	CustomEnv     map[string]string           `json:"custom_env,omitempty"`
-	CustomArgs    []string                    `json:"custom_args,omitempty"`
-	McpConfig     json.RawMessage             `json:"mcp_config,omitempty"`
-	Model         string                      `json:"model,omitempty"`
-	ThinkingLevel string                      `json:"thinking_level,omitempty"`
+	ID                    string                      `json:"id"`
+	Name                  string                      `json:"name"`
+	Instructions          string                      `json:"instructions"`
+	Skills                []service.AgentSkillData    `json:"skills,omitempty"`
+	SkillRefs             []service.AgentSkillRefData `json:"skill_refs,omitempty"`
+	CustomEnv             map[string]string           `json:"custom_env,omitempty"`
+	CustomArgs            []string                    `json:"custom_args,omitempty"`
+	McpConfig             json.RawMessage             `json:"mcp_config,omitempty"`
+	Model                 string                      `json:"model,omitempty"`
+	ThinkingLevel         string                      `json:"thinking_level,omitempty"`
+	ServiceTier           string                      `json:"service_tier,omitempty"`
+	DisabledRuntimeSkills []DisabledRuntimeSkill      `json:"disabled_runtime_skills,omitempty"`
 	// RuntimeConfig is the agent's saved runtime_config JSON as-is. The
 	// daemon decodes it per-provider — e.g. the openclaw backend reads
 	// `mode` + `gateway.*` to choose between embedded and gateway routing
@@ -945,6 +961,7 @@ type CreateAgentRequest struct {
 	MaxConcurrentTasks int32                      `json:"max_concurrent_tasks"`
 	Model              string                     `json:"model"`
 	ThinkingLevel      string                     `json:"thinking_level"`
+	ServiceTier        string                     `json:"service_tier"`
 	// ComposioToolkitAllowlist seeds the per-task overlay gate (MUL-3869). On
 	// create only the calling user can be the owner, so we accept the field
 	// unconditionally here; the cross-owner permission gate lives on PUT.
@@ -1064,6 +1081,10 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("thinking_level %q is not a recognised value for runtime %q", req.ThinkingLevel, runtime.Provider))
 		return
 	}
+	if !agent.IsKnownServiceTier(runtime.Provider, req.ServiceTier) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("service_tier %q is not a recognised value for runtime %q", req.ServiceTier, runtime.Provider))
+		return
+	}
 
 	// Probe workspace agent count BEFORE the insert so the funnel has a
 	// clean "first agent ever in this workspace" signal — Step 4 of
@@ -1137,7 +1158,7 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		Name:                     req.Name,
 		Description:              req.Description,
 		Instructions:             req.Instructions,
-		AvatarUrl:                ptrToText(req.AvatarURL),
+		AvatarUrl:                newAgentAvatar(req.AvatarURL),
 		RuntimeMode:              runtime.RuntimeMode,
 		RuntimeConfig:            rc,
 		RuntimeID:                runtime.ID,
@@ -1150,6 +1171,7 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		McpConfig:                mc,
 		Model:                    pgtype.Text{String: req.Model, Valid: req.Model != ""},
 		ThinkingLevel:            pgtype.Text{String: req.ThinkingLevel, Valid: req.ThinkingLevel != ""},
+		ServiceTier:              pgtype.Text{String: req.ServiceTier, Valid: req.ServiceTier != ""},
 		ComposioToolkitAllowlist: allowlist,
 	})
 	if err != nil {
@@ -1305,6 +1327,9 @@ type UpdateAgentRequest struct {
 	// Distinguishing those modes is why this is a pointer; the raw-fields
 	// map captured at decode time tells us whether the key was sent.
 	ThinkingLevel *string `json:"thinking_level"`
+	// ServiceTier follows the same tri-state contract as ThinkingLevel:
+	// omitted preserves, empty clears, and non-empty sets a Codex catalog ID.
+	ServiceTier *string `json:"service_tier"`
 	// ComposioToolkitAllowlist is a tri-state, same pattern as
 	// thinking_level, mcp_config:
 	//   - field omitted → no change (column preserved as-is)
@@ -1712,6 +1737,46 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	shouldClearServiceTier := false
+	if req.ServiceTier != nil {
+		value := *req.ServiceTier
+		if value == "" {
+			shouldClearServiceTier = true
+		} else {
+			provider := targetProvider
+			if provider == "" {
+				var ok bool
+				provider, ok = h.resolveAgentProvider(r, existing.WorkspaceID, targetRuntimeID)
+				if !ok {
+					writeError(w, http.StatusInternalServerError, "failed to resolve runtime for service_tier validation")
+					return
+				}
+			}
+			if !agent.IsKnownServiceTier(provider, value) {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("service_tier %q is not a recognised value for runtime %q", value, provider))
+				return
+			}
+			params.ServiceTier = pgtype.Text{String: value, Valid: true}
+		}
+	} else if req.RuntimeID != nil && existing.ServiceTier.Valid && existing.ServiceTier.String != "" {
+		provider := targetProvider
+		if provider == "" {
+			var ok bool
+			provider, ok = h.resolveAgentProvider(r, existing.WorkspaceID, targetRuntimeID)
+			if !ok {
+				writeError(w, http.StatusInternalServerError, "failed to resolve runtime for service_tier validation")
+				return
+			}
+		}
+		if !agent.IsKnownServiceTier(provider, existing.ServiceTier.String) {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf(
+				"existing service_tier %q is not valid for runtime %q; pass service_tier=\"\" to clear or set a value valid for the new runtime",
+				existing.ServiceTier.String, provider,
+			))
+			return
+		}
+	}
+
 	// composio_toolkit_allowlist handling (MUL-3869). Tri-state semantics
 	// mirror thinking_level (see above): omitted → no change, null →
 	// ClearAgentComposioToolkitAllowlist, slice → wholesale replace.
@@ -1751,14 +1816,29 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 
 	updated, err := h.Queries.UpdateAgent(r.Context(), params)
 	if err != nil {
+		// Unique constraint on (workspace_id, name) — mirror CreateAgent and
+		// return a clear conflict instead of a 500 that leaks the raw
+		// constraint name. The name can still be held by an *archived* agent
+		// (the constraint does not exclude archived rows), so this is the only
+		// signal the caller gets that a rename collided rather than the server
+		// faulting.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "agent_workspace_name_unique" {
+			name := ""
+			if req.Name != nil {
+				name = *req.Name
+			}
+			writeError(w, http.StatusConflict, fmt.Sprintf("an agent named %q already exists in this workspace", name))
+			return
+		}
 		slog.Warn("update agent failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
 		writeError(w, http.StatusInternalServerError, "failed to update agent: "+err.Error())
 		return
 	}
 
-	// mcp_config / thinking_level: null/empty in the request means explicitly
-	// clear the field. COALESCE in UpdateAgent cannot set a column to NULL,
-	// so we use dedicated clear queries.
+	// Nullable runtime overrides: null/empty in the request means explicitly
+	// clear the field. COALESCE in UpdateAgent cannot set a column to NULL, so
+	// mcp_config, thinking_level, and service_tier use dedicated clear queries.
 	if shouldClearMcpConfig {
 		updated, err = h.Queries.ClearAgentMcpConfig(r.Context(), updated.ID)
 		if err != nil {
@@ -1772,6 +1852,14 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			slog.Warn("clear agent thinking_level failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
 			writeError(w, http.StatusInternalServerError, "failed to clear thinking_level: "+err.Error())
+			return
+		}
+	}
+	if shouldClearServiceTier {
+		updated, err = h.Queries.ClearAgentServiceTier(r.Context(), updated.ID)
+		if err != nil {
+			slog.Warn("clear agent service_tier failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
+			writeError(w, http.StatusInternalServerError, "failed to clear service_tier: "+err.Error())
 			return
 		}
 	}
@@ -2035,6 +2123,141 @@ type AgentActivityBucket struct {
 type AgentRunCount struct {
 	AgentID  string `json:"agent_id"`
 	RunCount int32  `json:"run_count"`
+}
+
+// WorkspaceWorkingAgent is the privacy-safe agent summary returned by the
+// workspace working-agents endpoint. It deliberately carries only display
+// information plus the current running-task count and referenced issue ids;
+// full AgentResponse fields include runtime and integration configuration that
+// this chip does not need.
+type WorkspaceWorkingAgent struct {
+	ID               string   `json:"id"`
+	Name             string   `json:"name"`
+	AvatarURL        *string  `json:"avatar_url"`
+	RunningTaskCount int32    `json:"running_task_count"`
+	IssueIDs         []string `json:"issue_ids"`
+}
+
+// ListWorkspaceWorkingAgents returns currently working user-authored agents in
+// the workspace, independent of issue filters or Table pagination. The
+// optional type query selects issue, autopilot, or chat work; omitting it keeps
+// the all-sources projection. scope=mine narrows issue work to the authenticated
+// member's selected My Issues relation. Access filtering mirrors the other
+// workspace-wide agent aggregations so a private/non-allow-listed agent is
+// never exposed by its name, avatar, count, or even presence.
+func (h *Handler) ListWorkspaceWorkingAgents(w http.ResponseWriter, r *http.Request) {
+	workspaceID := h.resolveWorkspaceID(r)
+	member, ok := h.workspaceMember(w, r, workspaceID)
+	if !ok {
+		return
+	}
+
+	workType := strings.TrimSpace(r.URL.Query().Get("type"))
+	switch workType {
+	case "", "issue", "autopilot", "chat":
+	default:
+		writeError(w, http.StatusBadRequest, "invalid type: must be issue, autopilot, or chat")
+		return
+	}
+
+	scope := strings.TrimSpace(r.URL.Query().Get("scope"))
+	mineRelation := strings.TrimSpace(r.URL.Query().Get("relation"))
+	var memberID pgtype.UUID
+	switch scope {
+	case "":
+		if mineRelation != "" {
+			writeError(w, http.StatusBadRequest, "relation requires scope=mine")
+			return
+		}
+	case "mine":
+		if workType != "issue" {
+			writeError(w, http.StatusBadRequest, "scope=mine requires type=issue")
+			return
+		}
+		if mineRelation == "" {
+			mineRelation = "any"
+		}
+		switch mineRelation {
+		case "assigned", "created", "involved", "any":
+		default:
+			writeError(w, http.StatusBadRequest, "invalid relation: must be assigned, created, involved, or any")
+			return
+		}
+		userID, ok := requireUserID(w, r)
+		if !ok {
+			return
+		}
+		var err error
+		memberID, err = util.ParseUUID(userID)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "user not authenticated")
+			return
+		}
+	default:
+		writeError(w, http.StatusBadRequest, "invalid scope: must be mine")
+		return
+	}
+
+	// Narrows the projection to one issue's direct children, so an issue
+	// detail's sub-issue header reads this endpoint instead of deriving a
+	// count client-side. Left zero when absent, which the query treats as
+	// NULL and therefore as "no narrowing" — an older client that never
+	// sends it keeps the exact workspace-wide behaviour.
+	var parentIssueID pgtype.UUID
+	if raw := strings.TrimSpace(r.URL.Query().Get("parent")); raw != "" {
+		if workType != "issue" {
+			writeError(w, http.StatusBadRequest, "parent requires type=issue")
+			return
+		}
+		if scope != "" {
+			writeError(w, http.StatusBadRequest, "parent cannot be combined with scope")
+			return
+		}
+		var ok bool
+		parentIssueID, ok = parseUUIDOrBadRequest(w, raw, "parent")
+		if !ok {
+			return
+		}
+	}
+
+	rows, err := h.Queries.ListWorkspaceWorkingAgents(
+		r.Context(),
+		db.ListWorkspaceWorkingAgentsParams{
+			WorkspaceID:   parseUUID(workspaceID),
+			WorkType:      workType,
+			MineRelation:  mineRelation,
+			MemberID:      memberID,
+			ParentIssueID: parentIssueID,
+		},
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list workspace working agents")
+		return
+	}
+
+	actorType, actorID := h.resolveActor(r, requestUserID(r), workspaceID)
+	allowed, ok := h.accessibleAgentIDs(r.Context(), workspaceID, actorType, actorID, member.Role)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "failed to resolve agent access")
+		return
+	}
+
+	resp := make([]WorkspaceWorkingAgent, 0, len(rows))
+	for _, row := range rows {
+		agentID := uuidToString(row.ID)
+		if _, ok := allowed[agentID]; !ok {
+			continue
+		}
+		resp = append(resp, WorkspaceWorkingAgent{
+			ID:               agentID,
+			Name:             row.Name,
+			AvatarURL:        textToPtr(row.AvatarUrl),
+			RunningTaskCount: row.RunningTaskCount,
+			IssueIDs:         uuidStringsOrEmpty(row.IssueIds),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // GetWorkspaceAgentRunCounts returns 30-day total run counts for every

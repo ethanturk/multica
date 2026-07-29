@@ -1,7 +1,15 @@
 -- name: CreateChatSession :one
-INSERT INTO chat_session (workspace_id, agent_id, creator_id, title, runtime_id, is_agent_intro)
-VALUES ($1, $2, $3, $4, (SELECT runtime_id FROM agent WHERE id = $2), $5)
+INSERT INTO chat_session (workspace_id, agent_id, creator_id, title, runtime_id, is_agent_intro, project_id)
+VALUES ($1, $2, $3, $4, (SELECT runtime_id FROM agent WHERE id = $2), $5, sqlc.narg('project_id'))
 RETURNING *;
+
+-- name: ClearChatSessionProjectByProject :exec
+-- Project references are intentionally soft (no database FK). Keep chat
+-- history while removing the context selection when a project is deleted.
+-- Do not touch updated_at: context cleanup is not chat activity.
+UPDATE chat_session
+SET project_id = NULL
+WHERE project_id = $1 AND workspace_id = $2;
 
 -- name: GetChatSession :one
 SELECT * FROM chat_session
@@ -72,6 +80,14 @@ UPDATE chat_session SET title = $2, updated_at = now()
 WHERE id = $1
 RETURNING *;
 
+-- name: UpdateChatSessionProject :one
+-- Project context is user-editable session metadata. Do not touch updated_at:
+-- changing context is not conversation activity and must not reorder history.
+UPDATE chat_session
+SET project_id = sqlc.narg('project_id')
+WHERE id = sqlc.arg('id') AND workspace_id = sqlc.arg('workspace_id')
+RETURNING *;
+
 -- name: UpdateChatSessionTitleIfCurrent :one
 -- Compare-and-swap the title: only overwrite it when it still equals the
 -- value the caller observed (@expected_title). This is the idempotency /
@@ -132,6 +148,27 @@ SELECT id FROM chat_session
 WHERE id = $1
 FOR UPDATE;
 
+-- name: LockChatSessionForRuntimeBind :one
+-- Acquires an exclusive (FOR UPDATE) row lock on chat_session(id), serialising
+-- "which runtime does this session execute on" against "enqueue the next task".
+--
+-- Both SendDirectChatMessage and the agent-builder runtime switch take this lock
+-- for their whole transaction. Without it the two are a read-then-write race: a
+-- send reads the carrier agent's runtime_id, the switch then passes its
+-- pending-task check and rebinds the carrier, and the send finally inserts a task
+-- still stamped with the pre-switch runtime — so the user is told the switch
+-- succeeded while their message runs on the old runtime (MUL-5163).
+--
+-- The lock alone is not sufficient: the send path must also re-read the agent
+-- INSIDE the locked transaction, because a send blocked at INSERT would otherwise
+-- resume and write the runtime_id it read before blocking.
+--
+-- Same row and same lock mode as LockChatSessionForDelete, and both take it as
+-- their first statement, so the delete path and this one cannot deadlock.
+SELECT id FROM chat_session
+WHERE id = $1
+FOR UPDATE;
+
 -- name: DeleteChatSession :exec
 -- Hard delete. chat_message rows cascade via FK ON DELETE CASCADE; the
 -- chat_session_id on agent_task_queue is set NULL by FK so completed/failed
@@ -151,14 +188,100 @@ WHERE id = $1;
 -- message_kind defaults to 'message' via COALESCE so every existing caller
 -- (which omits it) keeps writing ordinary messages; the empty-reply path passes
 -- 'no_response' to mark a visible turn with no text output (MUL-4351).
-INSERT INTO chat_message (chat_session_id, role, content, task_id, failure_reason, elapsed_ms, message_kind)
-VALUES ($1, $2, $3, sqlc.narg(task_id), sqlc.narg(failure_reason), sqlc.narg(elapsed_ms), COALESCE(sqlc.narg(message_kind)::text, 'message'))
+INSERT INTO chat_message (
+    chat_session_id, role, content, task_id, failure_reason, elapsed_ms,
+    message_kind, channel_media_pending_until, channel_ingested
+)
+VALUES (
+    $1, $2, $3, sqlc.narg(task_id), sqlc.narg(failure_reason), sqlc.narg(elapsed_ms),
+    COALESCE(sqlc.narg(message_kind)::text, 'message'),
+    -- The media deadline is DB-clock time: every consumer compares it against
+    -- SQL now() (GetChannelMediaPendingUntil, the deferred promote, the
+    -- trailing-message guard), so the writer must use the same clock. The
+    -- caller passes a relative budget in seconds; an application-clock
+    -- timestamp here would let a skewed app node shrink or stretch the
+    -- fallback window.
+    CASE WHEN sqlc.narg(channel_media_pending_secs)::float8 IS NULL THEN NULL
+         ELSE now() + make_interval(secs => sqlc.narg(channel_media_pending_secs)::float8) END,
+    COALESCE(sqlc.narg(channel_ingested)::boolean, FALSE)
+)
 RETURNING *;
+
+-- name: TaskHasChannelIngestedMessages :one
+-- Immutable channel provenance for a task's user-message input batch:
+-- channel_ingested is stamped inside the channel append transaction and never
+-- mutated afterwards, so it survives session archiving and installation
+-- rebinds that delete the channel_chat_session_binding row. Callers pass the
+-- batch OWNER id (chat_input_task_id, which auto-retry clones inherit), not
+-- necessarily the task's own id. The cancel restore-delete and the
+-- empty-completion silent-drop both gate on this — a channel sender has no
+-- Multica composer for a restored draft, and the no_response fallback body
+-- must never be pushed to an external channel.
+SELECT EXISTS (
+    SELECT 1 FROM chat_message
+    WHERE task_id = $1
+      AND role = 'user'
+      AND channel_ingested
+) AS channel_ingested;
+
+-- name: GetChannelMediaPendingUntil :one
+-- The latest unexpired media deadline gates a channel task. Using a durable
+-- task fire_at means a process restart still produces the placeholder fallback.
+SELECT channel_media_pending_until
+FROM chat_message
+WHERE chat_session_id = $1
+  AND role = 'user'
+  AND channel_media_pending_until > now()
+ORDER BY channel_media_pending_until DESC
+LIMIT 1;
+
+-- name: ClearChatMessageChannelMediaPending :exec
+UPDATE chat_message
+SET channel_media_pending_until = NULL
+WHERE id = $1 AND chat_session_id = $2;
 
 -- name: LinkChatMessageToTask :exec
 UPDATE chat_message
 SET task_id = $2
 WHERE id = $1 AND role = 'user';
+
+-- name: LinkUnownedChannelChatMessagesToTask :exec
+-- Seals the trailing channel-message batch to its task. The task row and these
+-- links are committed together, so an older in-flight task cannot absorb a
+-- newer media message and a later assistant row cannot hide that message.
+UPDATE chat_message AS message
+SET task_id = @task_id
+WHERE message.chat_session_id = @chat_session_id
+  AND message.role = 'user'
+  AND message.task_id IS NULL
+  AND NOT EXISTS (
+      SELECT 1
+      FROM chat_message AS prior
+      WHERE prior.chat_session_id = @chat_session_id
+        AND prior.role != 'user'
+        AND (prior.created_at, prior.id) > (message.created_at, message.id)
+  );
+
+-- name: DeferChatTaskForSealedPendingMedia :one
+-- Closes the enqueue-vs-append race: under READ COMMITTED a media message can
+-- commit between GetChannelMediaPendingUntil and the batch seal above, landing
+-- an unexpired media marker inside a task the deadline read decided was
+-- 'queued'. Re-derive the deferral from the sealed batch itself, in the same
+-- transaction, so a task is never claimable while its own input still has an
+-- unexpired marker. No row (ErrNoRows) means no correction was needed.
+UPDATE agent_task_queue AS task
+SET status = 'deferred', fire_at = pending.max_until
+FROM (
+    SELECT max(message.channel_media_pending_until) AS max_until
+    FROM chat_message AS message
+    WHERE message.task_id = @task_id
+      AND message.role = 'user'
+      AND message.channel_media_pending_until > now()
+) AS pending
+WHERE task.id = @task_id
+  AND pending.max_until IS NOT NULL
+  AND (task.fire_at IS NULL OR task.fire_at < pending.max_until)
+RETURNING task.*;
 
 -- name: DeleteUserChatMessageByTask :one
 DELETE FROM chat_message
@@ -168,7 +291,7 @@ RETURNING *;
 -- name: ListChatMessages :many
 SELECT * FROM chat_message
 WHERE chat_session_id = $1
-ORDER BY created_at ASC;
+ORDER BY created_at ASC, id ASC;
 
 -- name: ListChatInputMessages :many
 -- Loads the immutable user-message input batch owned by a direct-chat task.
@@ -203,10 +326,13 @@ WHERE id = $1;
 INSERT INTO agent_task_queue (
     agent_id, runtime_id, issue_id, status, priority, chat_session_id,
     initiator_user_id, originator_user_id, accountable_user_id, force_fresh_session, runtime_mcp_overlay,
-    runtime_connected_apps, originator_source, trigger_evidence_kind, trigger_evidence_ref_id
+    runtime_connected_apps, originator_source, trigger_evidence_kind, trigger_evidence_ref_id,
+    fire_at
 )
 VALUES (
-    $1, $2, NULL, 'queued', $3, $4, $5,
+    $1, $2, NULL,
+    CASE WHEN sqlc.narg('fire_at')::timestamptz IS NULL THEN 'queued' ELSE 'deferred' END,
+    $3, $4, $5,
     sqlc.narg(originator_user_id),
     sqlc.narg(accountable_user_id),
     COALESCE(sqlc.narg('force_fresh_session')::boolean, FALSE),
@@ -214,17 +340,39 @@ VALUES (
     sqlc.narg(runtime_connected_apps),
     sqlc.narg(originator_source),
     sqlc.narg(trigger_evidence_kind),
-    sqlc.narg(trigger_evidence_ref_id)
+    sqlc.narg(trigger_evidence_ref_id),
+    sqlc.narg('fire_at')::timestamptz
 )
 RETURNING *;
+
+-- name: PromoteChannelChatTasksIfMediaReady :many
+-- Media completion may race with the 3s run batcher. Promote every original
+-- channel task waiting for this session only after all unexpired media markers
+-- are gone; retry/escalation/direct-chat deferred tasks are excluded.
+UPDATE agent_task_queue AS task
+SET status = 'queued', fire_at = NULL
+WHERE task.chat_session_id = @chat_session_id
+  AND task.status = 'deferred'
+  AND task.issue_id IS NULL
+  AND task.parent_task_id IS NULL
+  AND task.escalation_for_task_id IS NULL
+  AND NOT EXISTS (
+      SELECT 1
+      FROM chat_message AS message
+      WHERE message.chat_session_id = @chat_session_id
+        AND message.role = 'user'
+        AND message.channel_media_pending_until > now()
+  )
+RETURNING task.*;
 
 -- name: SetChatTaskInputOwnerSelf :one
 -- Stamps a freshly-created direct-chat task as the owner of its own input batch
 -- (chat_input_task_id = id), so a later claim loads exactly the user messages
 -- tagged with this task id (ListChatInputMessages) rather than scanning trailing
--- history. Runs in the same transaction as CreateChatTask + the user message
--- insert on the direct-send path. Channel and legacy tasks skip this call and
--- keep chat_input_task_id NULL, so a rolling deploy never replays their history.
+-- history. Runs in the same transaction as CreateChatTask + message ownership:
+-- direct-send inserts one owned message, while channel enqueue seals its
+-- trailing unowned batch. Legacy tasks keep chat_input_task_id NULL and retain
+-- the trailing-history fallback during rolling deploys.
 UPDATE agent_task_queue
 SET chat_input_task_id = id
 WHERE id = $1
@@ -237,14 +385,15 @@ RETURNING *;
 -- resume there than start over and lose conversation memory. Used as a
 -- fallback when chat_session.session_id is NULL. Resume-unsafe failures are
 -- excluded because replaying those sessions deterministically reproduces the
--- same terminal state.
+-- same terminal state. Keep this list in sync with resumeUnsafeFailureReason
+-- and GetLastTaskSession.
 SELECT session_id, work_dir, runtime_id FROM agent_task_queue
 WHERE chat_session_id = $1
   AND (
     status = 'completed'
     OR (
       status = 'failed'
-      AND COALESCE(failure_reason, '') NOT IN ('iteration_limit', 'agent_fallback_message', 'api_invalid_request', 'codex_semantic_inactivity')
+      AND COALESCE(failure_reason, '') NOT IN ('iteration_limit', 'agent_fallback_message', 'api_invalid_request', 'codex_semantic_inactivity', 'agent_error.context_overflow')
       AND NOT (COALESCE(error, '') ILIKE '%400%' AND COALESCE(error, '') ILIKE '%invalid_request_error%')
     )
   )

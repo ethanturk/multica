@@ -335,6 +335,7 @@ func TestCreatingAgentsSkillCoversAgentCreationContracts(t *testing.T) {
 		"not a parameter manual",
 		"`description` is a catalog summary",
 		"`instructions` is the runtime behavior contract",
+		"`avatar_url` → a random `emoji:<glyph>`",
 		"multica agent create --name <name> --runtime-id <runtime-id>",
 		"`model` is a first-class persisted column",
 		"custom_env",
@@ -514,52 +515,6 @@ func TestProjectsAndResourcesSkillCoversDurableContext(t *testing.T) {
 	}
 	if !skillHasFile(skill, "references/projects-and-resources-source-map.md") {
 		t.Errorf("projects-and-resources skill missing supporting file references/projects-and-resources-source-map.md")
-	}
-}
-
-func TestDeterministicToolsSkillCoversDecisionFrameworkAndContract(t *testing.T) {
-	skill, ok := findSkill(t, "multica-deterministic-tools")
-	if !ok {
-		return
-	}
-	fm, body, _ := splitFrontmatter(skill.Content)
-
-	// This is a contributor-facing guide for working ON the dettools plane, so
-	// unlike the platform-contract skills it is user-invocable and fences to the
-	// Go toolchain rather than the multica CLI.
-	if got := strings.TrimSpace(fm["user-invocable"]); got != "true" {
-		t.Errorf("user-invocable = %q, want true (a developer reaches for this guide explicitly)", got)
-	}
-
-	// The decision framework is the point of the skill — pin the litmus test and
-	// both sides of the keep-vs-convert split so the guidance can't silently
-	// erode into a how-to-add-a-tool manual.
-	mustContain := []string{
-		"Anything correctness-sensitive moves into deterministic tool handlers",
-		"Keep it a skill when",
-		"Convert to a deterministic Go tool when",
-		"The hybrid pattern",
-		// Contract anchors that must track the real code in server/pkg/dettools.
-		"server/pkg/dettools/tool_<name>.go",
-		"allTools()",
-		"strictUnmarshal",
-		"DefaultDetToolsAllowed",
-		"POLICY_FAILURE",
-		"MULTICA_DETTOOLS_ENABLED",
-		"deterministic_tools.{allowed_tools, denied_tools}",
-		"only **narrow**",
-		// The skill-must-be-updated-on-conversion rule (CLAUDE.md coupling).
-		"references/*-source-map.md",
-		"references/deterministic-tools-source-map.md",
-	}
-	for _, want := range mustContain {
-		if !strings.Contains(body, want) {
-			t.Errorf("deterministic-tools skill missing %q", want)
-		}
-	}
-
-	if !skillHasFile(skill, "references/deterministic-tools-source-map.md") {
-		t.Errorf("deterministic-tools skill missing supporting file references/deterministic-tools-source-map.md")
 	}
 }
 

@@ -84,7 +84,7 @@ describe("api", () => {
       ["GET /api/me", user],
       ["PATCH /api/me", user],
       ["GET /api/notification-preferences", { preferences: [] }],
-      ["PUT /api/notification-preferences", { preferences: [] }],
+      ["PATCH /api/notification-preferences", { preferences: [] }],
       ["GET /api/workspaces", [workspace]],
       ["GET /api/inbox", [{ id: "inbox-1" }]],
       ["POST /api/inbox/inbox-1/read", { id: "inbox-2" }],

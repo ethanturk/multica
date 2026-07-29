@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
-import type { Agent, ChatSession } from "@multica/core/types";
+import type { Agent, ChatSession, Project } from "@multica/core/types";
 
 interface QueuedRestore {
   id: string;
@@ -14,11 +14,15 @@ const h = vi.hoisted(() => {
   const store = {
     activeSessionId: null as string | null,
     selectedAgentId: null as string | null,
+    selectedProjectId: null as string | null,
     setActiveSession: vi.fn((id: string | null) => {
       store.activeSessionId = id;
     }),
     setSelectedAgentId: vi.fn((id: string | null) => {
       store.selectedAgentId = id;
+    }),
+    setSelectedProjectId: vi.fn((id: string | null) => {
+      store.selectedProjectId = id;
     }),
     appliedDraftRestoreIds: [] as string[],
     markDraftRestoreApplied: vi.fn((id: string) => {
@@ -53,13 +57,18 @@ const h = vi.hoisted(() => {
     store,
     archivedMutate: vi.fn(),
     markReadMutate: vi.fn(),
+    // Stable across renders so tests can assert on it; lazy-creates the session
+    // a new chat's first send needs.
+    createSessionMutate: vi.fn(async () => ({ id: "new-session" })),
     // Foreground gate for the auto mark-read effect; tests flip it.
     appForeground: { value: true },
     consumeRestoreMutate: vi.fn(),
+    setProjectMutate: vi.fn(),
     removeFromCaches: vi.fn(),
     // useQuery reads these so each test can vary the loaded data.
     sessions: [] as ChatSession[],
     agents: [] as Agent[],
+    projects: [] as Project[],
     draftRestores: null as
       | { restores: { id: string; chat_session_id: string; content: string }[] }
       | null,
@@ -75,9 +84,15 @@ vi.mock("@multica/core/workspace/queries", () => ({
   agentListOptions: () => ({ queryKey: ["agents"] }),
   memberListOptions: () => ({ queryKey: ["members"] }),
 }));
+vi.mock("@multica/core/projects/queries", () => ({
+  projectListOptions: () => ({ queryKey: ["projects"] }),
+}));
 vi.mock("@multica/views/issues/components", () => ({ canAssignAgent: () => true }));
 vi.mock("@multica/core/api", () => ({
   api: { sendChatMessage: vi.fn(), cancelTaskById: vi.fn() },
+  // Names the 403 that a revoked invoke permission raises (MUL-4525); plain
+  // failures have no reason code.
+  dispatchReasonCode: () => undefined,
 }));
 vi.mock("@multica/core/agents", () => ({
   useAgentPresenceDetail: () => ({ availability: "online" }),
@@ -87,9 +102,13 @@ vi.mock("@multica/core/hooks/use-file-upload", () => ({
   useFileUpload: () => ({ uploadWithToast: vi.fn() }),
 }));
 vi.mock("@multica/core/chat/mutations", () => ({
-  useCreateChatSession: () => ({ mutateAsync: vi.fn() }),
+  useCreateChatSession: () => ({ mutateAsync: h.createSessionMutate }),
   useMarkChatSessionRead: () => ({ mutate: h.markReadMutate }),
   useSetChatSessionArchived: () => ({ mutate: h.archivedMutate }),
+  useSetChatSessionProject: () => ({
+    mutate: h.setProjectMutate,
+    isPending: false,
+  }),
   useConsumeChatDraftRestore: () => ({ mutate: h.consumeRestoreMutate }),
 }));
 vi.mock("../../common/use-app-foreground", () => ({
@@ -121,6 +140,7 @@ vi.mock("@tanstack/react-query", async (importOriginal) => {
         return { data: [{ user_id: "user-1", role: "admin" }] };
       }
       if (key.includes("sessions")) return { data: h.sessions, isSuccess: true };
+      if (key.includes("projects")) return { data: h.projects, isSuccess: true };
       if (key.includes("draft-restores")) return { data: h.draftRestores };
       return { data: null };
     },
@@ -140,6 +160,7 @@ vi.mock("@tanstack/react-query", async (importOriginal) => {
 });
 
 import { useChatController } from "./use-chat-controller";
+import { api } from "@multica/core/api";
 
 // --- Fixtures ---------------------------------------------------------------
 function makeSession(
@@ -171,16 +192,231 @@ const sC = makeSession({ id: "sC", agent_id: "agent-a", updated_at: "2026-07-08T
 function setup(activeSessionId: string | null, sessions: ChatSession[], agents: Agent[]) {
   h.store.activeSessionId = activeSessionId;
   h.store.selectedAgentId = null;
+  h.store.selectedProjectId = null;
   h.sessions = sessions;
   h.agents = agents;
+  h.projects = [];
   const { result } = renderHook(() => useChatController());
   // Ignore any render-time store writes (self-heal etc.); we assert only the
   // effect of the call under test.
   h.store.setActiveSession.mockClear();
   h.store.setSelectedAgentId.mockClear();
+  h.store.setSelectedProjectId.mockClear();
   h.archivedMutate.mockClear();
   return result;
 }
+
+describe("useChatController project context", () => {
+  const project = {
+    id: "project-a",
+    workspace_id: "ws-1",
+    title: "Project Alpha",
+  } as Project;
+  const otherProject = {
+    id: "project-b",
+    workspace_id: "ws-1",
+    title: "Project Beta",
+  } as Project;
+
+  beforeEach(() => {
+    h.store.setActiveSession.mockClear();
+    h.store.setSelectedProjectId.mockClear();
+    h.createSessionMutate.mockClear();
+    h.setProjectMutate.mockClear();
+    h.createSessionMutate.mockResolvedValue({ id: "new-session" });
+  });
+
+  afterEach(() => {
+    h.store.selectedProjectId = null;
+    h.projects = [];
+  });
+
+  it("removes the project from the current chat without leaving it", () => {
+    const projectSession = makeSession({
+      id: "project-session",
+      agent_id: "agent-a",
+      project_id: project.id,
+    });
+    h.store.activeSessionId = projectSession.id;
+    h.store.selectedProjectId = project.id;
+    h.sessions = [projectSession];
+    h.agents = [agentA];
+    h.projects = [project];
+
+    const { result } = renderHook(() => useChatController());
+    h.store.setActiveSession.mockClear();
+    h.store.setSelectedProjectId.mockClear();
+
+    act(() => result.current.handleProjectChange(null));
+
+    expect(h.setProjectMutate).toHaveBeenCalledWith({
+      sessionId: projectSession.id,
+      projectId: null,
+    });
+    expect(h.store.setSelectedProjectId).not.toHaveBeenCalled();
+    expect(h.store.setActiveSession).not.toHaveBeenCalled();
+  });
+
+  it("starts a fresh chat when switching an existing chat to another project", () => {
+    const projectSession = makeSession({
+      id: "project-session",
+      agent_id: "agent-a",
+      project_id: project.id,
+    });
+    h.store.activeSessionId = projectSession.id;
+    h.store.selectedProjectId = project.id;
+    h.sessions = [projectSession];
+    h.agents = [agentA];
+    h.projects = [project, otherProject];
+
+    const { result } = renderHook(() => useChatController());
+    h.store.setActiveSession.mockClear();
+    h.store.setSelectedProjectId.mockClear();
+
+    act(() => result.current.handleProjectChange(otherProject.id));
+
+    expect(h.setProjectMutate).not.toHaveBeenCalled();
+    expect(h.store.setSelectedProjectId).toHaveBeenCalledWith(otherProject.id);
+    expect(h.store.setActiveSession).toHaveBeenCalledWith(null);
+  });
+
+  it("pins the fresh chat to the open session's agent when selectedAgentId is stale", () => {
+    // The open session belongs to agent B, but the persisted preference is
+    // still agent A. Switching to another project clears the active session,
+    // which would otherwise drop selection back to the stale agent A and send
+    // the lazily-created chat to the wrong agent (MUL-5150 regression). The
+    // switch must first sync selectedAgentId to the open session's agent.
+    const projectSession = makeSession({
+      id: "project-session",
+      agent_id: agentB.id,
+      project_id: project.id,
+    });
+    h.store.activeSessionId = projectSession.id;
+    h.store.selectedAgentId = agentA.id; // stale preference for a different agent
+    h.store.selectedProjectId = project.id;
+    h.sessions = [projectSession];
+    h.agents = [agentA, agentB];
+    h.projects = [project, otherProject];
+
+    const { result } = renderHook(() => useChatController());
+    h.store.setActiveSession.mockClear();
+    h.store.setSelectedAgentId.mockClear();
+    h.store.setSelectedProjectId.mockClear();
+
+    act(() => result.current.handleProjectChange(otherProject.id));
+
+    expect(h.store.setSelectedAgentId).toHaveBeenCalledWith(agentB.id);
+    expect(h.store.setSelectedProjectId).toHaveBeenCalledWith(otherProject.id);
+    expect(h.store.setActiveSession).toHaveBeenCalledWith(null);
+  });
+
+  it("does not write project changes into the new-chat draft while an active session resolves", () => {
+    h.store.activeSessionId = "loading-session";
+    h.store.selectedProjectId = project.id;
+    h.sessions = [];
+    h.agents = [agentA];
+    h.projects = [project];
+
+    const { result } = renderHook(() => useChatController());
+    h.store.setActiveSession.mockClear();
+    h.store.setSelectedProjectId.mockClear();
+
+    act(() => result.current.handleProjectChange(null));
+
+    expect(h.setProjectMutate).not.toHaveBeenCalled();
+    expect(h.store.setSelectedProjectId).not.toHaveBeenCalled();
+    expect(h.store.setActiveSession).not.toHaveBeenCalled();
+  });
+
+  it("persists the selected project when lazy-creating a session", async () => {
+    h.store.activeSessionId = null;
+    h.store.selectedAgentId = agentA.id;
+    h.store.selectedProjectId = project.id;
+    h.sessions = [];
+    h.agents = [agentA];
+    h.projects = [project];
+    vi.mocked(api.sendChatMessage).mockResolvedValue({
+      message_id: "message-1",
+      task_id: "task-1",
+      created_at: new Date(0).toISOString(),
+    } as Awaited<ReturnType<typeof api.sendChatMessage>>);
+
+    const { result } = renderHook(() => useChatController());
+    await act(async () => {
+      await result.current.handleSend("hello", undefined, vi.fn());
+    });
+
+    expect(h.createSessionMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ project_id: project.id }),
+    );
+  });
+
+  it("does not inherit the current session project when starting a new chat", () => {
+    const projectSession = makeSession({
+      id: "project-session",
+      agent_id: "agent-a",
+      project_id: project.id,
+    });
+    h.store.activeSessionId = projectSession.id;
+    h.store.selectedProjectId = project.id;
+    h.sessions = [projectSession];
+    h.agents = [agentA, agentB];
+    h.projects = [project];
+
+    const { result } = renderHook(() => useChatController());
+    h.store.setActiveSession.mockClear();
+    h.store.setSelectedProjectId.mockClear();
+
+    act(() => result.current.handleStartNewChat(agentB));
+
+    expect(h.store.setSelectedProjectId).toHaveBeenCalledWith(null);
+    expect(h.store.setActiveSession).toHaveBeenCalledWith(null);
+  });
+
+  it("clears the current session project when using the plain new-chat action", () => {
+    const projectSession = makeSession({
+      id: "project-session",
+      agent_id: "agent-a",
+      project_id: project.id,
+    });
+    h.store.activeSessionId = projectSession.id;
+    h.store.selectedProjectId = project.id;
+    h.sessions = [projectSession];
+    h.agents = [agentA];
+    h.projects = [project];
+
+    const { result } = renderHook(() => useChatController());
+    h.store.setActiveSession.mockClear();
+    h.store.setSelectedProjectId.mockClear();
+
+    act(() => result.current.handleNewChat());
+
+    expect(h.store.setSelectedProjectId).toHaveBeenCalledWith(null);
+    expect(h.store.setActiveSession).toHaveBeenCalledWith(null);
+  });
+
+  it("keeps a historical session project out of the next-chat draft state", () => {
+    const projectSession = makeSession({
+      id: "project-session",
+      agent_id: "agent-a",
+      project_id: project.id,
+    });
+    h.store.activeSessionId = null;
+    h.store.selectedProjectId = null;
+    h.sessions = [projectSession];
+    h.agents = [agentA];
+    h.projects = [project];
+
+    const { result } = renderHook(() => useChatController());
+    h.store.setActiveSession.mockClear();
+    h.store.setSelectedProjectId.mockClear();
+
+    act(() => result.current.handleSelectSession(projectSession));
+
+    expect(h.store.setSelectedProjectId).not.toHaveBeenCalled();
+    expect(h.store.setActiveSession).toHaveBeenCalledWith(projectSession.id);
+  });
+});
 
 describe("useChatController.advanceSelectionAfterArchive", () => {
   beforeEach(() => {
@@ -464,5 +700,107 @@ describe("useChatController durable draft restores (#5219)", () => {
     });
 
     expect(result.current.restoreDraftRequest?.serverRestoreId).toBe("msg-1");
+  });
+});
+
+// After a send, the composer is scrubbed only if the user is still on the
+// session they sent from — otherwise the shared editor is showing a different
+// draft and clearing it would wipe visible input. MUL-4864 changes what
+// "still here" means: with ONE new-chat draft, the composer no longer belongs
+// to an agent, so only `activeSessionId` can answer it.
+describe("useChatController.handleSend — compose target tracking", () => {
+  beforeEach(() => {
+    h.store.setActiveSession.mockClear();
+    h.createSessionMutate.mockClear();
+    h.createSessionMutate.mockResolvedValue({ id: "new-session" });
+    vi.mocked(api.sendChatMessage).mockResolvedValue({
+      message_id: "msg-1",
+      task_id: "task-1",
+      created_at: new Date(0).toISOString(),
+    } as unknown as Awaited<ReturnType<typeof api.sendChatMessage>>);
+  });
+
+  function sendFrom(activeSessionId: string | null, whileSending?: () => void) {
+    h.store.activeSessionId = activeSessionId;
+    h.store.selectedAgentId = "agent-a";
+    h.sessions = [sA];
+    h.agents = [agentA];
+    const { result } = renderHook(() => useChatController());
+    h.store.setActiveSession.mockClear();
+    const commitInput = vi.fn();
+    return {
+      commitInput,
+      send: () =>
+        act(async () => {
+          const pending = result.current.handleSend("hello", undefined, commitInput);
+          // Runs between ensureSession and the commit — the window the user
+          // actually races with when they touch the picker after hitting send.
+          whileSending?.();
+          await pending;
+        }),
+    };
+  }
+
+  it("scrubs the composer after a new chat's first send", async () => {
+    const { commitInput, send } = sendFrom(null);
+    await send();
+
+    expect(commitInput).toHaveBeenCalledWith(
+      expect.objectContaining({ clearEditor: true, extraDraftKeys: ["new-session"] }),
+    );
+    expect(h.store.setActiveSession).toHaveBeenCalledWith("new-session");
+  });
+
+  it("scrubs the composer even if the agent picker moved mid-send", async () => {
+    // The sent text is still sitting in the one shared composer. Leaving it
+    // there would arm a second, unintended send to the agent just picked.
+    const { commitInput, send } = sendFrom(null, () => {
+      h.store.selectedAgentId = "agent-b";
+    });
+    await send();
+
+    expect(commitInput).toHaveBeenCalledWith(
+      expect.objectContaining({ clearEditor: true, extraDraftKeys: ["new-session"] }),
+    );
+    // The message goes to the agent selected when Send was pressed — a later
+    // flick of the picker does not re-route work already on its way.
+    expect(h.createSessionMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ agent_id: "agent-a" }),
+    );
+    // …and that session is what opens, so the user sees the reply they asked for.
+    expect(h.store.setActiveSession).toHaveBeenCalledWith("new-session");
+  });
+
+  it("keeps the input when session create fails, and opens nothing", async () => {
+    h.createSessionMutate.mockRejectedValue(new Error("create failed"));
+    const { commitInput, send } = sendFrom(null);
+    await send();
+
+    // No commit = the draft is never cleared, so the user's words survive.
+    expect(commitInput).not.toHaveBeenCalled();
+    expect(h.store.setActiveSession).not.toHaveBeenCalled();
+  });
+
+  it("leaves the composer alone when the user navigated to another session mid-send", async () => {
+    // Genuine navigation: the editor now shows sB's draft, which this send has
+    // no business clearing. Fire-and-forget — the reply surfaces as unread.
+    const { commitInput, send } = sendFrom(null, () => {
+      h.store.activeSessionId = "sB";
+    });
+    await send();
+
+    expect(commitInput).toHaveBeenCalledWith(
+      expect.objectContaining({ clearEditor: false, extraDraftKeys: ["new-session"] }),
+    );
+    expect(h.store.setActiveSession).not.toHaveBeenCalled();
+  });
+
+  it("still clears the sent draft when sending from an existing session", async () => {
+    const { commitInput, send } = sendFrom("sA");
+    await send();
+
+    expect(commitInput).toHaveBeenCalledWith(
+      expect.objectContaining({ clearEditor: true, extraDraftKeys: ["sA"] }),
+    );
   });
 });

@@ -54,12 +54,13 @@ func (d *Daemon) listenHealth() (net.Listener, error) {
 
 // repoCheckoutRequest is the body of a POST /repo/checkout request.
 type repoCheckoutRequest struct {
-	URL         string `json:"url"`
-	WorkspaceID string `json:"workspace_id"`
-	WorkDir     string `json:"workdir"`
-	Ref         string `json:"ref,omitempty"`
-	AgentName   string `json:"agent_name"`
-	TaskID      string `json:"task_id"`
+	URL          string `json:"url"`
+	WorkspaceID  string `json:"workspace_id"`
+	WorkDir      string `json:"workdir"`
+	Ref          string `json:"ref,omitempty"`
+	AgentName    string `json:"agent_name"`
+	TaskID       string `json:"task_id"`
+	CheckoutMode string `json:"checkout_mode,omitempty"`
 }
 
 // healthHandler returns the /health HTTP handler. Extracted from serveHealth
@@ -171,6 +172,7 @@ func (d *Daemon) repoCheckoutHandler() http.HandlerFunc {
 			http.Error(w, "url is required", http.StatusBadRequest)
 			return
 		}
+		repoURL := repoAuthorizationKey(req.URL)
 		if req.WorkspaceID == "" {
 			http.Error(w, "workspace_id is required", http.StatusBadRequest)
 			return
@@ -179,18 +181,22 @@ func (d *Daemon) repoCheckoutHandler() http.HandlerFunc {
 			http.Error(w, "workdir is required", http.StatusBadRequest)
 			return
 		}
+		if req.CheckoutMode != "" && req.CheckoutMode != repoCheckoutModeIsolated {
+			http.Error(w, "invalid checkout_mode", http.StatusBadRequest)
+			return
+		}
 
 		if d.repoCache == nil {
 			http.Error(w, "repo cache not initialized", http.StatusInternalServerError)
 			return
 		}
 
-		if err := d.ensureRepoReady(r.Context(), req.WorkspaceID, req.URL); err != nil {
+		if err := d.ensureRepoReady(r.Context(), req.WorkspaceID, repoURL); err != nil {
 			statusCode := http.StatusInternalServerError
 			if errors.Is(err, ErrRepoNotConfigured) {
 				statusCode = http.StatusBadRequest
 			}
-			d.logger.Error("repo checkout readiness failed", "workspace_id", req.WorkspaceID, "url", req.URL, "error", err)
+			d.logger.Error("repo checkout readiness failed", "workspace_id", req.WorkspaceID, "url", repoURL, "error", err)
 			http.Error(w, err.Error(), statusCode)
 			return
 		}
@@ -202,12 +208,13 @@ func (d *Daemon) repoCheckoutHandler() http.HandlerFunc {
 
 		result, err := d.repoCache.CreateWorktree(repocache.WorktreeParams{
 			WorkspaceID:         req.WorkspaceID,
-			RepoURL:             req.URL,
+			RepoURL:             repoURL,
 			WorkDir:             req.WorkDir,
 			Ref:                 checkoutRef,
 			AgentName:           req.AgentName,
 			TaskID:              req.TaskID,
 			CoAuthoredByEnabled: d.workspaceCoAuthoredByEnabled(req.WorkspaceID),
+			IsolatedGitMetadata: req.CheckoutMode == repoCheckoutModeIsolated,
 		})
 		if err != nil {
 			d.logger.Error("repo checkout failed", "url", req.URL, "error", err)

@@ -3,8 +3,13 @@ import { api } from "../api";
 import { propertyKeys } from "./queries";
 import { useWorkspaceId } from "../hooks";
 import { issueKeys } from "../issues/queries";
-import { invalidatePropertyWindowQueries, onIssuePropertiesChanged } from "../issues/ws-updaters";
+import {
+  invalidatePropertyWindowQueries,
+  onIssuePropertiesChanged,
+  patchIssueProperties,
+} from "../issues/ws-updaters";
 import { findIssueLocation } from "../issues/cache-helpers";
+import type { IssueFlatCache } from "../issues/cache-coordinator";
 import type {
   CreatePropertyRequest,
   UpdatePropertyRequest,
@@ -60,9 +65,36 @@ function readIssueProperties(qc: ReturnType<typeof useQueryClient>, wsId: string
     const location = findIssueLocation(data, issueId);
     if (location) return location.issue.properties ?? {};
   }
+  for (const [, data] of qc.getQueriesData<IssueFlatCache>({
+    queryKey: issueKeys.flatAll(wsId),
+  })) {
+    for (const page of data?.pages ?? []) {
+      const issue = page.issues.find((candidate) => candidate.id === issueId);
+      if (issue) return issue.properties ?? {};
+    }
+  }
+  for (const [, data] of qc.getQueriesData<Issue[]>({
+    queryKey: issueKeys.childrenAll(wsId),
+  })) {
+    const issue = data?.find((candidate) => candidate.id === issueId);
+    if (issue) return issue.properties ?? {};
+  }
   return undefined;
 }
 
+async function cancelIssuePropertyMutationQueries(
+  qc: ReturnType<typeof useQueryClient>,
+  wsId: string,
+  issueId: string,
+) {
+  await Promise.all([
+    qc.cancelQueries({ queryKey: issueKeys.detail(wsId, issueId) }),
+    qc.cancelQueries({ queryKey: issueKeys.list(wsId) }),
+    qc.cancelQueries({ queryKey: issueKeys.flatAll(wsId) }),
+    qc.cancelQueries({ queryKey: issueKeys.childrenAll(wsId) }),
+    qc.cancelQueries({ queryKey: issueKeys.childrenByParentsAll(wsId) }),
+  ]);
+}
 
 /**
  * Optimistic single-property write on an issue.
@@ -89,14 +121,11 @@ export function useSetIssueProperty() {
     scope: { id: `issue-properties:${wsId}` },
     mutationKey: ["issue-properties", wsId],
     onMutate: async ({ issueId, propertyId, value }) => {
-      // Cancel in-flight list refetches too: a response snapshotted before
-      // this write would land after the optimistic patch and revert it.
-      await Promise.all([
-        qc.cancelQueries({ queryKey: issueKeys.detail(wsId, issueId) }),
-        qc.cancelQueries({ queryKey: issueKeys.list(wsId) }),
-      ]);
+      // A response snapshotted before this write must not land after the
+      // optimistic patch and revert any denormalized issue projection.
+      await cancelIssuePropertyMutationQueries(qc, wsId, issueId);
       const prev = readIssueProperties(qc, wsId, issueId);
-      onIssuePropertiesChanged(qc, wsId, issueId, { ...(prev ?? {}), [propertyId]: value });
+      patchIssueProperties(qc, wsId, issueId, { ...(prev ?? {}), [propertyId]: value });
       return { prevValue: prev?.[propertyId], hadBag: prev !== undefined, issueId, propertyId };
     },
     onError: (_err, _vars, ctx) => {
@@ -121,15 +150,12 @@ export function useUnsetIssueProperty() {
     scope: { id: `issue-properties:${wsId}` },
     mutationKey: ["issue-properties", wsId],
     onMutate: async ({ issueId, propertyId }) => {
-      await Promise.all([
-        qc.cancelQueries({ queryKey: issueKeys.detail(wsId, issueId) }),
-        qc.cancelQueries({ queryKey: issueKeys.list(wsId) }),
-      ]);
+      await cancelIssuePropertyMutationQueries(qc, wsId, issueId);
       const prev = readIssueProperties(qc, wsId, issueId);
       if (prev) {
         const next = { ...prev };
         delete next[propertyId];
-        onIssuePropertiesChanged(qc, wsId, issueId, next);
+        patchIssueProperties(qc, wsId, issueId, next);
       }
       return { prevValue: prev?.[propertyId], hadBag: prev !== undefined, issueId, propertyId };
     },
@@ -165,7 +191,7 @@ function rollbackSingleKey(
   const next = { ...current };
   if (ctx.prevValue === undefined) delete next[ctx.propertyId];
   else next[ctx.propertyId] = ctx.prevValue;
-  onIssuePropertiesChanged(qc, wsId, ctx.issueId, next);
+  patchIssueProperties(qc, wsId, ctx.issueId, next);
 }
 
 /** Authoritative reconcile once the LAST in-flight property write settles. */

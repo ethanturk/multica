@@ -8,14 +8,17 @@ import enRuntimes from "../../locales/en/runtimes.json";
 import { UpdateSection } from "./update-section";
 
 const TEST_RESOURCES = { en: { common: enCommon, runtimes: enRuntimes } };
-const mockGetLatestCliRelease = vi.hoisted(() => vi.fn());
+const mockFetchLatestCliVersion = vi.hoisted(() => vi.fn());
 
 vi.mock("@multica/core/api", () => ({
   api: {
     initiateUpdate: vi.fn(),
     getUpdateResult: vi.fn(),
-    getLatestCliRelease: mockGetLatestCliRelease,
   },
+}));
+
+vi.mock("@multica/core/runtimes", () => ({
+  fetchLatestCliVersion: mockFetchLatestCliVersion,
 }));
 
 function renderSection(props: {
@@ -37,37 +40,46 @@ function renderSection(props: {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
 });
 
 describe("UpdateSection read-only status", () => {
-  it("shows Latest without exposing an update action", async () => {
-    mockGetLatestCliRelease.mockResolvedValue({ tag_name: "v0.4.0" });
+  it("shows Latest without a redundant read-only label or update action", async () => {
+    mockFetchLatestCliVersion.mockResolvedValue("v0.4.0");
 
     renderSection({ runtimeId: null });
 
     expect(await screen.findByText("Latest")).toBeInTheDocument();
+    expect(screen.queryByText("Read-only")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Update" }),
     ).not.toBeInTheDocument();
   });
 
   it("shows the Desktop manager without exposing an update action", () => {
-    mockGetLatestCliRelease.mockResolvedValue({ tag_name: "v0.4.0" });
+    mockFetchLatestCliVersion.mockResolvedValue("v0.4.0");
 
     renderSection({ runtimeId: null, launchedBy: "desktop" });
 
     expect(screen.getByText("Managed by Desktop")).toBeInTheDocument();
+    expect(screen.queryByText("Read-only")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Update" }),
     ).not.toBeInTheDocument();
   });
 
   it("shows an available version without an action for a read-only viewer", async () => {
-    mockGetLatestCliRelease.mockResolvedValue({ tag_name: "v0.4.0" });
+    mockFetchLatestCliVersion.mockResolvedValue("v0.4.0");
 
     renderSection({ runtimeId: null, currentVersion: "v0.3.17" });
 
     expect(await screen.findByText("available")).toBeInTheDocument();
+    expect(screen.getByText("Read-only")).toBeInTheDocument();
+    expect(
+      screen.getByTitle(
+        "Only runtime owners and workspace admins can update the CLI.",
+      ),
+    ).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Update" }),
     ).not.toBeInTheDocument();

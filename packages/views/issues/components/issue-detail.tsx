@@ -3,8 +3,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import { useDefaultLayout, usePanelRef } from "react-resizable-panels";
-import { AppLink } from "../../navigation";
-import { useNavigation } from "../../navigation";
+import { AppLink, useBackOrReplace } from "../../navigation";
 import {
   Archive,
   Calendar,
@@ -31,7 +30,7 @@ import { Button } from "@multica/ui/components/ui/button";
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@multica/ui/components/ui/resizable";
 import { Sheet, SheetContent } from "@multica/ui/components/ui/sheet";
 import { useIsMobile } from "@multica/ui/hooks/use-mobile";
-import { ContentEditor, type ContentEditorRef, TitleEditor, type TitleEditorRef, useFileDropZone, FileDropOverlay, useLazyEditor } from "../../editor";
+import { ContentEditor, type ContentEditorRef, TitleEditor, type TitleEditorRef, useFileDropZone, FileDropOverlay, useLazyEditor, useEditorUpload } from "../../editor";
 import { FileUploadButton } from "@multica/ui/components/common/file-upload-button";
 import {
   Tooltip,
@@ -45,16 +44,21 @@ import { Command, CommandInput, CommandList, CommandEmpty, CommandGroup, Command
 import { AvatarGroup, AvatarGroupCount } from "@multica/ui/components/ui/avatar";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { PropRow } from "../../common/prop-row";
-import type { Attachment, Issue, IssueStatus, IssuePriority, TimelineEntry, UpdateIssueRequest } from "@multica/core/types";
+import { PropertyIcon } from "../../common/property-icon";
+import type { Attachment, Issue, IssueProperty, IssueStatus, IssuePriority, TimelineEntry, UpdateIssueRequest } from "@multica/core/types";
 import { contentReferencesAttachment } from "@multica/core/types";
 import { STATUS_CONFIG, PRIORITY_CONFIG } from "@multica/core/issues/config";
-import { formatDateOnly } from "@multica/core/issues/date";
+import { formatDateOnly, isPastDateOnly } from "@multica/core/issues/date";
 import { useUpdateIssue } from "@multica/core/issues/mutations";
 import { toast } from "sonner";
 import { StatusIcon, PriorityIcon, StatusPicker, PriorityPicker, StagePicker, StartDatePicker, DueDatePicker, AssigneePicker, LabelPicker } from ".";
 import { maxSiblingStage } from "./pickers/stage-picker";
-import { CustomPropertyValueEditor } from "./pickers/custom-property-picker";
-import { IssueActionsDropdown, useIssueActions } from "../actions";
+import { CustomPropertyValueEditor, CustomPropertyValueDisplay } from "./pickers/custom-property-picker";
+import { Switch } from "@multica/ui/components/ui/switch";
+import { IssueActionsDropdown, useIssueActions, IssueActionsContextMenu, IssueContextMenuProvider } from "../actions";
+import { LabelChip } from "../../labels/label-chip";
+import { IssueAgentActivityIndicator } from "./issue-agent-activity-indicator";
+import { SubIssuesAgentWorkingChip } from "./sub-issues-agent-working-chip";
 import { ProjectPicker } from "../../projects/components/project-picker";
 import { LocalDirectoryHint } from "../../projects/components/local-directory-hint";
 import { CommentCard } from "./comment-card";
@@ -72,7 +76,7 @@ import { useWorkspacePaths } from "@multica/core/paths";
 import { useActorName } from "@multica/core/workspace/hooks";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { useRecentContextStore } from "@multica/core/chat";
-import { issueListOptions, issueDetailOptions, childIssuesOptions, issueUsageOptions, issueAttachmentsOptions } from "@multica/core/issues/queries";
+import { issueListOptions, issueDetailOptions, childIssuesOptions, childIssueProgressOptions, issueUsageOptions, issueAttachmentsOptions } from "@multica/core/issues/queries";
 import { projectDetailOptions } from "@multica/core/projects/queries";
 import { ProjectIcon } from "../../projects/components/project-icon";
 import { issueLabelsOptions } from "@multica/core/labels";
@@ -83,6 +87,10 @@ import {
   useCommentComposerStore,
   useRecentIssuesStore,
   useResolvedExpandStore,
+  useSubIssueDisplayStore,
+  SUB_ISSUE_ROW_PROPERTY_KEYS,
+  type SubIssueRowProperties,
+  type SubIssueRowPropertyKey,
 } from "@multica/core/issues/stores";
 import { useIssueSelectionStore } from "@multica/core/issues/stores/selection-store";
 import { BatchActionToolbar } from "./batch-action-toolbar";
@@ -90,8 +98,6 @@ import { useIssueTimeline } from "../hooks/use-issue-timeline";
 import { useIssueReactions } from "../hooks/use-issue-reactions";
 import { useIssueSubscribers } from "../hooks/use-issue-subscribers";
 import { ReactionBar } from "@multica/ui/components/common/reaction-bar";
-import { useFileUpload } from "@multica/core/hooks/use-file-upload";
-import { api } from "@multica/core/api";
 import { useTimeAgo } from "../../i18n";
 import { useRestoredScrollOffset, useRestoredScrollRef } from "../../platform";
 import { cn } from "@multica/ui/lib/utils";
@@ -583,13 +589,30 @@ function ActivityBlock({
 // SubIssueRow — sub-issue list item with inline status & assignee editing
 // ---------------------------------------------------------------------------
 
-function SubIssueRow({ child }: { child: Issue }) {
+function SubIssueRow({
+  child,
+  childProgress,
+  rowProps,
+  customProperties,
+}: {
+  child: Issue;
+  /** The sub-issue's OWN children progress (it can itself be a parent). */
+  childProgress?: { done: number; total: number };
+  /** User-level display preference: which built-in fields the row shows. */
+  rowProps: SubIssueRowProperties;
+  /** Workspace custom properties the user opted into showing on rows. */
+  customProperties: IssueProperty[];
+}) {
   const { t } = useT("issues");
   const paths = useWorkspacePaths();
   const updateIssue = useUpdateIssue();
   const selected = useIssueSelectionStore((s) => s.selectedIds.has(child.id));
   const toggleSelected = useIssueSelectionStore((s) => s.toggle);
   const isDone = child.status === "done" || child.status === "cancelled";
+  const labels = rowProps.labels ? (child.labels ?? []) : [];
+  const customPropsWithValue = customProperties.filter(
+    (p) => child.properties?.[p.id] !== undefined,
+  );
 
   const handleUpdate = useCallback(
     (updates: Partial<UpdateIssueRequest>) => {
@@ -611,80 +634,250 @@ function SubIssueRow({ child }: { child: Issue }) {
   // AppLink wraps only the title/identifier area. Pickers and checkbox are
   // siblings, so their clicks never navigate — no stopPropagation acrobatics
   // and no risk of the native checkbox / picker triggers being blocked.
+  // Right-click anywhere on the row opens the shared issue actions menu
+  // (priority, labels, dates, delete, …) — the same menu as list rows.
   return (
-    <div
-      className={cn(
-        "flex items-center gap-2.5 px-3 py-2 hover:bg-accent/50 transition-colors group/row",
-        selected && "bg-accent/30",
-      )}
-    >
+    <IssueActionsContextMenu issue={child}>
       <div
         className={cn(
-          "flex h-4 w-4 shrink-0 items-center justify-center transition-opacity",
-          selected
-            ? "opacity-100"
-            : "opacity-0 group-hover/row:opacity-100 focus-within:opacity-100",
+          "flex items-center gap-2.5 px-3 py-2 hover:bg-accent/50 transition-colors group/row",
+          selected && "bg-accent/30",
         )}
       >
-        <input
-          type="checkbox"
-          checked={selected}
-          onChange={() => toggleSelected(child.id)}
-          aria-label={`Select ${child.identifier}`}
-          className="cursor-pointer accent-primary"
-        />
-      </div>
-      <StatusPicker
-        status={child.status}
-        onUpdate={handleUpdate}
-        align="start"
-        trigger={
-          <StatusIcon
-            status={child.status}
-            className="h-[15px] w-[15px] shrink-0"
-          />
-        }
-      />
-      <AppLink
-        href={paths.issueDetail(child.id)}
-        className="flex min-w-0 flex-1 items-center gap-2.5"
-      >
-        <span className="text-[11px] text-muted-foreground tabular-nums font-medium shrink-0">
-          {child.identifier}
-        </span>
-        <span
-          className={cn(
-            "text-sm truncate flex-1",
-            isDone
-              ? "text-muted-foreground"
-              : "group-hover/row:text-foreground",
+        {/* Priority ⇄ checkbox slot, mirroring the main list rows: the
+            priority icon yields to the selection checkbox on hover/focus.
+            Opacity (not display) swap keeps the checkbox keyboard-tabbable. */}
+        <div className="relative flex h-4 w-4 shrink-0 items-center justify-center">
+          {rowProps.priority && (
+            <PriorityIcon
+              priority={child.priority}
+              className={cn(
+                "transition-opacity",
+                selected
+                  ? "opacity-0"
+                  : "group-hover/row:opacity-0 group-focus-within/row:opacity-0",
+              )}
+            />
           )}
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={() => toggleSelected(child.id)}
+            aria-label={`Select ${child.identifier}`}
+            className={cn(
+              "absolute inset-0 cursor-pointer accent-primary transition-opacity",
+              selected
+                ? "opacity-100"
+                : "opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100",
+            )}
+          />
+        </div>
+        <StatusPicker
+          status={child.status}
+          onUpdate={handleUpdate}
+          align="start"
+          trigger={
+            <StatusIcon
+              status={child.status}
+              className="h-[15px] w-[15px] shrink-0"
+            />
+          }
+        />
+        <AppLink
+          href={paths.issueDetail(child.id)}
+          className="flex min-w-0 flex-1 items-center gap-2.5"
         >
-          {child.title}
-        </span>
-      </AppLink>
-      <AssigneePicker
-        assigneeType={child.assignee_type}
-        assigneeId={child.assignee_id}
-        onUpdate={handleUpdate}
-        align="end"
-        trigger={
-          child.assignee_type && child.assignee_id ? (
-            <ActorAvatar
-              actorType={child.assignee_type}
-              actorId={child.assignee_id}
-              size="sm"
-              className="shrink-0"
-            />
-          ) : (
+          <span className="text-[11px] text-muted-foreground tabular-nums font-medium shrink-0">
+            {child.identifier}
+          </span>
+          <IssueAgentActivityIndicator issueId={child.id} />
+          <span className="flex min-w-0 flex-1 items-center gap-1.5">
             <span
-              aria-hidden
-              className="h-5 w-5 rounded-full border border-dashed border-muted-foreground/30 shrink-0"
+              className={cn(
+                "text-sm truncate",
+                isDone
+                  ? "text-muted-foreground"
+                  : "group-hover/row:text-foreground",
+              )}
+            >
+              {child.title}
+            </span>
+            {labels.length > 0 && (
+              <span className="hidden max-w-[200px] shrink-0 items-center gap-1 overflow-hidden md:inline-flex">
+                {labels.slice(0, 2).map((label) => (
+                  <LabelChip key={label.id} label={label} />
+                ))}
+                {labels.length > 2 && (
+                  <span className="text-[11px] text-muted-foreground">
+                    +{labels.length - 2}
+                  </span>
+                )}
+              </span>
+            )}
+            {customPropsWithValue.length > 0 && (
+              <span className="hidden max-w-[260px] shrink-0 items-center gap-1 overflow-hidden md:inline-flex">
+                {customPropsWithValue.slice(0, 3).map((property) => (
+                  <span
+                    key={property.id}
+                    className="inline-flex max-w-[120px] items-center gap-1 rounded-full bg-muted/60 px-1.5 py-0.5 text-[11px] text-muted-foreground"
+                  >
+                    <PropertyIcon property={property} className="size-3 text-[11px]" />
+                    <CustomPropertyValueDisplay
+                      property={property}
+                      value={child.properties?.[property.id]}
+                    />
+                  </span>
+                ))}
+              </span>
+            )}
+            {rowProps.childProgress && childProgress && childProgress.total > 0 && (
+              <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-muted/60 px-1.5 py-0.5">
+                <ProgressRing
+                  done={childProgress.done}
+                  total={childProgress.total}
+                  size={11}
+                />
+                <span className="text-[11px] text-muted-foreground tabular-nums font-medium">
+                  {childProgress.done}/{childProgress.total}
+                </span>
+              </span>
+            )}
+          </span>
+        </AppLink>
+        {rowProps.dueDate && child.due_date && (
+          <DueDatePicker
+            dueDate={child.due_date}
+            onUpdate={handleUpdate}
+            align="end"
+            trigger={
+              <span
+                className={cn(
+                  "flex shrink-0 items-center gap-1 text-xs tabular-nums",
+                  !isDone && isPastDateOnly(child.due_date)
+                    ? "text-destructive"
+                    : "text-muted-foreground",
+                )}
+              >
+                <CalendarDays className="size-3" />
+                {shortDate(child.due_date)}
+              </span>
+            }
+          />
+        )}
+        {rowProps.assignee && (
+          <AssigneePicker
+            assigneeType={child.assignee_type}
+            assigneeId={child.assignee_id}
+            onUpdate={handleUpdate}
+            align="end"
+            trigger={
+              child.assignee_type && child.assignee_id ? (
+                <ActorAvatar
+                  actorType={child.assignee_type}
+                  actorId={child.assignee_id}
+                  size="sm"
+                  className="shrink-0"
+                />
+              ) : (
+                <span
+                  aria-hidden
+                  className="h-5 w-5 rounded-full border border-dashed border-muted-foreground/30 shrink-0"
+                />
+              )
+            }
+          />
+        )}
+      </div>
+    </IssueActionsContextMenu>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// SubIssueDisplayPopover — per-user "which properties do rows show" control
+// ---------------------------------------------------------------------------
+
+// Reuses the main Display panel's `card_*` labels — the property names are
+// identical, so the sub-issues control needs no locale keys of its own.
+const SUB_ISSUE_ROW_PROPERTY_LABEL_KEY: Record<
+  SubIssueRowPropertyKey,
+  "card_priority" | "card_labels" | "card_child_progress" | "card_due_date" | "card_assignee"
+> = {
+  priority: "card_priority",
+  labels: "card_labels",
+  childProgress: "card_child_progress",
+  dueDate: "card_due_date",
+  assignee: "card_assignee",
+};
+
+function SubIssueDisplayPopover({
+  workspaceProperties,
+}: {
+  workspaceProperties: IssueProperty[];
+}) {
+  const { t } = useT("issues");
+  const rowProperties = useSubIssueDisplayStore((s) => s.rowProperties);
+  const rowPropertyIds = useSubIssueDisplayStore((s) => s.rowPropertyIds);
+  const toggleRowProperty = useSubIssueDisplayStore((s) => s.toggleRowProperty);
+  const toggleRowPropertyId = useSubIssueDisplayStore((s) => s.toggleRowPropertyId);
+
+  return (
+    <Popover>
+      <Tooltip>
+        <PopoverTrigger
+          render={
+            <TooltipTrigger
+              render={
+                <button
+                  type="button"
+                  className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+                  aria-label={t(($) => $.display.tooltip)}
+                >
+                  <SlidersHorizontal className="h-3.5 w-3.5" />
+                </button>
+              }
             />
-          )
-        }
-      />
-    </div>
+          }
+        />
+        <TooltipContent side="bottom">{t(($) => $.display.tooltip)}</TooltipContent>
+      </Tooltip>
+      <PopoverContent align="end" className="w-56 p-0">
+        <div className="px-3 py-2.5">
+          <div className="space-y-2">
+            {SUB_ISSUE_ROW_PROPERTY_KEYS.map((key) => (
+              <label
+                key={key}
+                className="flex cursor-pointer items-center justify-between"
+              >
+                <span className="text-sm">
+                  {t(($) => $.display[SUB_ISSUE_ROW_PROPERTY_LABEL_KEY[key]])}
+                </span>
+                <Switch
+                  size="sm"
+                  checked={rowProperties[key]}
+                  onCheckedChange={() => toggleRowProperty(key)}
+                />
+              </label>
+            ))}
+            {workspaceProperties.map((property) => (
+              <label
+                key={property.id}
+                className="flex cursor-pointer items-center justify-between gap-3"
+              >
+                <span className="flex min-w-0 items-center gap-1.5 truncate text-sm">
+                  <PropertyIcon property={property} className="size-3.5 text-xs" />
+                  <span className="truncate">{property.name}</span>
+                </span>
+                <Switch
+                  size="sm"
+                  checked={rowPropertyIds.includes(property.id)}
+                  onCheckedChange={() => toggleRowPropertyId(property.id)}
+                />
+              </label>
+            ))}
+          </div>
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -711,7 +904,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
   const { t } = useT("issues");
   const timeAgo = useTimeAgo();
   const id = issueId;
-  const router = useNavigation();
+  const backOrReplace = useBackOrReplace();
   const user = useAuthStore((s) => s.user);
   const paths = useWorkspacePaths();
 
@@ -728,7 +921,11 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
     currentUserRole === "owner" || currentUserRole === "admin";
   const { data: allIssues = [] } = useQuery(issueListOptions(wsId));
   const { getActorName } = useActorName();
-  const { uploadWithToast } = useFileUpload(api);
+  // Description autosave is deliberately NOT gated (no explicit submit; the
+  // editor already strips `blob:` before serializing and binds ids on the
+  // later save). It still needs the failure toast, or a failed upload just
+  // erases its own placeholder and the file disappears unexplained.
+  const { uploadWithToast } = useEditorUpload();
   const { defaultLayout, onLayoutChanged } = useDefaultLayout({
     id: layoutId,
   });
@@ -879,8 +1076,8 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
   const didHighlightRef = useRef<string | null>(null);
 
   // Issue data from TQ — uses detail query, seeded from list cache if available.
-  // Only seed when description is present; list API omits it, and ContentEditor
-  // reads defaultValue on mount only — seeding null description shows an empty editor.
+  // Only seed when description is present; the list API omits it, so a partial
+  // list row must not masquerade as a hydrated issue detail.
   const { data: issue = null, isLoading: issueLoading } = useQuery({
     ...issueDetailOptions(wsId, id),
     initialData: () => {
@@ -908,7 +1105,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
   // Fire `onDelete` once when the issue transitions from loaded to missing.
   // Delete goes through a shell-level modal, so the caller (e.g. inbox) can't
   // be notified directly — instead, the detail page observes its own cache
-  // clearing and runs the callback. We navigate via `onDeletedNavigateTo` on
+  // clearing and runs the callback. We navigate via `onDeletedFallbackPath` on
   // the actions menu when no callback is supplied (standalone routes).
   const hadIssueRef = useRef(false);
   const firedDeleteCallbackRef = useRef(false);
@@ -1198,6 +1395,19 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
     ...childIssuesOptions(wsId, parentIssueId ?? ""),
     enabled: !!parentIssueId,
   });
+  // Workspace-wide parent→(done/total) map; lets each sub-issue row show its
+  // OWN nested progress ring without opening it. Same query the list
+  // surfaces use, so it's usually already cached.
+  const { data: subIssueProgress } = useQuery({
+    ...childIssueProgressOptions(wsId),
+    enabled: childIssues.length > 0,
+  });
+  // User-level display preference for sub-issue rows (built-in field toggles
+  // + opted-in workspace custom properties). `subIssueCustomProps` resolves
+  // the persisted ids against this workspace's live, non-archived property
+  // definitions — ids from other workspaces or archived properties drop out.
+  const subIssueRowProps = useSubIssueDisplayStore((s) => s.rowProperties);
+  const subIssueRowPropertyIds = useSubIssueDisplayStore((s) => s.rowPropertyIds);
   const [subIssuesCollapsed, setSubIssuesCollapsed] = useState(false);
 
   // Selection store is global (workspace-scoped); clear it whenever this
@@ -1368,6 +1578,20 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
   // renderable (read-only) until someone clears it.
   const { data: workspaceProperties = [] } = useQuery(propertyListOptions(wsId, true));
 
+  // Sub-issue rows only surface live definitions: the display picker offers
+  // non-archived properties, and chips render only ids that resolve here.
+  const activeWorkspaceProperties = useMemo(
+    () => workspaceProperties.filter((p) => p.archived !== true),
+    [workspaceProperties],
+  );
+  const subIssueCustomProps = useMemo(
+    () =>
+      subIssueRowPropertyIds
+        .map((pid) => activeWorkspaceProperties.find((p) => p.id === pid))
+        .filter((p): p is IssueProperty => !!p),
+    [subIssueRowPropertyIds, activeWorkspaceProperties],
+  );
+
   // Seed the visible-optional-props set:
   //   - on issue switch, reset to whichever fields are currently set
   //   - on the SAME issue, additively pick up fields the user just set
@@ -1530,9 +1754,9 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
       <div className="flex flex-1 min-h-0 flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
         <p>{t(($) => $.detail.not_found)}</p>
         {!onDelete && (
-          <Button variant="outline" size="sm" onClick={() => router.push(paths.issues())}>
+          <Button variant="outline" size="sm" onClick={() => backOrReplace(paths.issues())}>
             <ChevronLeft className="mr-1 h-3.5 w-3.5" />
-            {t(($) => $.detail.back_to_issues)}
+            {t(($) => $.detail.back)}
           </Button>
         )}
       </div>
@@ -1629,7 +1853,15 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
                 (!p.archived && visibleCustomProps.has(p.id)),
             )
             .map((p) => (
-              <PropRow key={p.id} label={p.name}>
+              <PropRow
+                key={p.id}
+                label={
+                  <>
+                    <PropertyIcon property={p} className="size-3.5 text-xs" />
+                    <span className="truncate">{p.name}</span>
+                  </>
+                }
+              >
                 <CustomPropertyValueEditor
                   issue={issue}
                   property={p}
@@ -1706,7 +1938,11 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
                             onClick={() => addCustomProp(p.id)}
                             className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-xs text-foreground/90 transition-colors hover:bg-accent focus-visible:bg-accent focus-visible:outline-none"
                           >
-                            <SlidersHorizontal className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                            {p.icon ? (
+                              <PropertyIcon property={p} className="size-3.5 text-xs" />
+                            ) : (
+                              <SlidersHorizontal className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                            )}
                             <span className="truncate">{p.name}</span>
                           </button>
                         ))}
@@ -1964,9 +2200,14 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
             z-30: must beat every sticky affordance pinned at the timeline's
             top-0 (comment headers z-10, resolve collapse bars z-20) — at equal
             z the later-in-DOM sticky bar paints over the find bar and orphans
-            its close button (MUL-4414). */}
+            its close button (MUL-4414). On desktop it also steps inside the
+            thread rail's right-edge strip, so an open find bar can't cover
+            the topmost ticks. */}
         {find.open && (
-          <FindBar find={find} className="absolute right-4 top-14 z-30" />
+          <FindBar
+            find={find}
+            className={cn("absolute top-14 z-30", isMobile ? "right-4" : "right-10")}
+          />
         )}
         <BreadcrumbHeader
           segments={breadcrumbSegments}
@@ -2039,8 +2280,9 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
               issue={issue}
               align="end"
               // When a parent passes `onDelete`, we detect deletion via effect
-              // above and skip navigation. Otherwise the modal navigates for us.
-              onDeletedNavigateTo={onDelete ? undefined : paths.issues()}
+              // above and skip navigation. Otherwise the modal takes us back
+              // to the list we came from, falling back to all issues.
+              onDeletedFallbackPath={onDelete ? undefined : paths.issues()}
               trigger={
                 <Button variant="ghost" size="icon-sm" className="text-muted-foreground">
                   <MoreHorizontal />
@@ -2145,7 +2387,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
             <ContentEditor
               ref={descEditorRef}
               key={id}
-              defaultValue={issue.description || ""}
+              value={issue.description || ""}
               placeholder={t(($) => $.detail.desc_placeholder)}
               onUpdate={(md) => {
                 // Bind any pending uploads still referenced in the markdown
@@ -2212,6 +2454,9 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
           {childIssues.length > 0 && (() => {
             const doneCount = childIssues.filter((c) => c.status === "done").length;
             return (
+              // Provider hosts the shared right-click actions menu the rows
+              // delegate to (one singleton menu, not one per row).
+              <IssueContextMenuProvider>
               <div className="mt-10 group/sub-issues">
                 {/* Header */}
                 <div className="flex items-center gap-2 mb-2">
@@ -2234,6 +2479,9 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
                       {doneCount}/{childIssues.length}
                     </span>
                   </div>
+                  {/* issue.id, not the route param — the endpoint takes a
+                      UUID and the route may carry a human-readable id. */}
+                  <SubIssuesAgentWorkingChip parentIssueId={issue.id} />
                   <input
                     type="checkbox"
                     checked={allChildrenSelected}
@@ -2249,21 +2497,24 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
                         : "opacity-0 group-hover/sub-issues:opacity-100 focus-visible:opacity-100",
                     )}
                   />
-                  <Tooltip>
-                    <TooltipTrigger
-                      render={
-                        <button
-                          type="button"
-                          className="ml-auto inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
-                          onClick={() => actions.openCreateSubIssue()}
-                          aria-label={t(($) => $.detail.add_sub_issue_aria)}
-                        >
-                          <Plus className="h-4 w-4" />
-                        </button>
-                      }
-                    />
-                    <TooltipContent side="bottom">{t(($) => $.detail.add_sub_issue_tooltip)}</TooltipContent>
-                  </Tooltip>
+                  <div className="ml-auto flex items-center gap-0.5">
+                    <SubIssueDisplayPopover workspaceProperties={activeWorkspaceProperties} />
+                    <Tooltip>
+                      <TooltipTrigger
+                        render={
+                          <button
+                            type="button"
+                            className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+                            onClick={() => actions.openCreateSubIssue()}
+                            aria-label={t(($) => $.detail.add_sub_issue_aria)}
+                          >
+                            <Plus className="h-4 w-4" />
+                          </button>
+                        }
+                      />
+                      <TooltipContent side="bottom">{t(($) => $.detail.add_sub_issue_tooltip)}</TooltipContent>
+                    </Tooltip>
+                  </div>
                 </div>
 
                 {/* Inline batch toolbar — appears next to the rows when
@@ -2286,7 +2537,13 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
                             </div>
                           )}
                           {items.map((child) => (
-                            <SubIssueRow key={child.id} child={child} />
+                            <SubIssueRow
+                              key={child.id}
+                              child={child}
+                              childProgress={subIssueProgress?.get(child.id)}
+                              rowProps={subIssueRowProps}
+                              customProperties={subIssueCustomProps}
+                            />
                           ))}
                         </Fragment>
                       ))}
@@ -2294,6 +2551,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
                   );
                 })()}
               </div>
+              </IssueContextMenuProvider>
             );
           })()}
 
@@ -2455,16 +2713,22 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
         </div>
         </div>
 
-        {/* Thread quick-jump rail — overlays the scroll container's left
-            gutter (inside the px-8 content padding, so it never covers
-            text). Hover previews a thread, click jumps to it. Hidden on
-            mobile: no hover, and the gutter is too tight. */}
+        {/* Thread quick-jump rail — rides the scroll container's right edge,
+            next to the scrollbar, where the pointer already is while
+            scrolling (MUL-4522). right-3 is the inset that works in both
+            scrollbar modes: it clears a classic scrollbar's ~11px gutter,
+            and the rail's own 20px width lands it exactly on the content
+            column's px-8 padding when the gutter is 0 (overlay scrollbars),
+            so it covers neither the scrollbar nor body text. It also clears
+            the resize handle's 4px drag strip at the panel edge. Hover
+            previews a thread, click jumps to it. Hidden on mobile: no
+            hover, and the gutter is too tight. */}
         {!isMobile && (
           <ThreadMinimap
             threads={minimapThreads}
             scrollContainerEl={scrollContainerEl}
             onJump={jumpToThread}
-            className="absolute bottom-0 left-2 top-12"
+            className="absolute bottom-0 right-3 top-12"
           />
         )}
       </div>

@@ -314,9 +314,9 @@ func TestAttributionForMergedComment_HonorsFailClosedPolicy(t *testing.T) {
 // real enqueue / coalesce path stamps it) that sets originator_user_id but leaves
 // accountable_user_id NULL — or different — is rejected at the database, so a future
 // code path that bypasses finalizeAttribution fails loudly instead of silently
-// mis-attributing an audited run (the #5192 comment-merge bug class). The legacy-row
-// exemption (originator_source IS NULL) is covered by
-// TestAttributionInvariantCheck_ExemptsLegacyRows.
+// mis-attributing an audited run (the #5192 comment-merge bug class). The strict
+// post-backfill handling of source-NULL rows is covered by
+// TestAttributionInvariantCheck_RejectsUnbackfilledLegacyRows.
 func TestAttributionInvariantCheck_RejectsBypass(t *testing.T) {
 	pool := newResolveOriginatorPool(t)
 	ctx := context.Background()
@@ -355,36 +355,21 @@ func TestAttributionInvariantCheck_RejectsBypass(t *testing.T) {
 	t.Cleanup(func() { pool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, okTaskID) })
 }
 
-// TestAttributionInvariantCheck_ExemptsLegacyRows is the upgrade-safety test Elon
-// required (MUL-4302, Option A): a pre-migration row — originator set, accountable
-// NULL, and originator_source NULL (its column did not exist yet) — must survive the
-// NOT VALID CHECK and, crucially, must still accept a later status UPDATE by the new
-// backend (claim / complete / cancel), even though that UPDATE does not touch the
-// attribution columns. This reproduces the cross-deployment stale-task scenario the
-// two-phase rollout protects; without the `originator_source IS NULL` exemption the
-// UPDATE would fail the CHECK on the whole updated row.
-func TestAttributionInvariantCheck_ExemptsLegacyRows(t *testing.T) {
+// TestAttributionInvariantCheck_RejectsUnbackfilledLegacyRows verifies the second
+// phase of the two-phase rollout (MUL-4302). Once the out-of-band backfill is complete,
+// originator_source=NULL no longer exempts a row from the one-way invariant. A stale
+// writer or missed backfill that tries to persist originator set with accountable NULL
+// must fail loudly instead of recreating the legacy shape.
+func TestAttributionInvariantCheck_RejectsUnbackfilledLegacyRows(t *testing.T) {
 	pool := newResolveOriginatorPool(t)
 	ctx := context.Background()
 	_, userA, agentID, issueID := seedAttributionFixture(t, pool)
 
-	// A legacy-shaped row: originator set, accountable + source NULL. The exemption
-	// admits it (as it admits the real pre-migration rows the migration cannot rewrite).
-	var legacyID string
-	if err := pool.QueryRow(ctx, `
+	if _, err := pool.Exec(ctx, `
 		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, originator_user_id)
-		VALUES ($1, (SELECT runtime_id FROM agent WHERE id = $1), $2, 'queued', 0, $3) RETURNING id`,
-		agentID, issueID, userA).Scan(&legacyID); err != nil {
-		t.Fatalf("legacy-shaped row must be admitted by the exemption, got %v", err)
-	}
-	t.Cleanup(func() { pool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, legacyID) })
-
-	// The status transitions the new backend performs on such a stale task must all
-	// succeed — this is exactly what a bare invariant CHECK would have broken.
-	for _, status := range []string{"running", "completed", "cancelled"} {
-		if _, err := pool.Exec(ctx, `UPDATE agent_task_queue SET status = $2 WHERE id = $1`, legacyID, status); err != nil {
-			t.Fatalf("status UPDATE to %q on a legacy row must succeed, got %v", status, err)
-		}
+		VALUES ($1, (SELECT runtime_id FROM agent WHERE id = $1), $2, 'queued', 0, $3)`,
+		agentID, issueID, userA); err == nil {
+		t.Fatal("expected the strict CHECK to reject an unbackfilled legacy row, but insert succeeded")
 	}
 }
 
@@ -1279,5 +1264,90 @@ func TestEnqueueChatTaskStampsChatEvidence(t *testing.T) {
 	}
 	if !evidenceRef.Valid || evidenceRef.Bytes != util.MustParseUUID(chatSessionID).Bytes {
 		t.Errorf("trigger_evidence_ref_id = %s, want chat session %s", util.UUIDToString(evidenceRef), chatSessionID)
+	}
+}
+
+func TestEnqueueChatTaskDefersForChannelMediaAndPromotesWhenReady(t *testing.T) {
+	pool := newResolveOriginatorPool(t)
+	ctx := context.Background()
+	q := db.New(pool)
+	workspaceID, userID, agentID, _ := seedAttributionFixture(t, pool)
+
+	var chatSessionID, priorMessageID, messageID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO chat_session (workspace_id, agent_id, creator_id)
+		VALUES ($1, $2, $3) RETURNING id`, workspaceID, agentID, userID).Scan(&chatSessionID); err != nil {
+		t.Fatalf("seed chat session: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM chat_session WHERE id = $1`, chatSessionID)
+	})
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO chat_message (chat_session_id, role, content)
+		VALUES ($1, 'user', 'first') RETURNING id`, chatSessionID).Scan(&priorMessageID); err != nil {
+		t.Fatalf("seed prior message: %v", err)
+	}
+
+	svc := &TaskService{Queries: q, TxStarter: pool, Bus: events.New()}
+	priorTask, err := svc.EnqueueChatTask(ctx, db.ChatSession{
+		ID:      util.MustParseUUID(chatSessionID),
+		AgentID: util.MustParseUUID(agentID),
+	}, util.MustParseUUID(userID), false)
+	if err != nil {
+		t.Fatalf("enqueue prior chat task: %v", err)
+	}
+	deadline := time.Now().Add(time.Minute)
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO chat_message (chat_session_id, role, content, channel_media_pending_until)
+		VALUES ($1, 'user', '[Image]', $2) RETURNING id`, chatSessionID, deadline).Scan(&messageID); err != nil {
+		t.Fatalf("seed pending media message: %v", err)
+	}
+
+	task, err := svc.EnqueueChatTask(ctx, db.ChatSession{
+		ID:      util.MustParseUUID(chatSessionID),
+		AgentID: util.MustParseUUID(agentID),
+	}, util.MustParseUUID(userID), false)
+	if err != nil {
+		t.Fatalf("EnqueueChatTask: %v", err)
+	}
+	if task.Status != "deferred" || !task.FireAt.Valid {
+		t.Fatalf("task = status %q fire_at %v, want durable deferred task", task.Status, task.FireAt)
+	}
+	if !task.ChatInputTaskID.Valid || task.ChatInputTaskID.Bytes != task.ID.Bytes {
+		t.Fatalf("task input owner = %s, want self %s", util.UUIDToString(task.ChatInputTaskID), util.UUIDToString(task.ID))
+	}
+	if task.FireAt.Time.Before(deadline.Add(-time.Second)) || task.FireAt.Time.After(deadline.Add(time.Second)) {
+		t.Fatalf("task fire_at = %v, want media deadline %v", task.FireAt.Time, deadline)
+	}
+	var linkedTaskID pgtype.UUID
+	if err := pool.QueryRow(ctx, `SELECT task_id FROM chat_message WHERE id = $1`, messageID).Scan(&linkedTaskID); err != nil {
+		t.Fatalf("load sealed media message: %v", err)
+	}
+	if !linkedTaskID.Valid || linkedTaskID.Bytes != task.ID.Bytes {
+		t.Fatalf("message task_id = %s, want %s", util.UUIDToString(linkedTaskID), util.UUIDToString(task.ID))
+	}
+	if err := pool.QueryRow(ctx, `SELECT task_id FROM chat_message WHERE id = $1`, priorMessageID).Scan(&linkedTaskID); err != nil {
+		t.Fatalf("load prior sealed message: %v", err)
+	}
+	if !linkedTaskID.Valid || linkedTaskID.Bytes != priorTask.ID.Bytes {
+		t.Fatalf("prior message task_id = %s, want unchanged owner %s", util.UUIDToString(linkedTaskID), util.UUIDToString(priorTask.ID))
+	}
+
+	if err := q.ClearChatMessageChannelMediaPending(ctx, db.ClearChatMessageChannelMediaPendingParams{
+		ID:            util.MustParseUUID(messageID),
+		ChatSessionID: util.MustParseUUID(chatSessionID),
+	}); err != nil {
+		t.Fatalf("clear pending media: %v", err)
+	}
+	if err := svc.PromoteChannelChatTasksIfMediaReady(ctx, util.MustParseUUID(chatSessionID)); err != nil {
+		t.Fatalf("PromoteChannelChatTasksIfMediaReady: %v", err)
+	}
+	var status string
+	var fireAt pgtype.Timestamptz
+	if err := pool.QueryRow(ctx, `SELECT status, fire_at FROM agent_task_queue WHERE id = $1`, task.ID).Scan(&status, &fireAt); err != nil {
+		t.Fatalf("load promoted task: %v", err)
+	}
+	if status != "queued" || fireAt.Valid {
+		t.Fatalf("promoted task = status %q fire_at %v, want queued with no deadline", status, fireAt)
 	}
 }

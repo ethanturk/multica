@@ -10,10 +10,10 @@ export const runtimeKeys = {
     ["runtimes", "usage", rid, days, tz] as const,
   usageByAgent: (rid: string, days: number, tz: string) =>
     ["runtimes", "usage", "by-agent", rid, days, tz] as const,
+  latestVersion: () => ["runtimes", "latest-version"] as const,
   // by-hour now follows the viewer's tz, like the other reports.
   usageByHour: (rid: string, days: number, tz: string) =>
     ["runtimes", "usage", "by-hour", rid, days, tz] as const,
-  latestVersion: () => ["runtimes", "latestVersion"] as const,
 };
 
 // `tz` is the viewer's IANA name — all reports follow the viewer's tz.

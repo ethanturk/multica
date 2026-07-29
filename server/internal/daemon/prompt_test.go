@@ -3,6 +3,8 @@ package daemon
 import (
 	"strings"
 	"testing"
+
+	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 )
 
 // TestBuildQuickCreatePromptRules locks in the rules that govern how the
@@ -151,6 +153,26 @@ func TestBuildQuickCreatePromptProjectPinning(t *testing.T) {
 	}
 	if strings.Contains(plain, "--project") {
 		t.Errorf("buildQuickCreatePrompt without project must NOT mention --project, got:\n%s", plain)
+	}
+}
+
+func TestBuildQuickCreatePromptExplicitPriorityAndDueDate(t *testing.T) {
+	out := buildQuickCreatePrompt(Task{
+		QuickCreatePrompt:   "fix the login button color",
+		QuickCreatePriority: "urgent",
+		QuickCreateDueDate:  "2026-08-01",
+	})
+	for _, want := range []string{
+		"--priority urgent",
+		"--due-date 2026-08-01",
+		"quick-create selection is authoritative",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("buildQuickCreatePrompt with explicit fields missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Map P0/P1") {
+		t.Errorf("explicit priority must replace inference rules, got:\n%s", out)
 	}
 }
 
@@ -307,6 +329,154 @@ func TestBuildChatPromptChannelAwareness(t *testing.T) {
 			t.Fatalf("web-only chat prompt should not mention channel history, got:\n%s", out)
 		}
 	})
+}
+
+// TestBuildChatPromptNoNarrationOnEveryChannel pins the THIRD axis of the chat
+// channel policy: the no-narration delivery rule keys off "is there a channel at
+// all", like the upload axis and unlike the Slack-only history axis.
+//
+// Regression guard for GH #6006. #4776 introduced the rule for every channel;
+// the MUL-4899 split moved it into the Slack branch along with the read commands
+// its wording happened to mention, so Feishu/Lark replies silently went back to
+// carrying interim narration. The two-layer matrix below could not catch that —
+// it only ever asserted the rule on the Slack case.
+//
+// The carve-out is pinned alongside the prohibition on purpose. A rule phrased
+// as "don't say what you just did" reads as forbidding "已创建 Issue X" — the
+// actual deliverable for a do-this request — so the two must move together: the
+// prohibition covers PROCESS, never the completed outcome.
+func TestBuildChatPromptNoNarrationOnEveryChannel(t *testing.T) {
+	const (
+		prohibition = "Do NOT narrate planned or in-progress steps"
+		carveOut    = "completed actions are part of the outcome"
+	)
+
+	for _, tc := range []struct {
+		name        string
+		channelType string
+		want        bool
+	}{
+		{name: "slack", channelType: execenv.ChannelTypeSlack, want: true},
+		{name: "feishu", channelType: execenv.ChannelTypeFeishu, want: true},
+		{name: "direct chat has no channel to deliver into", channelType: "", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := buildChatPrompt(Task{
+				ChatSessionID:   "sess-1",
+				ChatChannelType: tc.channelType,
+				ChatMessage:     "hi",
+			})
+			for _, phrase := range []string{prohibition, carveOut} {
+				if got := strings.Contains(out, phrase); got != tc.want {
+					t.Errorf("%q present=%v, want %v\n--- output ---\n%s", phrase, got, tc.want, out)
+				}
+			}
+			if !tc.want {
+				return
+			}
+			// The prohibition must not read as a blanket ban on past tense. If a
+			// future edit drops the carve-out, an agent asked to create an issue
+			// has no way left to report that it did.
+			if strings.Contains(out, "must not say what you are about to do or just did") {
+				t.Errorf("prohibition must scope to process, not completed outcomes\n--- output ---\n%s", out)
+			}
+		})
+	}
+}
+
+// TestBuildChatPromptTwoLayerChannelPolicy pins the two INDEPENDENT axes of the
+// chat channel policy (MUL-4899). Collapsing them into one condition is exactly
+// the bug this matrix exists to catch:
+//
+//   - delivery: `attachment upload` guidance is injected iff there is NO channel.
+//     Any IM reply leaves Multica, where the upload has nothing to bind to.
+//   - history: the `chat history` / `chat thread` commands are injected iff the
+//     channel is Slack. Those endpoints are hardwired to h.SlackHistory
+//     (handler/chat_history.go) — on Feishu they answer "no channel
+//     integration", so teaching them there sends the agent down a dead path.
+//
+// Feishu is the case that proves the axes are separate: no upload AND no
+// history. A single `ChatChannelType != ""` gate cannot express it.
+func TestBuildChatPromptTwoLayerChannelPolicy(t *testing.T) {
+	// Match the IMPERATIVE, not the bare command name. An IM prompt names
+	// `multica attachment upload` on purpose — to state that it does not apply
+	// here. That negation is the useful copy (the agent knows the command exists
+	// from the brief's Available Commands; silence would leave it guessing), so
+	// asserting on the bare name would forbid the very sentence we want.
+	const uploadGuidance = "run `multica attachment upload <local-path>`"
+	const historyGuidance = "multica chat history"
+
+	cases := []struct {
+		name        string
+		channelType string
+		wantUpload  bool
+		wantHistory bool
+		wantPhrases []string
+	}{
+		{
+			name:        "direct chat: upload, no history",
+			channelType: "",
+			wantUpload:  true,
+			wantHistory: false,
+		},
+		{
+			name:        "slack: no upload, has history",
+			channelType: execenv.ChannelTypeSlack,
+			wantUpload:  false,
+			wantHistory: true,
+			wantPhrases: []string{"Slack", "delivered to Slack as text", "You cannot attach a file to it"},
+		},
+		{
+			name:        "feishu: no upload, no history",
+			channelType: execenv.ChannelTypeFeishu,
+			wantUpload:  false,
+			wantHistory: false,
+			wantPhrases: []string{
+				"Feishu/Lark",
+				"no history reader for Feishu/Lark",
+				"delivered to Feishu/Lark as text",
+				"You cannot attach a file to it",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := buildChatPrompt(Task{
+				ChatSessionID:   "sess-1",
+				ChatChannelType: tc.channelType,
+				ChatMessage:     "hi",
+			})
+			if got := strings.Contains(out, uploadGuidance); got != tc.wantUpload {
+				t.Errorf("upload guidance present=%v, want %v\n--- output ---\n%s", got, tc.wantUpload, out)
+			}
+			if got := strings.Contains(out, historyGuidance); got != tc.wantHistory {
+				t.Errorf("history guidance present=%v, want %v\n--- output ---\n%s", got, tc.wantHistory, out)
+			}
+			for _, phrase := range tc.wantPhrases {
+				if !strings.Contains(out, phrase) {
+					t.Errorf("missing %q\n--- output ---\n%s", phrase, out)
+				}
+			}
+		})
+	}
+}
+
+// ChatInThread only ever selects between `chat history` and `chat thread`. With
+// no Feishu history reader there is nothing to select between, so the flag must
+// not leak either command into a Feishu prompt even if the server sets it.
+func TestBuildChatPromptFeishuIgnoresChatInThread(t *testing.T) {
+	out := buildChatPrompt(Task{
+		ChatSessionID:   "sess-1",
+		ChatChannelType: execenv.ChannelTypeFeishu,
+		ChatInThread:    true,
+		ChatMessage:     "hi",
+	})
+	for _, unwanted := range []string{"multica chat thread", "multica chat history"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("feishu prompt must not teach %q (no Feishu history reader exists)\n--- output ---\n%s", unwanted, out)
+		}
+	}
 }
 
 func TestBuildChatPromptAgentIntro(t *testing.T) {
@@ -858,5 +1028,182 @@ func TestBuildCommentPromptSameThreadKeepsSingleReply(t *testing.T) {
 	// trigger comment.
 	if !strings.Contains(out, "--parent c3 --content-file ./reply.md") {
 		t.Errorf("same-thread run must keep the single --parent=trigger reply cookbook, got:\n%s", out)
+	}
+}
+
+// TestPerTurnContextBlocksCarryMovedBriefSections is the other half of
+// MUL-5377: the per-run context that was removed from the runtime brief must
+// still reach the agent, now via the per-turn user message. Losing it silently
+// would be a worse regression than the cache cost it fixes.
+func TestPerTurnContextBlocksCarryMovedBriefSections(t *testing.T) {
+	t.Parallel()
+
+	task := Task{
+		IssueID:                       "issue-1",
+		TriggerCommentID:              "comment-1",
+		TriggerCommentContent:         "please look at this",
+		PriorSessionResumeUnavailable: true,
+		InitiatorType:                 "member",
+		InitiatorName:                 "Bohan",
+		InitiatorEmail:                "bohan@example.com",
+		ConnectedApps: []ConnectedAppData{{
+			Provider:    "composio",
+			ServerName:  "composio",
+			ToolkitSlug: "notion",
+			ToolkitName: "Notion",
+		}},
+	}
+
+	prompt := BuildPrompt(task, "claude")
+	for _, want := range []string{
+		"## Session Continuity Notice",
+		"could NOT be restored",
+		"## Task Initiator",
+		"initiated by **Bohan** (bohan@example.com), a member of this workspace",
+		"credentials stay scoped to the runtime owner",
+		"## Connected Apps",
+		"- Notion (`notion`) via MCP server `composio`",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("per-turn prompt lost moved brief content %q\n---\n%s", want, prompt)
+		}
+	}
+}
+
+// The blocks are per-run, so they must be absent when their preconditions are.
+func TestPerTurnContextBlocksOmittedWhenEmpty(t *testing.T) {
+	t.Parallel()
+
+	prompt := BuildPrompt(Task{IssueID: "issue-1"}, "claude")
+	for _, banned := range []string{
+		"## Session Continuity Notice",
+		"## Task Initiator",
+		"## Connected Apps",
+	} {
+		if strings.Contains(prompt, banned) {
+			t.Errorf("per-turn prompt must not emit %q with no data\n---\n%s", banned, prompt)
+		}
+	}
+}
+
+// An assignment-triggered run carries the initiator too — it is not a
+// comment-path-only block.
+func TestPerTurnContextBlocksOnAssignmentPath(t *testing.T) {
+	t.Parallel()
+
+	prompt := BuildPrompt(Task{
+		IssueID:       "issue-1",
+		InitiatorType: "agent",
+		InitiatorName: "GPT-Boy",
+	}, "claude")
+	if !strings.Contains(prompt, "initiated by **GPT-Boy**, another agent in this workspace") {
+		t.Errorf("assignment-triggered prompt lost the initiator block\n---\n%s", prompt)
+	}
+}
+
+// TestTurnModeMarkerAlwaysPresent is the regression guard for the review
+// finding on #6021: the brief's mode router keys off an explicit marker in the
+// per-turn prompt, so that marker must be emitted unconditionally from the same
+// branch that selects the code path.
+//
+// The dangerous case is a comment-triggered run whose comment body is empty (or
+// an older server that doesn't send one). Before this guard the prompt emitted
+// no `[NEW COMMENT]` block at all, the brief fell through to Ownership mode,
+// and the agent would change the issue status on a turn that must not.
+func TestTurnModeMarkerAlwaysPresent(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		task Task
+		want string
+		deny string
+	}{
+		{
+			name: "comment-triggered with content",
+			task: Task{IssueID: "issue-1", TriggerCommentID: "c-1", TriggerCommentContent: "please look"},
+			want: "**Turn mode: Reply.**",
+			deny: "**Turn mode: Ownership.**",
+		},
+		{
+			name: "comment-triggered with EMPTY content",
+			task: Task{IssueID: "issue-1", TriggerCommentID: "c-1"},
+			want: "**Turn mode: Reply.**",
+			deny: "**Turn mode: Ownership.**",
+		},
+		{
+			name: "assignment-triggered",
+			task: Task{IssueID: "issue-1"},
+			want: "**Turn mode: Ownership.**",
+			deny: "**Turn mode: Reply.**",
+		},
+		{
+			name: "assignment-triggered with handoff note",
+			task: Task{IssueID: "issue-1", HandoffNote: "start with the API"},
+			want: "**Turn mode: Ownership.**",
+			deny: "**Turn mode: Reply.**",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			prompt := BuildPrompt(tc.task, "claude")
+			if !strings.Contains(prompt, tc.want) {
+				t.Errorf("prompt missing turn-mode marker %q\n---\n%s", tc.want, prompt)
+			}
+			if strings.Contains(prompt, tc.deny) {
+				t.Errorf("prompt carries the wrong turn-mode marker %q\n---\n%s", tc.deny, prompt)
+			}
+		})
+	}
+}
+
+// The mode marker only makes sense for the two issue paths — the issue-less
+// kinds have no Reply/Ownership distinction and no issue status to protect.
+func TestTurnModeMarkerAbsentOnIssuelessKinds(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		task Task
+	}{
+		{"chat", Task{ChatSessionID: "chat-1"}},
+		{"quick-create", Task{QuickCreatePrompt: "make an issue"}},
+		{"autopilot", Task{AutopilotRunID: "run-1"}},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			prompt := BuildPrompt(tc.task, "claude")
+			for _, banned := range []string{"**Turn mode: Reply.**", "**Turn mode: Ownership.**"} {
+				if strings.Contains(prompt, banned) {
+					t.Errorf("%s prompt must not carry %q\n---\n%s", tc.name, banned, prompt)
+				}
+			}
+		})
+	}
+}
+
+// The brief's router must describe the markers the prompt actually emits.
+// A drift here is exactly the bug this pair of changes fixes, and it is
+// invisible at runtime until an agent silently picks the wrong mode.
+func TestBriefModeRouterMatchesPromptMarkers(t *testing.T) {
+	t.Parallel()
+
+	brief, err := execenv.InjectRuntimeConfig(t.TempDir(), "claude", execenv.TaskContextForEnv{IssueID: "issue-1"})
+	if err != nil {
+		t.Fatalf("InjectRuntimeConfig: %v", err)
+	}
+	for _, want := range []string{"`Turn mode: Reply.`", "`Turn mode: Ownership.`"} {
+		if !strings.Contains(brief, want) {
+			t.Errorf("brief mode router does not name %s\n---\n%s", want, brief)
+		}
+	}
+	// The retired wording keyed off the prompt's first line, which was never
+	// actually the [NEW COMMENT] block.
+	if strings.Contains(brief, "It opens with a `[NEW COMMENT]` block") {
+		t.Error("brief still routes on the prompt's opening line; it must route on the explicit marker")
 	}
 }

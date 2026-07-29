@@ -6,6 +6,8 @@ import {
   FALLBACK_AUTOPILOT_RUN,
   CommentTriggerPreviewSchema,
   DashboardAgentRunTimeListSchema,
+  DashboardFailureByAgentListSchema,
+  DashboardFailureDailyListSchema,
   DashboardUsageByAgentListSchema,
   DashboardUsageDailyListSchema,
   ChatDraftRestoresResponseSchema,
@@ -13,9 +15,11 @@ import {
   DuplicateIssueErrorBodySchema,
   EMPTY_CHAT_DRAFT_RESTORES,
   EMPTY_CREATE_FEEDBACK_RESPONSE,
+  EMPTY_INBOX_ITEMS,
   EMPTY_INBOX_UNREAD_SUMMARY,
   EMPTY_SEARCH_PROJECTS_RESPONSE,
   EMPTY_USER,
+  InboxItemListSchema,
   InboxUnreadSummarySchema,
   IssueTriggerPreviewSchema,
   ListIssuesResponseSchema,
@@ -153,6 +157,7 @@ describe("IssuePropertySchema (via ListPropertiesResponseSchema)", () => {
     name: "Severity",
     type: "select",
     description: "",
+    icon: "flag",
     config: { options: [{ id: "opt-1", name: "Critical", color: "#ef4444" }] },
     position: 1,
     archived: false,
@@ -165,6 +170,7 @@ describe("IssuePropertySchema (via ListPropertiesResponseSchema)", () => {
   it("parses a full definition", () => {
     const parsed = ListPropertiesResponseSchema.parse({ properties: [baseProperty], total: 1 });
     expect(parsed.properties[0]?.config.options?.[0]?.name).toBe("Critical");
+    expect(parsed.properties[0]?.icon).toBe("flag");
   });
 
   it("survives a malformed response by defaulting the list", () => {
@@ -185,6 +191,12 @@ describe("IssuePropertySchema (via ListPropertiesResponseSchema)", () => {
     const { config: _omit, ...withoutConfig } = baseProperty;
     const parsed = ListPropertiesResponseSchema.parse({ properties: [withoutConfig], total: 1 });
     expect(parsed.properties[0]?.config).toEqual({});
+  });
+
+  it("defaults icon for an older server response", () => {
+    const { icon: _omit, ...withoutIcon } = baseProperty;
+    const parsed = ListPropertiesResponseSchema.parse({ properties: [withoutIcon], total: 1 });
+    expect(parsed.properties[0]?.icon).toBe("");
   });
 });
 
@@ -628,7 +640,46 @@ describe("dashboard + runtime usage schema drift", () => {
 
   it("rejects a non-array body so parseWithFallback can return its fallback", () => {
     expect(DashboardUsageDailyListSchema.safeParse(null).success).toBe(false);
+    expect(DashboardFailureDailyListSchema.safeParse(null).success).toBe(false);
+    expect(DashboardFailureByAgentListSchema.safeParse({ rows: [] }).success).toBe(
+      false,
+    );
     expect(RuntimeUsageListSchema.safeParse({ rows: [] }).success).toBe(false);
+  });
+
+  it("keeps a failure_reason the client build has never heard of", () => {
+    // failure_reason is an open string, not an enum: the backend taxonomy
+    // grows, and an installed desktop client must still count a reason its
+    // build predates rather than dropping the row (and with it the day's
+    // error total).
+    const parsed = DashboardFailureDailyListSchema.parse([
+      { date: "2026-05-19", failure_reason: "agent_error.brand_new", task_count: 3 },
+    ]);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]?.failure_reason).toBe("agent_error.brand_new");
+    expect(parsed[0]?.task_count).toBe(3);
+  });
+
+  it("coerces a missing failure row field without dropping the array", () => {
+    const daily = DashboardFailureDailyListSchema.parse([{ date: "2026-05-19" }]);
+    expect(daily).toHaveLength(1);
+    // "" is the succeeded bucket, so a reason-less row lands in the
+    // denominator instead of inventing a failure that never happened.
+    //
+    // Defaulting to a failure bucket instead was considered and rejected: the
+    // realistic drift here is someone adding `omitempty` to the Go struct
+    // tag, which would strip the field from exactly the SUCCESS rows and turn
+    // every window into a 100% error rate. Deflating a rate under drift is
+    // the milder failure. TestDashboardFailureWireContractKeepsEmptyReason
+    // (server/internal/handler/dashboard_test.go) guards the other side by
+    // pinning that the server always emits the field.
+    expect(daily[0]?.failure_reason).toBe("");
+    expect(daily[0]?.task_count).toBe(0);
+
+    const byAgent = DashboardFailureByAgentListSchema.parse([
+      { failure_reason: "timeout", task_count: 2 },
+    ]);
+    expect(byAgent[0]?.agent_id).toBe("");
   });
 
   it("keeps unknown server-side fields via .loose()", () => {
@@ -720,6 +771,86 @@ describe("InboxUnreadSummarySchema", () => {
         ENDPOINT,
       ),
     ).toBe(EMPTY_INBOX_UNREAD_SUMMARY);
+  });
+});
+
+describe("InboxItemListSchema", () => {
+  const ENDPOINT = { endpoint: "GET /api/inbox/archived" };
+
+  const row = (overrides: Record<string, unknown> = {}) => ({
+    id: "inbox-1",
+    workspace_id: "ws-1",
+    recipient_type: "member",
+    recipient_id: "member-1",
+    type: "new_comment",
+    severity: "info",
+    issue_id: "issue-1",
+    title: "Issue title",
+    body: null,
+    read: false,
+    archived: true,
+    created_at: "2026-06-15T08:00:00Z",
+    ...overrides,
+  });
+
+  it("parses a well-formed archived list and tolerates extra fields", () => {
+    const parsed = parseWithFallback(
+      [row({ issue_status: "in_progress", details: { comment_id: "c-1" }, future_field: 1 })],
+      InboxItemListSchema,
+      EMPTY_INBOX_ITEMS,
+      ENDPOINT,
+    );
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]).toMatchObject({ id: "inbox-1", archived: true });
+  });
+
+  it("keeps a notification type this client doesn't know yet", () => {
+    // Enums stay lenient on purpose: a backend that ships a new inbox type
+    // must not blank the whole archived list on older clients.
+    const parsed = parseWithFallback(
+      [row({ type: "some_future_type", severity: "future_severity" })],
+      InboxItemListSchema,
+      EMPTY_INBOX_ITEMS,
+      ENDPOINT,
+    );
+    expect(parsed).toHaveLength(1);
+  });
+
+  it("accepts rows that omit the nullable optional fields", () => {
+    const { body, issue_id, ...withoutOptionals } = row();
+    void body;
+    void issue_id;
+    expect(
+      parseWithFallback([withoutOptionals], InboxItemListSchema, EMPTY_INBOX_ITEMS, ENDPOINT),
+    ).toHaveLength(1);
+  });
+
+  it("returns the empty fallback for a non-array body", () => {
+    expect(
+      parseWithFallback({ items: [] }, InboxItemListSchema, EMPTY_INBOX_ITEMS, ENDPOINT),
+    ).toBe(EMPTY_INBOX_ITEMS);
+    expect(
+      parseWithFallback(null, InboxItemListSchema, EMPTY_INBOX_ITEMS, ENDPOINT),
+    ).toBe(EMPTY_INBOX_ITEMS);
+  });
+
+  it("returns the empty fallback when a row is missing a required field", () => {
+    const { id, ...withoutId } = row();
+    void id;
+    expect(
+      parseWithFallback([withoutId], InboxItemListSchema, EMPTY_INBOX_ITEMS, ENDPOINT),
+    ).toBe(EMPTY_INBOX_ITEMS);
+  });
+
+  it("returns the empty fallback when `archived` is wrong-typed", () => {
+    expect(
+      parseWithFallback(
+        [row({ archived: "yes" })],
+        InboxItemListSchema,
+        EMPTY_INBOX_ITEMS,
+        ENDPOINT,
+      ),
+    ).toBe(EMPTY_INBOX_ITEMS);
   });
 });
 

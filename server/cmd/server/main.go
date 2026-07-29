@@ -125,6 +125,41 @@ func envDuration(name string, def time.Duration) time.Duration {
 	return v
 }
 
+func envNonNegativeDuration(name string, def time.Duration) time.Duration {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return def
+	}
+	v, err := time.ParseDuration(raw)
+	if err != nil || v < 0 {
+		slog.Warn("invalid env var, using default", "name", name, "value", raw, "default", def.String(), "error", err)
+		return def
+	}
+	return v
+}
+
+func holdBeforeShutdown(sig os.Signal, signals <-chan os.Signal, duration time.Duration) {
+	if duration <= 0 {
+		return
+	}
+	slog.Info("termination signal received; holding before shutdown",
+		"signal", sig.String(),
+		"duration", duration.String(),
+	)
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		slog.Info("shutdown hold complete", "duration", duration.String())
+	case interruptSig := <-signals:
+		slog.Info("shutdown hold interrupted by signal",
+			"signal", interruptSig.String(),
+			"configured_duration", duration.String(),
+		)
+	}
+}
+
 func envBool(name string, def bool) bool {
 	raw := os.Getenv(name)
 	if raw == "" {
@@ -164,6 +199,7 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
+	shutdownHoldDuration := envNonNegativeDuration("MULTICA_SHUTDOWN_HOLD_DURATION", 0)
 
 	// Feature flags: loaded once at startup from MULTICA_FEATURE_FLAGS_FILE
 	// (a YAML rule set) with FF_<KEY> env overrides layered on top.
@@ -307,6 +343,7 @@ func main() {
 	var httpMetrics *obsmetrics.HTTPMetrics
 	var businessMetrics *obsmetrics.BusinessMetrics
 	var samplerPool *pgxpool.Pool
+	var channelMediaMetrics *obsmetrics.ChannelMediaReconcilerMetrics
 	if metricsConfig.Enabled() {
 		// Build a dedicated tiny pool for the BusinessSamplerCollector
 		// so a stalled scrape can never starve business traffic. If the
@@ -334,6 +371,7 @@ func main() {
 		})
 		httpMetrics = metricsRegistry.HTTP
 		businessMetrics = metricsRegistry.Business
+		channelMediaMetrics = metricsRegistry.ChannelMedia
 		// Forward inbound daemon WS frames into the per-kind counter so
 		// dashboards can split heartbeat / unknown / invalid traffic.
 		if daemonHub != nil {
@@ -397,6 +435,9 @@ func main() {
 	if h.WebhookDeliveryWorker != nil {
 		go h.WebhookDeliveryWorker.Run(sweepCtx)
 	}
+	// GitHub PR-card API snapshot pipeline (MUL-5265): worker pool + TTL sweeper.
+	// No-op when unconfigured (no App private key).
+	h.PRRefresh.Start(sweepCtx)
 
 	// Channel inbound supervisor (MUL-3620): holds the §4.4 WS lease per
 	// installation and drives each channel.Channel. It is built
@@ -407,6 +448,14 @@ func main() {
 	// drained.
 	if h.ChannelSupervisor != nil {
 		go h.ChannelSupervisor.Run(sweepCtx)
+	}
+
+	// Media intent-ledger reconciler (PR #5580): settles uploaded-but-unbound
+	// channel media objects. An independent worker so object-storage latency
+	// spikes cannot starve any other sweeper's cadence.
+	if h.ChannelMediaReconciler != nil {
+		h.ChannelMediaReconciler.Metrics = channelMediaMetrics
+		go h.ChannelMediaReconciler.Run(sweepCtx)
 	}
 
 	// MUL-2957: DB-backed execution scheduler. The scheduler turns the
@@ -459,7 +508,11 @@ func main() {
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	sig := <-quit
+	holdBeforeShutdown(sig, quit, shutdownHoldDuration)
+	// Restore the default behavior so another signal during graceful shutdown
+	// can still terminate the process instead of being left unread in quit.
+	signal.Stop(quit)
 
 	slog.Info("shutting down server")
 	autopilotCancel()
@@ -503,7 +556,11 @@ func main() {
 			)
 		}
 		if h.ChannelRouter != nil {
-			h.ChannelRouter.Drain()
+			drainCtx, drainCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if !h.ChannelRouter.Drain(drainCtx) {
+				slog.Warn("channel router: drain deadline reached; deferred media fallback remains durable")
+			}
+			drainCancel()
 		}
 	}
 

@@ -1,12 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import type {
   Agent,
   AgentRuntime,
   MemberWithUser,
 } from "@multica/core/types";
 import { AGENT_DESCRIPTION_MAX_LENGTH } from "@multica/core/agents";
+import { runtimeModelsOptions } from "@multica/core/runtimes";
 import { isImeComposing } from "@multica/core/utils";
 import { Input } from "@multica/ui/components/ui/input";
 import { Textarea } from "@multica/ui/components/ui/textarea";
@@ -22,8 +24,13 @@ import { useT } from "../../i18n";
 import { CharCounter } from "./char-counter";
 import { ResourceLabelPicker } from "../../labels/resource-label-picker";
 import { ModelPicker } from "./inspector/model-picker";
+import {
+  buildModelChangeUpdate,
+  type ModelCatalog,
+} from "./inspector/model-change-cleanup";
 import { RuntimePicker } from "./inspector/runtime-picker";
 import { ThinkingSettingField } from "./inspector/thinking-prop-row";
+import { ServiceTierSettingField } from "./inspector/service-tier-setting-field";
 
 interface InspectorProps {
   agent: Agent;
@@ -106,6 +113,34 @@ export function AgentDetailInspector({
 
   const isOnline = runtime?.status === "online";
   const nameInvalid = name.trim().length === 0;
+
+  // Same query the Thinking / Speed fields already use, so switching model
+  // costs no extra request. `null` = not authoritative (offline runtime, still
+  // loading, or discovery failed) and must not trigger any clearing.
+  const modelsQuery = useQuery(
+    runtimeModelsOptions(isOnline ? agent.runtime_id : null),
+  );
+  const modelCatalog = useMemo<ModelCatalog>(
+    () =>
+      modelsQuery.isSuccess
+        ? modelsQuery.data.supported
+          ? modelsQuery.data.models
+          : []
+        : null,
+    [modelsQuery.data, modelsQuery.isSuccess],
+  );
+  const handleModelChange = useCallback(
+    (model: string) =>
+      update(
+        buildModelChangeUpdate({
+          model,
+          thinkingLevel: agent.thinking_level ?? "",
+          serviceTier: agent.service_tier ?? "",
+          catalog: modelCatalog,
+        }),
+      ),
+    [agent.service_tier, agent.thinking_level, modelCatalog, update],
+  );
 
   return (
     <div className="space-y-8">
@@ -220,7 +255,17 @@ export function AgentDetailInspector({
               members={members}
               currentUserId={currentUserId}
               canEdit={canEdit}
-              onChange={(id) => update({ runtime_id: id })}
+              // Model, thinking level, and service tier are runtime/model
+              // native. Clear them together so the new runtime resolves its
+              // own defaults instead of inheriting incompatible tokens.
+              onChange={(id) =>
+                update({
+                  runtime_id: id,
+                  model: "",
+                  thinking_level: "",
+                  service_tier: "",
+                })
+              }
             />
           </SettingsRow>
           <SettingsRow
@@ -234,7 +279,7 @@ export function AgentDetailInspector({
               runtimeOnline={!!isOnline}
               value={agent.model ?? ""}
               canEdit={canEdit}
-              onChange={(model) => update({ model })}
+              onChange={handleModelChange}
             />
           </SettingsRow>
           <ThinkingSettingField
@@ -248,6 +293,15 @@ export function AgentDetailInspector({
             onChange={(thinkingLevel) =>
               update({ thinking_level: thinkingLevel })
             }
+          />
+          <ServiceTierSettingField
+            label={t(($) => $.inspector.prop_speed)}
+            runtimeId={agent.runtime_id}
+            runtimeOnline={!!isOnline}
+            model={agent.model ?? ""}
+            value={agent.service_tier ?? ""}
+            canEdit={canEdit}
+            onChange={(serviceTier) => update({ service_tier: serviceTier })}
           />
           <SettingsRow
             label={t(($) => $.inspector.prop_concurrency)}

@@ -34,6 +34,7 @@ expect(providerSupportsMcpConfig("claude")).toBe(true);
     expect(providerSupportsMcpConfig("opencode")).toBe(true);
     expect(providerSupportsMcpConfig("openclaw")).toBe(true);
     expect(providerSupportsMcpConfig("qoder")).toBe(true);
+    expect(providerSupportsMcpConfig("qwen")).toBe(true);
     expect(providerSupportsMcpConfig("traecli")).toBe(true);
     expect(providerSupportsMcpConfig("grok")).toBe(true);
   });

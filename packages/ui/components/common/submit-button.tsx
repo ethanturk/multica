@@ -13,6 +13,15 @@ interface SubmitButtonProps {
   onClick: () => void;
   disabled?: boolean;
   loading?: boolean;
+  /**
+   * Blocked on background work the user started (an attachment still
+   * uploading) rather than on a missing precondition. Disables the button and
+   * marks it `aria-busy`, so a screen reader reaching it with a virtual cursor
+   * reads "busy" rather than an unexplained dead control. It is NOT tab
+   * reachable while disabled, so callers should also carry the reason in
+   * `ariaLabel` / `tooltip` and in the visible label where there is one.
+   */
+  busy?: boolean;
   running?: boolean;
   onStop?: () => void;
   /**
@@ -34,6 +43,7 @@ function SubmitButton({
   onClick,
   disabled,
   loading,
+  busy,
   running,
   onStop,
   tooltip,
@@ -65,11 +75,18 @@ function SubmitButton({
     <Button
       size="icon-sm"
       className="rounded-full"
-      disabled={disabled || loading}
+      disabled={disabled || loading || busy}
+      aria-disabled={busy || undefined}
+      aria-busy={busy || undefined}
       onClick={onClick}
       aria-label={ariaLabel}
     >
-      {loading ? (
+      {loading || busy ? (
+        // `busy` spins too, not just greys out: an upload can be running with
+        // nothing else on screen to explain the disabled control (a reopened
+        // composer is still rebuilding its placeholder, or the user deleted
+        // it). A spinner says "waiting on something" without a hover; the
+        // tooltip says what.
         <Loader2 className="animate-spin" aria-hidden="true" />
       ) : (
         <ArrowUp aria-hidden="true" />

@@ -18,7 +18,7 @@ The Implementer is the first role allowed to modify repository source/test files
 ## Critical Rules
 
 1. **Handoffs are commands, not text.** Every handoff MUST be executed as a `multica issue comment add` bash command containing `[@Agent Name](mention://agent/{id})`. Do NOT describe handoffs in conversational text.
-2. **Your final action MUST be a bash tool call.** After completing Steps 1-7, you MUST execute Step 8 by running the bash commands exactly as written. Do NOT generate conversational text as your final output — the pipeline will stall if you do.
+2. **Your final action MUST be the handoff bash tool call.** Step 8 must persist `## Implementation Complete`, refresh comments, call `coding_handoff_decide`, apply its state patches, and execute its handoff comment. Never stop after printing routing information or the tool result.
 3. **Review-fix routing is different from first implementation routing.** If the latest `## Review: FAIL` comment is newer than the latest `## Implementation Complete` comment, this run is a review-fix run. After applying fixes, you MUST hand off back to **Coding Team Reviewer**, not Test Writer. The normal first-implementation route is Implementer → Test Writer; the review-fix route is Reviewer → Implementer → Reviewer.
 4. **If a previous agent's work is missing from the branch**, do NOT ask to be "re-mentioned" — immediately tag the responsible agent or the Orchestrator via a `multica issue comment add` bash command.
 5. **No cleanup before durable push.** Do not finish, clean up, delete the worktree, or hand off until `git status --short` is clean and `git rev-list --count "origin/$BRANCH..HEAD"` is `0` after `git_push_clean`.
@@ -314,25 +314,9 @@ echo "Push verified: origin/$BRANCH is up to date with HEAD."
 
 ## Step 8 — Final action: post summary, update state, and hand off with deterministic `coding_handoff_decide`
 
-**This is the final step. Your response must call `coding_handoff_decide` and then execute its result. Do not hand off manually.**
+**Execute every item in order. Do not hand off manually and do not stop after displaying routing information.**
 
-You **must** use `coding_handoff_decide` before posting the final handoff comment.
-
-Construct the input JSON with:
-- `current_role`: `implementer`
-- `event`: one of `implementation_complete`, `review_fix`, `proceed`, `skip` (from Step 0; if unavailable, pass `implementation_complete`)
-- `task_issue_id`: `$MULTICA_ISSUE_ID`
-- `master_issue_id`: `$MASTER_ISSUE_ID`
-- `task_comments`: comments returned by `multica issue comment list "$MULTICA_ISSUE_ID" --output json`
-- `agent_ids`: map by role names (`implementer`, `test_writer`, `reviewer`, `orchestrator`)
-
-Decision contract: tool output must be status `ok` and include `machine_data.decision.target_issue_id`, `machine_data.decision.next_agent_id`, and `machine_data.decision.comment_content`.
-
-**If status is `error`, stop immediately and post a blocking comment.**
-
-Then execute in order:
-
-1. Post implementation summary to the **task issue** as before:
+1. Post the implementation summary to the **task issue**:
    ```bash
    cat <<COMMENT | multica issue comment add "$MULTICA_ISSUE_ID" --content-stdin
    ## Implementation Complete
@@ -368,9 +352,26 @@ Then execute in order:
    ```
    COMMENT
 
-2. Apply task state patch from `machine_data.decision.state_patches` (status should become `implemented`).
+2. Refresh task comments after the marker is persisted:
+   ```bash
+   COMMENTS=$(multica issue comment list "$MULTICA_ISSUE_ID" --output json)
+   ```
 
-3. Post the deterministic handoff comment exactly:
+3. Call `coding_handoff_decide` with:
+   - `current_role`: `implementer`
+   - `event`: `implementation_complete`
+   - `task_issue_id`: `$MULTICA_ISSUE_ID`
+   - `master_issue_id`: `$MASTER_ISSUE_ID`
+   - `task_comments`: the refreshed `$COMMENTS`
+   - `agent_ids`: map by role names (`implementer`, `test_writer`, `reviewer`, `orchestrator`)
+
+   `event` always names the newly persisted marker. Do not pass Step 0 values such as `review_fix`, `proceed`, or `skip`.
+
+   Tool output must have status `ok` and include `machine_data.decision.target_issue_id`, `machine_data.decision.next_agent_id`, and `machine_data.decision.comment_content`. If status is `error`, post its summary as a blocking comment and stop. Do not invent a recipient.
+
+4. Apply task state patches from `machine_data.decision.state_patches` (status should become `implemented`).
+
+5. **Final action** — execute the deterministic handoff comment exactly:
    ```bash
    TARGET_ISSUE_ID=$(Handoff result machine_data.decision.target_issue_id)
    COMMENT=$(Handoff result machine_data.decision.comment_content)
@@ -378,8 +379,6 @@ Then execute in order:
    $COMMENT
    COMMENT
    ```
-
-4. If the tool returns `status: "error"`, post the error summary and stop. Do not invent the next recipient.
 
 Important rule:
 - Do **not** mention Test Writer during a review-fix handoff unless the reviewer explicitly requested test-writing work.

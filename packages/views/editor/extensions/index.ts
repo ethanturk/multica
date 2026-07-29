@@ -35,6 +35,7 @@ import { Markdown } from "@tiptap/markdown";
 import { ReactNodeViewRenderer } from "@tiptap/react";
 import type { AnyExtension } from "@tiptap/core";
 import type { UploadResult } from "@multica/core/hooks/use-file-upload";
+import { shouldAutoLink } from "@multica/ui/markdown";
 import { escapeMarkdownLabel } from "../utils/escape-markdown-label";
 import { BaseMentionExtension } from "./mention-extension";
 import { createMentionSuggestion, type MentionItem } from "./mention-suggestion";
@@ -55,7 +56,6 @@ import { FileCardExtension } from "./file-card";
 import { ImageView } from "./image-view";
 import { BlockMathExtension, InlineMathExtension } from "./math";
 import { HighlightExtension } from "./highlight";
-import { AutolinkEmailRepairExtension } from "./autolink-email-repair";
 import { codeLowlight } from "../syntax-highlight";
 
 const LinkExtension = Link.extend({ inclusive: false }).configure({
@@ -63,6 +63,7 @@ const LinkExtension = Link.extend({ inclusive: false }).configure({
   autolink: true,
   linkOnPaste: true,
   defaultProtocol: "https",
+  shouldAutoLink,
 });
 
 export const ImageExtension = Image.extend({
@@ -74,6 +75,14 @@ export const ImageExtension = Image.extend({
         renderHTML: (attrs: Record<string, unknown>) =>
           attrs.uploading ? { "data-uploading": "" } : {},
         parseHTML: (el: HTMLElement) => el.hasAttribute("data-uploading"),
+      },
+      // The upload this placeholder belongs to — the same value the draft
+      // store knows as `clientUploadId`. Lets a settle arriving at a mount
+      // that did not start the upload find the node to replace. Render-only,
+      // and cleared once the node holds a real URL.
+      uploadId: {
+        default: null,
+        rendered: false,
       },
       // Intrinsic pixel dimensions, captured on upload (file-upload.ts). The
       // browser uses width/height on <img> to compute aspect-ratio and reserve
@@ -106,6 +115,11 @@ export const ImageExtension = Image.extend({
   },
   renderMarkdown: (node: any) => {
     const src = node.attrs?.src || "";
+    // Same rule as fileCard: an in-flight placeholder is not content. Its src
+    // is a process-local `blob:` URL that expires on reload, so emitting it
+    // would put a dead link in the persisted draft. This replaces the
+    // after-the-fact regex scrub ContentEditor used to run on every serialise.
+    if (node.attrs?.uploading === true || !src) return "";
     const alt = escapeMarkdownLabel(node.attrs?.alt || "");
     const title = node.attrs?.title;
     if (title) {
@@ -130,8 +144,14 @@ export interface EditorExtensionsOptions {
   queryClient?: import("@tanstack/react-query").QueryClient;
   onSubmitRef?: RefObject<(() => void) | undefined>;
   onUploadFileRef?: RefObject<
-    ((file: File) => Promise<UploadResult | null>) | undefined
+    ((file: File, uploadId: string) => Promise<UploadResult | null>) | undefined
   >;
+  /**
+   * Character count above which a plain-text paste becomes a .txt attachment
+   * instead of document text. A ref so the value can change without
+   * recreating the editor. Omitted (the default) keeps every paste as text.
+   */
+  pasteAsFileThresholdRef?: RefObject<number | undefined>;
   /**
    * When true, the `@` suggestion picker is not attached. The mention node
    * type is still registered in the schema so any mention pasted in from
@@ -172,6 +192,13 @@ export function createEditorExtensions(
       heading: { levels: [1, 2, 3] },
       link: false,
       codeBlock: false,
+      // Underline has no Markdown representation. Tiptap's extension serializes
+      // the mark as `++text++`, which is not CommonMark or GFM, so ReadonlyContent
+      // (react-markdown + remark-gfm) renders the delimiters literally. Disabling
+      // the extension drops the mark at parse time instead: pasted `<u>` /
+      // `text-decoration: underline` keep their text, and Cmd+U becomes a no-op
+      // rather than a way to produce content the display layer cannot render.
+      underline: false,
       // Disable StarterKit's stock ListItem — its Enter keybind binds only
       // `splitListItem`, which leaves the user stuck inside an empty top-level
       // list item (see list-item.ts). PatchedListItem below restores the
@@ -195,7 +222,6 @@ export function createEditorExtensions(
     // linkOnPaste relies on Link's handlePaste plugin firing first;
     // markdownPaste's handlePaste is a catch-all that returns true.
     LinkExtension,
-    AutolinkEmailRepairExtension,
     ImageExtension,
     // renderWrapper wraps the table in `<div class="tableWrapper">` (the same
     // wrapper the resizable NodeView emits), which prose.css styles with
@@ -253,6 +279,6 @@ export function createEditorExtensions(
       return true;
     }),
     createBlurShortcutExtension(),
-    createFileUploadExtension(options.onUploadFileRef!),
+    createFileUploadExtension(options.onUploadFileRef!, options.pasteAsFileThresholdRef),
   ];
 }
