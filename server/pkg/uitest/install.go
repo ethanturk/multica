@@ -180,6 +180,10 @@ func (m *Manager) acquireLock() (func(), error) {
 		_ = m.unlockFile(guard)
 		_ = guard.Close()
 	}
+	if err := scavengeMarkerTemps(m.root); err != nil {
+		releaseGuard()
+		return nil, fmt.Errorf("remove interrupted install marker temporary files: %w", err)
+	}
 
 	for attempt := 0; attempt < 2; attempt++ {
 		file, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -205,7 +209,7 @@ func (m *Manager) acquireLock() (func(), error) {
 			releaseGuard()
 			return nil, fmt.Errorf("create install marker: %w", err)
 		}
-		data, readErr := os.ReadFile(lockPath)
+		data, readErr := readFileShared(lockPath)
 		if readErr != nil {
 			releaseGuard()
 			return nil, fmt.Errorf("read install marker: %w", readErr)
@@ -277,10 +281,61 @@ func publishInstallMarker(lockPath string, marker installMarker) error {
 	return nil
 }
 
+func readFileShared(path string) ([]byte, error) {
+	file, err := openFileShared(path)
+	if err != nil {
+		return nil, err
+	}
+	data, readErr := io.ReadAll(file)
+	closeErr := file.Close()
+	return data, errors.Join(readErr, closeErr)
+}
+
+func scavengeMarkerTemps(root string) error {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !isMarkerTempName(entry.Name()) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		if err := os.Remove(filepath.Join(root, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func isMarkerTempName(name string) bool {
+	const prefix = "install.lock."
+	const suffix = ".tmp"
+	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) {
+		return false
+	}
+	token := strings.TrimSuffix(strings.TrimPrefix(name, prefix), suffix)
+	if len(token) != 32 {
+		return false
+	}
+	for _, character := range token {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // removeOwnedMarker must only be called while install.lock.guard is held, so
 // no cooperating successor can replace the marker between this read and unlink.
 func removeOwnedMarker(lockPath, token string) (bool, error) {
-	data, err := os.ReadFile(lockPath)
+	data, err := readFileShared(lockPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}

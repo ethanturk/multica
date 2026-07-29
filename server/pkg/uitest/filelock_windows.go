@@ -9,6 +9,26 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func openFileShared(path string) (*os.File, error) {
+	pathUTF16, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	handle, err := windows.CreateFile(
+		pathUTF16,
+		windows.GENERIC_READ,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_ATTRIBUTE_NORMAL,
+		0,
+	)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	return os.NewFile(uintptr(handle), path), nil
+}
+
 func tryExclusiveFileLock(file *os.File) (bool, error) {
 	var overlapped windows.Overlapped
 	err := windows.LockFileEx(

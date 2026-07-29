@@ -62,7 +62,7 @@ func (m *Manager) Status() CapabilityStatus {
 	}
 
 	lockPath := filepath.Join(m.root, "install.lock")
-	if data, err := os.ReadFile(lockPath); err == nil {
+	if data, err := readFileShared(lockPath); err == nil {
 		var marker installMarker
 		if err := json.Unmarshal(data, &marker); err != nil || marker.StartedAt.IsZero() || marker.Token == "" {
 			return brokenStatus(fmt.Errorf("invalid install marker"))

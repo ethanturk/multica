@@ -9,6 +9,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func openFileShared(path string) (*os.File, error) {
+	return os.Open(path)
+}
+
 func tryExclusiveFileLock(file *os.File) (bool, error) {
 	err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 	if err == nil {

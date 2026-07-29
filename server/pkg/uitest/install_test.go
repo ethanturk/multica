@@ -322,6 +322,96 @@ func TestUIRuntimeLockCleansReservationAfterMarkerPublicationFailure(t *testing.
 	unlock()
 }
 
+func TestUIRuntimeSharedMarkerReadAllowsAtomicReplacement(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "install.lock")
+	replacement := filepath.Join(root, "replacement.tmp")
+	if err := os.WriteFile(target, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(replacement, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reader, err := openFileShared(target)
+	if err != nil {
+		t.Fatalf("openFileShared() error = %v", err)
+	}
+	defer reader.Close()
+	if err := replaceFile(replacement, target); err != nil {
+		t.Fatalf("replaceFile() with shared reader error = %v", err)
+	}
+	if data, err := os.ReadFile(target); err != nil || string(data) != "new" {
+		t.Fatalf("replacement content = %q, %v; want new", data, err)
+	}
+}
+
+func TestUIRuntimeLockScavengesOnlyOrphanMarkerTemps(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	root := filepath.Join(t.TempDir(), "ui-test")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orphan := filepath.Join(root, "install.lock."+strings.Repeat("a", 32)+".tmp")
+	if err := os.WriteFile(orphan, []byte("orphan"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	nearMisses := []string{
+		"install.lock." + strings.Repeat("b", 31) + ".tmp",
+		"install.lock." + strings.Repeat("c", 32) + ".tmp.backup",
+		"other.lock." + strings.Repeat("d", 32) + ".tmp",
+		"install.lock." + strings.Repeat("g", 32) + ".tmp",
+	}
+	for _, name := range nearMisses {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("keep"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	matchingDirectory := "install.lock." + strings.Repeat("e", 32) + ".tmp"
+	if err := os.Mkdir(filepath.Join(root, matchingDirectory), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	unlock, err := testManager(root, now, nil).acquireLock()
+	if err != nil {
+		t.Fatalf("acquireLock() error = %v", err)
+	}
+	defer unlock()
+	if _, err := os.Stat(orphan); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("matching orphan marker temp remains: %v", err)
+	}
+	for _, name := range append(nearMisses, matchingDirectory) {
+		if _, err := os.Stat(filepath.Join(root, name)); err != nil {
+			t.Fatalf("near-miss path %q was removed: %v", name, err)
+		}
+	}
+}
+
+func TestUIRuntimeLockDoesNotScavengeActiveInstallArtifact(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	root := filepath.Join(t.TempDir(), "ui-test")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	first := testManager(root, now, nil)
+	unlock, err := first.acquireLock()
+	if err != nil {
+		t.Fatalf("first acquireLock() error = %v", err)
+	}
+	defer unlock()
+
+	activeArtifact := filepath.Join(root, "install.lock."+strings.Repeat("f", 32)+".tmp")
+	if err := os.WriteFile(activeArtifact, []byte("active"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := testManager(root, now, nil).acquireLock(); err == nil || !strings.Contains(err.Error(), "already in progress") {
+		t.Fatalf("second acquireLock() error = %v, want already in progress", err)
+	}
+	if data, err := os.ReadFile(activeArtifact); err != nil || string(data) != "active" {
+		t.Fatalf("active publication artifact changed: data=%q err=%v", data, err)
+	}
+}
+
 func TestUIRuntimeInstallPreservesReadyRuntime(t *testing.T) {
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 	root := filepath.Join(t.TempDir(), "ui-test")
