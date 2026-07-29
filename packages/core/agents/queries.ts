@@ -46,6 +46,11 @@ export const agentRunCountsKeys = {
 // workspace; all agent dots / hover cards / list rows derive presence from
 // this cache with zero additional network traffic.
 //
+// Presence itself is derived from the active tasks only (see derive-presence.ts
+// and #1823). The one terminal row per agent is used solely for the Squad hover
+// card's "last activity" line; MUL-5436 tracks moving it to a dedicated lazy
+// endpoint so this hot query stops carrying history at all.
+//
 // The 30s staleTime is a safety net only; the primary freshness signal is
 // WS task events, which invalidate this query immediately. Without WS,
 // presence still updates within 30s on focus / mount.

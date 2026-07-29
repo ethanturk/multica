@@ -2,9 +2,11 @@
  * Character count above which a plain-text paste is uploaded as a
  * `pasted-text.txt` attachment instead of being inserted as body text.
  *
- * One shared value so every turn-based composer converts at the same point —
- * a comment and its edit form disagreeing would let the same content be a file
- * on the way in and text on the way back out.
+ * Chat is the only editor that opts in; see `pasteAsFileThreshold` in
+ * `content-editor.tsx` for why. The constant stays separate from that call
+ * site so any composer that later joins converts at the same point — two
+ * surfaces disagreeing would let the same content be a file on the way in and
+ * text on the way back out.
  *
  * The number is a product judgement, not a technical limit: nothing in this
  * stack caps message length (no client schema max, the server only rejects

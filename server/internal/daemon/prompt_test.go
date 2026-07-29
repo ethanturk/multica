@@ -606,25 +606,40 @@ func TestBuildChatPromptSlashSkills(t *testing.T) {
 	})
 }
 
-// TestBuildPromptDefaultMentionsRecent pins that the catch-all fallback
+// TestBuildPromptDefaultScansRootsFirst pins that the catch-all fallback
 // prompt (no trigger comment, no chat, no autopilot, no quick-create)
-// starts assignment-triggered comment catch-up with a bounded recent read,
-// while still keeping older history available through pagination.
-func TestBuildPromptDefaultMentionsRecent(t *testing.T) {
+// starts assignment-triggered comment catch-up with a bounded roots scan and
+// only then offers the full-thread read, while still keeping older history
+// available through pagination.
+func TestBuildPromptDefaultScansRootsFirst(t *testing.T) {
 	out := BuildPrompt(Task{IssueID: "issue-default-1"}, "claude")
 	for _, s := range []string{
-		"multica issue comment list issue-default-1 --recent 10 --output json",
-		"Next thread cursor:",
+		"multica issue comment list issue-default-1 --roots-only --summary --output json",
 		"--since",
 	} {
 		if !strings.Contains(out, s) {
 			t.Errorf("default BuildPrompt missing %q\n--- output ---\n%s", s, out)
 		}
 	}
-	// And the default path must NOT inject a --thread example, because there
-	// is no trigger comment id to anchor on.
-	if strings.Contains(out, "--thread") {
-		t.Errorf("default BuildPrompt should NOT mention --thread (no trigger comment to anchor on)\n--- output ---\n%s", out)
+	// MUL-5372: the per-turn prompt names only the reads it wants run. Flag
+	// mechanics — cursors, the --recent saturation trap — live once in the
+	// runtime workflow file's `## Available Commands`, so restating them here
+	// would put the same reference text on every turn.
+	if strings.Contains(out, "--recent") {
+		t.Errorf("default BuildPrompt should not restate the --recent surface\n--- output ---\n%s", out)
+	}
+	if strings.Contains(out, "Next thread cursor:") {
+		t.Errorf("default BuildPrompt should not restate pagination mechanics\n--- output ---\n%s", out)
+	}
+	// MUL-5372: this path now leads with a cheap roots scan, and the scan is
+	// what supplies thread ids, so a generic `--thread <thread-id>` drill-down
+	// is well-founded here. What must still never appear is a CONCRETE anchor —
+	// the default path has no trigger comment to derive one from, and an
+	// interpolated id would send the agent after a thread that does not exist.
+	for _, seg := range strings.Split(out, "--thread")[1:] {
+		if !strings.HasPrefix(seg, " <thread-id>") {
+			t.Errorf("default BuildPrompt must only use the generic --thread <thread-id> placeholder, never a concrete anchor\n--- output ---\n%s", out)
+		}
 	}
 	// The legacy "If you need comment history" soft phrasing conflicts with
 	// the assignment-trigger runtime workflow, which treats reading comments
@@ -724,11 +739,15 @@ func TestBuildPromptColdStartThreadRead(t *testing.T) {
 	if !strings.Contains(out, "multica issue comment list "+issueID+" --thread thread-root-1 --tail 30 --output json") {
 		t.Errorf("cold start must point at the triggering thread read, got:\n%s", out)
 	}
-	if !strings.Contains(out, "multica issue comment list "+issueID+" --recent 10 --output json") {
-		t.Errorf("cold start cross-thread fallback should use recent 10, got:\n%s", out)
+	// MUL-5372: cross-thread background is a cheap roots scan. The hint names
+	// only the reads it wants run — `--recent` and its saturation trap are
+	// documented once in the brief's `## Available Commands`, so restating the
+	// flag surface here would put reference text on every cold turn.
+	if !strings.Contains(out, "multica issue comment list "+issueID+" --roots-only --summary --output json") {
+		t.Errorf("cold start should offer the cheap roots scan for cross-thread background, got:\n%s", out)
 	}
-	if strings.Contains(out, "--recent 20") {
-		t.Errorf("cold start cross-thread fallback still uses recent 20, got:\n%s", out)
+	if strings.Contains(out, "--recent") {
+		t.Errorf("cold start hint should not restate the --recent surface, got:\n%s", out)
 	}
 }
 

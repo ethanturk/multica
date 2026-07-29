@@ -2774,7 +2774,7 @@ func (s *TaskService) MarkTaskWaitingLocalDirectory(ctx context.Context, taskID 
 // queued chat message could be claimed in the window between the task
 // flipping to 'completed' and chat_session.session_id being refreshed,
 // causing the new task to resume against a stale (or NULL) session.
-func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, result []byte, sessionID, workDir string, sessionRolloutMissing bool) (*db.AgentTaskQueue, error) {
+func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, result []byte, sessionID, workDir string, sessionRolloutMissing bool, retiredSessionID string) (*db.AgentTaskQueue, error) {
 	var task db.AgentTaskQueue
 	// chatAssistantMsg is the single assistant outcome row written for a chat
 	// task inside the completion transaction below. It is broadcast (chat:done)
@@ -2787,6 +2787,7 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 			SessionID:             pgtype.Text{String: sessionID, Valid: sessionID != ""},
 			WorkDir:               pgtype.Text{String: workDir, Valid: workDir != ""},
 			SessionRolloutMissing: sessionRolloutMissing,
+			RetiredSessionID:      pgtype.Text{String: retiredSessionID, Valid: retiredSessionID != ""},
 		})
 		if err != nil {
 			return err
@@ -2811,6 +2812,21 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 				RuntimeID: sessionRuntimeID,
 			}); err != nil {
 				return fmt.Errorf("update chat session resume pointer: %w", err)
+			}
+			// A turn that recovered by abandoning its session still has to
+			// retire it here. The COALESCE above cannot: a fresh retry that
+			// succeeds without emitting a new id passes sessionID == "", which
+			// preserves the pointer — and the pointer is the poisoned session
+			// (GH #6066). Runs after the update so a real new id wins first and
+			// the match guard then finds nothing to clear.
+			if retiredSessionID != "" {
+				if err := qtx.ClearChatSessionSessionIfMatches(ctx, db.ClearChatSessionSessionIfMatchesParams{
+					ID:        t.ChatSessionID,
+					SessionID: pgtype.Text{String: retiredSessionID, Valid: true},
+					RuntimeID: t.RuntimeID,
+				}); err != nil {
+					return fmt.Errorf("clear retired chat session resume pointer: %w", err)
+				}
 			}
 
 			// Write the assistant outcome in the SAME transaction as the status
@@ -3168,7 +3184,7 @@ func (s *TaskService) observeChatOutputLocalPath(task db.AgentTaskQueue, body st
 // coarse bucket. Daemon callers that already produced a refined reason
 // (via classifyPoisonedError, the timeout / runtime classifier, etc.)
 // will have their value preserved untouched.
-func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, sessionID, workDir, failureReason string, sessionRolloutMissing bool) (*db.AgentTaskQueue, error) {
+func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, sessionID, workDir, failureReason string, sessionRolloutMissing bool, retiredSessionID string) (*db.AgentTaskQueue, error) {
 	// MUL-2946: synthesise a refined reason from the error text whenever the
 	// caller didn't supply one. This is the last write-path guard against
 	// "agent_error" coarse rows ending up in agent_task_queue.failure_reason
@@ -3240,6 +3256,7 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 			SessionID:             pgtype.Text{String: sessionID, Valid: sessionID != ""},
 			WorkDir:               pgtype.Text{String: workDir, Valid: workDir != ""},
 			SessionRolloutMissing: sessionRolloutMissing,
+			RetiredSessionID:      pgtype.Text{String: retiredSessionID, Valid: retiredSessionID != ""},
 		})
 		if err != nil {
 			return err
@@ -3248,7 +3265,49 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 
 		// Keep resume-unsafe sessions on the task row for observability, but
 		// do not promote them to the chat-level resume pointer.
-		if t.ChatSessionID.Valid && !resumeUnsafeFailureReason(failureReason) {
+		//
+		// Declining to overwrite is not enough on its own: the claim handler
+		// reads chat_session.session_id BEFORE consulting
+		// GetLastChatTaskSession, so a pointer already holding the dead
+		// session bypasses every filter that query applies and the next turn
+		// resumes it (GH #6066). Clear it in this same transaction, matched on
+		// the exact session and runtime so a concurrent turn's newer pointer
+		// is left alone. ResumeUnsafeFailure (not the reason alone) so an
+		// un-upgraded daemon's agent_error.unknown row is caught by the error
+		// text too.
+		if t.ChatSessionID.Valid && ResumeUnsafeFailure(failureReason, errMsg) {
+			deadSession := sessionID
+			if deadSession == "" {
+				deadSession = t.SessionID.String
+			}
+			if deadSession != "" {
+				if err := qtx.ClearChatSessionSessionIfMatches(ctx, db.ClearChatSessionSessionIfMatchesParams{
+					ID:        t.ChatSessionID,
+					SessionID: pgtype.Text{String: deadSession, Valid: true},
+					RuntimeID: t.RuntimeID,
+				}); err != nil {
+					return fmt.Errorf("clear poisoned chat session resume pointer: %w", err)
+				}
+			}
+		}
+		// A session the run explicitly retired must go too, whatever the
+		// terminal status: the fresh-session retry that replaced it may well
+		// have succeeded, and the pointer would otherwise still name the
+		// transcript it retried away from.
+		if t.ChatSessionID.Valid && retiredSessionID != "" {
+			if err := qtx.ClearChatSessionSessionIfMatches(ctx, db.ClearChatSessionSessionIfMatchesParams{
+				ID:        t.ChatSessionID,
+				SessionID: pgtype.Text{String: retiredSessionID, Valid: true},
+				RuntimeID: t.RuntimeID,
+			}); err != nil {
+				return fmt.Errorf("clear retired chat session resume pointer: %w", err)
+			}
+		}
+
+		// ResumeUnsafeFailure, not resumeUnsafeFailureReason: the reason-only
+		// check passes an un-upgraded daemon's agent_error.unknown row, which
+		// would re-pin the very session the clear above just removed.
+		if t.ChatSessionID.Valid && !ResumeUnsafeFailure(failureReason, errMsg) {
 			// Pin the chat_session's runtime_id alongside the session_id so the
 			// next claim can apply the runtime-guard. Both fields move together:
 			// when there's no session_id to record, leave runtime_id untouched
@@ -3485,7 +3544,14 @@ func ResumeUnsafeFailure(failureReason, errorText string) bool {
 		return true
 	}
 	lower := strings.ToLower(errorText)
-	return strings.Contains(lower, "400") && strings.Contains(lower, "invalid_request_error")
+	if strings.Contains(lower, "400") && strings.Contains(lower, "invalid_request_error") {
+		return true
+	}
+	// Same defense-in-depth for the provider-agnostic empty-message shape:
+	// a daemon too old to carry classifyPoisonedError's new branch reports
+	// agent_error.unknown, and without this the manual-retry path would
+	// happily resume the transcript the provider just refused (GH #6066).
+	return taskfailure.UnresumableHistory(errorText)
 }
 
 // retryEligible reports whether a failed task qualifies for an automatic retry

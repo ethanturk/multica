@@ -39,6 +39,7 @@ import type {
   ListWebhookDeliveriesResponse,
   NotificationPreferenceResponse,
   ResourceLabelsResponse,
+  RuntimeModelListRequest,
   SearchIssuesResponse,
   SearchProjectsResponse,
   Squad,
@@ -1819,6 +1820,83 @@ export const CreateBillingPortalSessionResponseSchema = z.object({
 
 export const EMPTY_CREATE_BILLING_PORTAL_SESSION_RESPONSE: CreateBillingPortalSessionResponse = {
   url: "",
+};
+
+// ---------------------------------------------------------------------------
+// Runtime model discovery (`POST /api/runtimes/:id/models`,
+// `GET /api/runtimes/:id/models/:requestId`). Both endpoints return the same
+// request record, and the UI drives a state machine off `status`, so the two
+// fields that decide behaviour are pinned: `status` gates the polling loop and
+// `supported` gates whether the picker is usable at all. Everything else stays
+// lenient per the rules at the top of this file.
+//
+// `status` deliberately stays `z.string()` (a newer server may add a state);
+// `resolveRuntimeModels` treats anything it does not recognise as an explicit
+// failure rather than a completed-but-empty catalog. `supported` defaults to
+// true so a server old enough to omit it keeps the picker enabled instead of
+// rendering "managed by runtime" off an `undefined`.
+//
+// `cached` / `cached_at` are additive markers for a snapshot served from the
+// server-side catalog cache (MUL-5444); an older backend omits them.
+// ---------------------------------------------------------------------------
+
+const RuntimeModelThinkingLevelSchema = z.object({
+  value: z.string(),
+  label: z.string().default(""),
+  description: z.string().optional(),
+}).loose();
+
+const RuntimeModelThinkingSchema = z.object({
+  supported_levels: z.array(RuntimeModelThinkingLevelSchema).default([]),
+  default_level: z.string().optional(),
+}).loose();
+
+const RuntimeModelServiceTierSchema = z.object({
+  id: z.string(),
+  name: z.string().default(""),
+  description: z.string().optional(),
+}).loose();
+
+// A model entry with no `id` is unselectable — `onChange(m.id)` would persist
+// an empty model — so `id` is required and a malformed entry drops the whole
+// response to the fallback rather than rendering a dead row.
+const RuntimeModelSchema = z.object({
+  id: z.string(),
+  label: z.string().default(""),
+  provider: z.string().optional(),
+  default: z.boolean().optional(),
+  thinking: RuntimeModelThinkingSchema.nullable().optional()
+    .transform((v) => v ?? undefined),
+  service_tiers: z.array(RuntimeModelServiceTierSchema).optional(),
+}).loose();
+
+export const RuntimeModelListRequestSchema = z.object({
+  id: z.string().default(""),
+  runtime_id: z.string().default(""),
+  status: z.string(),
+  models: z.array(RuntimeModelSchema).optional(),
+  supported: z.boolean().default(true),
+  error: z.string().optional(),
+  created_at: z.string().default(""),
+  updated_at: z.string().default(""),
+  cached: z.boolean().optional(),
+  cached_at: z.string().optional(),
+}).loose();
+
+// Fallback for an unparseable model-discovery response. `failed` is the only
+// honest choice: `completed` would fabricate an empty catalog (and silently
+// clear a saved model when `supported` is read as false), while `pending`
+// would spin the picker until the client-side poll timeout. `failed` surfaces
+// "discovery failed" immediately and leaves the creatable manual-entry field
+// working, which is the same degradation as a real discovery failure.
+export const MALFORMED_RUNTIME_MODEL_LIST_REQUEST: RuntimeModelListRequest = {
+  id: "",
+  runtime_id: "",
+  status: "failed",
+  supported: true,
+  error: "invalid model discovery response",
+  created_at: "",
+  updated_at: "",
 };
 
 // Deterministic tool plane — the Result envelope a sandboxed step returns. It

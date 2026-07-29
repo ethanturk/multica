@@ -294,6 +294,33 @@ export function createZhDict(allowSignup: boolean): LandingDict {
     },
     entries: [
       {
+        version: "0.4.13",
+        date: "2026-07-28",
+        title: "Claude Code 续跑不再重复写缓存，还有错误洞察",
+        changes: [],
+        features: [
+          "用量页现在会显示错误趋势、失败类型和相关智能体。",
+          "现在可以直接从 GitHub App 导入多个仓库。",
+          "创建智能体时，现在可以设置思考强度和 Codex 加速。",
+          "父 Issue 现在会显示子 Issue 中有多少智能体正在工作。",
+        ],
+        improvements: [
+          "关闭、重开或切换编辑模式后，草稿和上传仍会保留。",
+          "粘贴超长文本时，现在会自动变成文本附件。",
+          "每个上传只显示一次，完成后才会写入草稿。",
+          "Webhook URL 现在默认隐藏，可按需显示。",
+          "工作区很多时，Multica 启动不再反复检查智能体工具。",
+          "用量排名现在先聚焦前十名，失败排序也更清楚。",
+          "发送后，光标现在会停在各编辑器预期的位置。",
+        ],
+        fixes: [
+          "Claude Code 继续处理长 Issue 时，重复的缓存写入减少约 95%。",
+          "删除 Issue 后，现在会回到原来的列表。",
+          "skill 下载卡住时，现在会自动重试并说明原因。",
+          "Slack 和 Lark 现在只接收最终回答，Qoder 智能体也不例外。",
+        ],
+      },
+      {
         version: "0.4.12",
         date: "2026-07-27",
         title: "Lark 图片视频、图片缩放与更稳的任务",

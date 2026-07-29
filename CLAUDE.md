@@ -102,6 +102,7 @@ These are hard requirements for every new or modified database design and produc
 
 - Do not add database foreign keys (`FOREIGN KEY` / `REFERENCES`), cascading deletes, or cascading updates. Resolve relationships, validation, and dependent cleanup explicitly in application code. Use an application transaction when cleanup and the parent operation must commit or roll back atomically.
 - Every index created by a migration must use `CREATE INDEX CONCURRENTLY` or `CREATE UNIQUE INDEX CONCURRENTLY`, including indexes on newly created tables. PostgreSQL rejects concurrent index creation inside a transaction or a multi-command string, so keep each concurrent index build in its own single-statement migration file. The repository migration runner executes migration files outside an explicit transaction to support this.
+- **Fork-only migrations use the reserved `900+` prefix band.** This fork tracks `multica-ai/multica`, which keeps appending migrations in the low numbers; a fork migration placed there collides on the next upstream sync and has to be renumbered by hand (prefix uniqueness is enforced by `TestMigrationNumericPrefixesStayUniqueAfterLegacySet`). Numbering fork work from `900` upward keeps it permanently out of upstream's path. Existing fork migrations below `900` predate this rule and stay where they are — the migration runner keys `schema_migrations` on the full filename stem, so renaming an already-applied migration re-runs it.
 
 ## Coding Rules
 
