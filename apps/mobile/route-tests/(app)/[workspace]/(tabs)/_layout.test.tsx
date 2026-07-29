@@ -2,7 +2,7 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
-import TabsLayout from "./_layout";
+import TabsLayout from "@/app/(app)/[workspace]/(tabs)/_layout";
 
 const mocks = vi.hoisted(() => ({
   tabsScreens: [] as Record<string, any>[],

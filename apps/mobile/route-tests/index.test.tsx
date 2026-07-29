@@ -2,7 +2,7 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, create } from "react-test-renderer";
 
-import Index from "./index";
+import Index from "@/app/index";
 
 const mocks = vi.hoisted(() => ({
   route: null as string | null,

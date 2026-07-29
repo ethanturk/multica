@@ -44,13 +44,24 @@ describe("android scaffold", () => {
     expect(settingsGradle).toContain("rootProject.name = 'Multica (Dev)'");
   });
 
+  it("keeps one generated release-signing overlay in the Android app", () => {
+    const buildGradle = readFixture("../android/app/build.gradle");
+    const signingGradlePath = decodeURIComponent(
+      new URL("../android/app/multica-release-signing.gradle", import.meta.url).pathname,
+    );
+    const signingApplyLine = 'apply from: "./multica-release-signing.gradle"';
+
+    expect(existsSync(signingGradlePath)).toBe(true);
+    expect(buildGradle.split(signingApplyLine)).toHaveLength(2);
+  });
+
   it("re-syncs the Android native project before every variant build", () => {
     expect(mobilePackage.scripts).toMatchObject({
-      "android:sync": "expo prebuild --platform android --no-install",
+      "android:sync": "expo prebuild --clean --platform android --no-install",
       "android:sync:staging":
-        "dotenv -e .env.staging -- cross-env APP_ENV=staging expo prebuild --platform android --no-install",
+        "dotenv -e .env.staging -- cross-env APP_ENV=staging expo prebuild --clean --platform android --no-install",
       "android:sync:prod":
-        "dotenv -e .env.production -- cross-env APP_ENV=production expo prebuild --platform android --no-install",
+        "dotenv -e .env.production -- cross-env APP_ENV=production expo prebuild --clean --platform android --no-install",
       android: "pnpm android:sync && expo run:android",
       "android:staging":
         "pnpm android:sync:staging && dotenv -e .env.staging -- cross-env APP_ENV=staging expo run:android",

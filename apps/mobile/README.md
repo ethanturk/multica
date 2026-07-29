@@ -25,7 +25,7 @@ pnpm ios:mobile:device:prod:release
 
 **7-day signing limit**: a free Apple ID signs builds for 7 days. After that, plug back into the Mac and re-run the command to re-sign. An Apple Developer Program account ($99/yr) extends this to 1 year.
 
-Android development support now lives in this package too, but release/distribution signing is still a follow-up task. Everything below is for app developers.
+Android development support lives in this package too. Approved testers can receive signed staging APKs through the manual Firebase App Distribution workflow; public Play Store distribution is still a follow-up. Everything below is for app developers.
 
 Focused Android validation and release-gap docs live here:
 
@@ -88,9 +88,30 @@ For a local backend, set `EXPO_PUBLIC_API_URL=http://10.0.2.2:8080` in `.env.dev
 
 Use the same `pnpm android:mobile*` command, but point `EXPO_PUBLIC_API_URL` at your Mac's LAN IP instead of `10.0.2.2`. USB debugging must be enabled on the device.
 
-## Android release readiness
+## Distribute an Android staging build
 
-Android debug installs are ready for local development and smoke testing, but production release setup is intentionally incomplete. Before a Play Store or tester-facing release, review [`docs/android-release-readiness.md`](./docs/android-release-readiness.md) and complete the signing, store-asset, and secret-management work there.
+The manual [Android Staging Distribution](../../.github/workflows/mobile-android-distribute.yml) workflow builds package `ai.multica.mobile.staging`, signs its release APK with the durable staging key, retains the APK as a seven-day GitHub artifact, and then uploads it to the configured Firebase App Distribution tester groups.
+
+The workflow uses the protected GitHub environment `android-staging`. Configure these environment variables:
+
+- `GCP_PROJECT_ID`
+- `GCP_WORKLOAD_IDENTITY_PROVIDER`
+- `GCP_SERVICE_ACCOUNT`
+- `FIREBASE_APP_ID_ANDROID_STAGING`
+- `FIREBASE_TESTER_GROUPS`
+
+Configure these environment secrets:
+
+- `ANDROID_KEYSTORE_BASE64`
+- `ANDROID_KEYSTORE_PASSWORD`
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEY_PASSWORD`
+
+The Google Cloud service account uses GitHub OIDC and Workload Identity Federation; do not store a service-account JSON key. Firebase must already contain an Android app registered for `ai.multica.mobile.staging` and the named tester groups. The durable keystore must also be created and backed up outside the repository.
+
+From GitHub Actions, choose **Android Staging Distribution**, select **Run workflow**, and optionally enter release notes. The workflow run number becomes Android `versionCode`, so successful builds remain monotonically installable.
+
+Production AAB signing, Play Console submission, Crashlytics, and device-lab automation are not included. See [`docs/android-release-readiness.md`](./docs/android-release-readiness.md) for the complete operator contract and follow-up scope.
 
 ## Build it onto your iPhone
 

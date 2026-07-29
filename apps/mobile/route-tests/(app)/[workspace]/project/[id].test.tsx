@@ -2,7 +2,7 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
-import ProjectDetail from "./[id]";
+import ProjectDetail from "@/app/(app)/[workspace]/project/[id]";
 
 const mocks = vi.hoisted(() => ({
   alertMock: vi.fn(),

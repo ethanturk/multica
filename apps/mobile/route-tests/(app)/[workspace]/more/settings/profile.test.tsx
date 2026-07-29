@@ -2,7 +2,7 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
-import ProfileSettingsScreen from "./profile";
+import ProfileSettingsScreen from "@/app/(app)/[workspace]/more/settings/profile";
 
 const mocks = vi.hoisted(() => ({
   alertMock: vi.fn(),

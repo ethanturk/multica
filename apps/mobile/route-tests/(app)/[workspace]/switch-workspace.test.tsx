@@ -2,7 +2,7 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
-import SwitchWorkspaceRoute from "./switch-workspace";
+import SwitchWorkspaceRoute from "@/app/(app)/[workspace]/switch-workspace";
 
 const mocks = vi.hoisted(() => ({
   alertMock: vi.fn(),
