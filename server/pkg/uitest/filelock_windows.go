@@ -32,3 +32,19 @@ func unlockExclusiveFile(file *os.File) error {
 	var overlapped windows.Overlapped
 	return windows.UnlockFileEx(windows.Handle(file.Fd()), 0, 1, 0, &overlapped)
 }
+
+func replaceFile(oldPath, newPath string) error {
+	oldPathUTF16, err := windows.UTF16PtrFromString(oldPath)
+	if err != nil {
+		return err
+	}
+	newPathUTF16, err := windows.UTF16PtrFromString(newPath)
+	if err != nil {
+		return err
+	}
+	return windows.MoveFileEx(
+		oldPathUTF16,
+		newPathUTF16,
+		windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH,
+	)
+}

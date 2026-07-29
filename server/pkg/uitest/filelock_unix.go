@@ -23,3 +23,7 @@ func tryExclusiveFileLock(file *os.File) (bool, error) {
 func unlockExclusiveFile(file *os.File) error {
 	return unix.Flock(int(file.Fd()), unix.LOCK_UN)
 }
+
+func replaceFile(oldPath, newPath string) error {
+	return os.Rename(oldPath, newPath)
+}

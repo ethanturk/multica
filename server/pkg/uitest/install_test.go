@@ -260,6 +260,68 @@ func TestUIRuntimeLockRemovesMarkerBeforeReleasingHandleOwnership(t *testing.T) 
 	}
 }
 
+func TestUIRuntimeLockRecoversMalformedOrphanMarkers(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name    string
+		content string
+	}{
+		{name: "empty", content: ""},
+		{name: "partial", content: `{"pid":42,"started_at":"2026-07-29T11:59:00Z"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "ui-test")
+			if err := os.MkdirAll(root, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			lockPath := filepath.Join(root, "install.lock")
+			if err := os.WriteFile(lockPath, []byte(test.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			manager := testManager(root, now, nil)
+			if got := manager.Status(); got.Status != StatusBroken {
+				t.Fatalf("Status() = %+v, want malformed marker broken", got)
+			}
+			unlock, err := manager.acquireLock()
+			if err != nil {
+				t.Fatalf("acquireLock() error = %v, want malformed orphan recovery", err)
+			}
+			unlock()
+			if _, err := os.Stat(lockPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("install marker remains after recovered lock release: %v", err)
+			}
+		})
+	}
+}
+
+func TestUIRuntimeLockCleansReservationAfterMarkerPublicationFailure(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	root := filepath.Join(t.TempDir(), "ui-test")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manager := testManager(root, now, nil)
+	manager.publishMarker = func(string, installMarker) error {
+		return errors.New("injected marker publication failure")
+	}
+
+	if _, err := manager.acquireLock(); err == nil || !strings.Contains(err.Error(), "injected marker publication failure") {
+		t.Fatalf("acquireLock() error = %v, want publication failure", err)
+	}
+	lockPath := filepath.Join(root, "install.lock")
+	if _, err := os.Stat(lockPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed publication left install marker: %v", err)
+	}
+
+	manager.publishMarker = publishInstallMarker
+	unlock, err := manager.acquireLock()
+	if err != nil {
+		t.Fatalf("acquireLock() retry error = %v", err)
+	}
+	unlock()
+}
+
 func TestUIRuntimeInstallPreservesReadyRuntime(t *testing.T) {
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 	root := filepath.Join(t.TempDir(), "ui-test")
@@ -573,12 +635,13 @@ func testManager(root string, now time.Time, runner CommandRunner) *Manager {
 				return "", errors.New("missing")
 			}
 		},
-		run:        runner,
-		rename:     os.Rename,
-		newToken:   randomToken,
-		lockFile:   tryExclusiveFileLock,
-		unlockFile: unlockExclusiveFile,
-		pid:        123,
+		run:           runner,
+		rename:        os.Rename,
+		newToken:      randomToken,
+		lockFile:      tryExclusiveFileLock,
+		unlockFile:    unlockExclusiveFile,
+		publishMarker: publishInstallMarker,
+		pid:           123,
 	}
 }
 

@@ -31,28 +31,30 @@ type CommandResult struct {
 type CommandRunner func(context.Context, Command) (CommandResult, error)
 
 type Manager struct {
-	root       string
-	now        func() time.Time
-	lookPath   func(string) (string, error)
-	run        CommandRunner
-	rename     func(string, string) error
-	newToken   func() (string, error)
-	lockFile   func(*os.File) (bool, error)
-	unlockFile func(*os.File) error
-	pid        int
+	root          string
+	now           func() time.Time
+	lookPath      func(string) (string, error)
+	run           CommandRunner
+	rename        func(string, string) error
+	newToken      func() (string, error)
+	lockFile      func(*os.File) (bool, error)
+	unlockFile    func(*os.File) error
+	publishMarker func(string, installMarker) error
+	pid           int
 }
 
 func NewManager(root string) *Manager {
 	return &Manager{
-		root:       root,
-		now:        time.Now,
-		lookPath:   exec.LookPath,
-		run:        runCommand,
-		rename:     os.Rename,
-		newToken:   randomToken,
-		lockFile:   tryExclusiveFileLock,
-		unlockFile: unlockExclusiveFile,
-		pid:        os.Getpid(),
+		root:          root,
+		now:           time.Now,
+		lookPath:      exec.LookPath,
+		run:           runCommand,
+		rename:        os.Rename,
+		newToken:      randomToken,
+		lockFile:      tryExclusiveFileLock,
+		unlockFile:    unlockExclusiveFile,
+		publishMarker: publishInstallMarker,
+		pid:           os.Getpid(),
 	}
 }
 
@@ -183,12 +185,16 @@ func (m *Manager) acquireLock() (func(), error) {
 		file, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err == nil {
 			marker := installMarker{PID: m.pid, StartedAt: m.now(), Token: token}
-			encodeErr := json.NewEncoder(file).Encode(marker)
 			closeErr := file.Close()
-			if encodeErr != nil || closeErr != nil {
-				_, _ = removeOwnedMarker(lockPath, marker.Token)
+			if closeErr != nil {
+				_ = os.Remove(lockPath)
 				releaseGuard()
-				return nil, errors.Join(encodeErr, closeErr)
+				return nil, fmt.Errorf("close install marker reservation: %w", closeErr)
+			}
+			if err := m.publishMarker(lockPath, marker); err != nil {
+				_ = os.Remove(lockPath)
+				releaseGuard()
+				return nil, fmt.Errorf("publish install marker: %w", err)
 			}
 			return func() {
 				_, _ = removeOwnedMarker(lockPath, marker.Token)
@@ -200,10 +206,17 @@ func (m *Manager) acquireLock() (func(), error) {
 			return nil, fmt.Errorf("create install marker: %w", err)
 		}
 		data, readErr := os.ReadFile(lockPath)
-		var marker installMarker
-		if readErr != nil || json.Unmarshal(data, &marker) != nil || marker.StartedAt.IsZero() || marker.Token == "" {
+		if readErr != nil {
 			releaseGuard()
-			return nil, fmt.Errorf("UI test runtime installation already in progress")
+			return nil, fmt.Errorf("read install marker: %w", readErr)
+		}
+		var marker installMarker
+		if json.Unmarshal(data, &marker) != nil || marker.StartedAt.IsZero() || marker.Token == "" {
+			if err := os.Remove(lockPath); err != nil {
+				releaseGuard()
+				return nil, fmt.Errorf("remove interrupted install marker: %w", err)
+			}
+			continue
 		}
 		age := m.now().Sub(marker.StartedAt)
 		if age >= 0 && age <= lockMaxAge {
@@ -230,6 +243,38 @@ func randomToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(value), nil
+}
+
+func publishInstallMarker(lockPath string, marker installMarker) error {
+	data, err := json.Marshal(marker)
+	if err != nil {
+		return fmt.Errorf("encode install marker: %w", err)
+	}
+	data = append(data, '\n')
+
+	// Write and sync the complete payload before atomically replacing the
+	// O_EXCL reservation, so readers can observe an empty reservation or a
+	// complete marker but never a streamed partial JSON document.
+	tempPath := lockPath + "." + marker.Token + ".tmp"
+	file, err := os.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create install marker temporary file: %w", err)
+	}
+	defer os.Remove(tempPath)
+
+	written, writeErr := file.Write(data)
+	if writeErr == nil && written != len(data) {
+		writeErr = io.ErrShortWrite
+	}
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+		return fmt.Errorf("write install marker temporary file: %w", err)
+	}
+	if err := replaceFile(tempPath, lockPath); err != nil {
+		return fmt.Errorf("replace install marker reservation: %w", err)
+	}
+	return nil
 }
 
 // removeOwnedMarker must only be called while install.lock.guard is held, so
