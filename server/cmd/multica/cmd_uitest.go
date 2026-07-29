@@ -5,6 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
 
 	"github.com/multica-ai/multica/server/pkg/uitest"
 	"github.com/spf13/cobra"
@@ -18,6 +22,8 @@ type uiTestRuntime interface {
 var newUITestRuntime = func(root string) uiTestRuntime {
 	return uitest.NewManager(root)
 }
+
+var runUITestServer = uitest.RunServer
 
 var uiTestCmd = newUITestCommand()
 
@@ -38,9 +44,53 @@ func newUITestCommand() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE:  runUITestStatus,
 	}
+	serve := &cobra.Command{
+		Use:    "serve",
+		Short:  "Run the task-scoped UI testing MCP proxy",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE:   runUITestServe,
+	}
 	status.Flags().String("output", "table", "Output format: table or json")
-	command.AddCommand(install, status)
+	command.AddCommand(install, status, serve)
 	return command
+}
+
+func runUITestServe(cmd *cobra.Command, _ []string) error {
+	workDir := strings.TrimSpace(os.Getenv("MULTICA_UI_TEST_WORKDIR"))
+	if workDir == "" {
+		var err error
+		workDir, err = os.Getwd()
+		if err != nil {
+			return fmt.Errorf("resolve UI test workdir: %w", err)
+		}
+	}
+	taskID := strings.TrimSpace(os.Getenv("MULTICA_UI_TEST_TASK_ID"))
+	if taskID == "" {
+		return fmt.Errorf("MULTICA_UI_TEST_TASK_ID is required")
+	}
+	runtimeDir := strings.TrimSpace(os.Getenv("MULTICA_UI_TEST_RUNTIME_DIR"))
+	if runtimeDir == "" {
+		return fmt.Errorf("MULTICA_UI_TEST_RUNTIME_DIR is required")
+	}
+	absoluteWorkDir, err := filepath.Abs(workDir)
+	if err != nil {
+		return fmt.Errorf("resolve UI test workdir: %w", err)
+	}
+	absoluteRuntimeDir, err := filepath.Abs(runtimeDir)
+	if err != nil {
+		return fmt.Errorf("resolve UI test runtime directory: %w", err)
+	}
+	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runUITestServer(ctx, uitest.ServeOptions{
+		WorkDir:     absoluteWorkDir,
+		TaskID:      taskID,
+		Runtime:     uitest.ReadyRuntime{Directory: absoluteRuntimeDir},
+		Input:       cmd.InOrStdin(),
+		Output:      cmd.OutOrStdout(),
+		ErrorOutput: cmd.ErrOrStderr(),
+	})
 }
 
 func runUITestInstall(cmd *cobra.Command, _ []string) error {
