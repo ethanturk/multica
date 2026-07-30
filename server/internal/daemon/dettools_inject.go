@@ -105,6 +105,14 @@ func (d *Daemon) mergeDetTools(agentCfg json.RawMessage, provider, workDir strin
 		}
 	}
 
+	if provider == "openclaw" {
+		baseConfig, err := openClawManagedMCPBase(agentCfg)
+		if err != nil {
+			logger.Warn("dettools: native MCP merge failed; launching without tool plane", "error", err)
+			return agentCfg
+		}
+		agentCfg = baseConfig
+	}
 	merged, err := buildEffectiveMcpConfig(agentCfg, selfBin, workDir, stepsFile, d.cfg.DetTools, effective)
 	if err != nil {
 		logger.Warn("dettools: merge failed; launching without tool plane", "error", err)
@@ -236,12 +244,17 @@ func buildEffectiveMcpConfig(agentCfg json.RawMessage, selfBin, workDir, stepsFi
 			return nil, fmt.Errorf("parse agent mcp_config: %w", err)
 		}
 	}
-
+	if root == nil {
+		root = map[string]json.RawMessage{}
+	}
 	servers := map[string]json.RawMessage{}
 	if raw, ok := root["mcpServers"]; ok && len(strings.TrimSpace(string(raw))) > 0 {
 		if err := json.Unmarshal(raw, &servers); err != nil {
 			return nil, fmt.Errorf("parse mcpServers: %w", err)
 		}
+	}
+	if servers == nil {
+		servers = map[string]json.RawMessage{}
 	}
 	if _, exists := servers[dettoolsServerName]; exists {
 		return agentCfg, nil

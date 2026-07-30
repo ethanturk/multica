@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -62,7 +63,15 @@ func (d *Daemon) injectUITest(
 		logger.Warn("ui-test: cannot resolve daemon binary; launching without managed UI testing", "error", err)
 		return agentConfig, false
 	}
-	merged, injected, err := mergeUITestMCPConfig(agentConfig, executable, workDir, taskID, runtimeDir)
+	baseConfig := agentConfig
+	if provider == "openclaw" {
+		baseConfig, err = openClawManagedMCPBase(agentConfig)
+		if err != nil {
+			logger.Warn("ui-test: native MCP merge failed; launching without managed UI testing", "error", err)
+			return agentConfig, false
+		}
+	}
+	merged, injected, err := mergeUITestMCPConfig(baseConfig, executable, workDir, taskID, runtimeDir)
 	if err != nil {
 		logger.Warn("ui-test: MCP config merge failed; launching without managed UI testing", "provider", provider, "error", err)
 		return agentConfig, false
@@ -83,12 +92,18 @@ func mergeUITestMCPConfig(
 			return nil, false, fmt.Errorf("parse agent mcp_config: %w", err)
 		}
 	}
+	if root == nil {
+		root = map[string]json.RawMessage{}
+	}
 
 	servers := map[string]json.RawMessage{}
 	if raw, ok := root["mcpServers"]; ok && len(strings.TrimSpace(string(raw))) > 0 {
 		if err := json.Unmarshal(raw, &servers); err != nil {
 			return nil, false, fmt.Errorf("parse mcpServers: %w", err)
 		}
+	}
+	if servers == nil {
+		servers = map[string]json.RawMessage{}
 	}
 	if _, exists := servers[uiTestServerName]; exists {
 		return agentConfig, false, nil
@@ -150,4 +165,16 @@ func (d *Daemon) resolveUITestExecutable() (string, error) {
 		resolver = resolveSelfExecutable
 	}
 	return resolver()
+}
+
+// openClawManagedMCPBase preserves native OpenClaw MCP inheritance when the
+// daemon needs to add its first managed server. execenv treats every non-null
+// mcp_config as a strict replacement, so seed absent configs with the same
+// local runtime servers already used for managed agent configurations.
+func openClawManagedMCPBase(agentConfig json.RawMessage) (json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(agentConfig)
+	if len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null")) {
+		return agentConfig, nil
+	}
+	return mergeRuntimeAndAgentMcpConfig("openclaw", json.RawMessage(`{"mcpServers":{}}`))
 }
