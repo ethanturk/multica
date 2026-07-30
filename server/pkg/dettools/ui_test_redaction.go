@@ -16,11 +16,12 @@ var (
 
 var uiTestSecretKeys = map[string]bool{
 	"token":         true,
-	"access_token":  true,
-	"id_token":      true,
-	"refresh_token": true,
+	"accesstoken":   true,
+	"idtoken":       true,
+	"refreshtoken":  true,
 	"authorization": true,
 	"cookie":        true,
+	"setcookie":     true,
 	"password":      true,
 	"secret":        true,
 }
@@ -30,7 +31,7 @@ func redactUITestValue(value any) any {
 	case map[string]any:
 		redacted := make(map[string]any, len(value))
 		for key, item := range value {
-			if uiTestSecretKeys[strings.ToLower(key)] {
+			if uiTestSecretKeys[normalizeUITestSecretKey(key)] {
 				redacted[key] = uiTestRedacted
 				continue
 			}
@@ -48,6 +49,17 @@ func redactUITestValue(value any) any {
 	default:
 		return value
 	}
+}
+
+func normalizeUITestSecretKey(key string) string {
+	return strings.Map(func(character rune) rune {
+		switch character {
+		case '-', '_', ' ', '\t', '\r', '\n':
+			return -1
+		default:
+			return character
+		}
+	}, strings.ToLower(key))
 }
 
 func redactUITestString(value string) string {

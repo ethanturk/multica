@@ -18,7 +18,10 @@ func TestUITestRedactionRecursivelyRemovesSecrets(t *testing.T) {
 		"network":  "GET http://127.0.0.1:3000/api?token=" + token + "&page=2",
 		"markdown": "## Failure\nCookie: " + cookie + "\nJWT " + jwt,
 		"machine_data": map[string]any{
-			"access_token": "nested-access-token",
+			"access_token":  "nested-access-token",
+			"Set-Cookie":    "session=map-key-cookie",
+			"AUTHORIZATION": "Bearer map-key-authorization",
+			"Cookie":        "session=map-key-cookie-exact",
 			"events": []any{
 				map[string]any{"authorization": "Bearer nested-authorization"},
 				"Set-Cookie: refresh=nested-refresh; HttpOnly",
@@ -33,7 +36,10 @@ func TestUITestRedactionRecursivelyRemovesSecrets(t *testing.T) {
 	}
 	got := string(raw)
 
-	for _, secret := range []string{bearer, jwt, cookie, token, "nested-access-token", "nested-authorization", "nested-refresh"} {
+	for _, secret := range []string{
+		bearer, jwt, cookie, token, "nested-access-token", "nested-authorization", "nested-refresh",
+		"map-key-cookie", "map-key-authorization", "map-key-cookie-exact",
+	} {
 		if strings.Contains(got, secret) {
 			t.Errorf("redacted output contains secret %q: %s", secret, got)
 		}

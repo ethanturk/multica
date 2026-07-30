@@ -15,6 +15,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -27,6 +29,7 @@ const (
 	uiTestReportMarkdownName = "report.md"
 	uiTestManifestName       = "artifact-manifest.json"
 	uiTestCommentName        = "comment.md"
+	uiTestPublishedDir       = "published-evidence"
 )
 
 var (
@@ -153,12 +156,34 @@ type uiReportOutput struct {
 	Content []byte
 }
 
+type uiSealedEvidence struct {
+	RelativePath  string
+	PublishedPath string
+	Type          string
+	Description   string
+	Content       []byte
+}
+
+type uiTestEvidenceEncoding uint8
+
+type uiTestEvidenceCaptureHook func() error
+
+type uiTestEvidenceCaptureHookContextKey struct{}
+
+const (
+	uiTestEvidenceBinary uiTestEvidenceEncoding = iota
+	uiTestEvidenceText
+	uiTestEvidenceJSON
+)
+
 type uiReportPublishState struct {
-	output    uiReportOutput
+	name      string
 	temp      string
 	backup    string
+	directory bool
 	hadPrior  bool
 	installed bool
+	backedUp  bool
 }
 
 var uiTestReportInputSchema = json.RawMessage(`{
@@ -273,36 +298,46 @@ func uiTestReportTool() Tool {
 	}
 }
 
-func uiTestReportHandler(_ context.Context, args json.RawMessage, env ToolEnv) Result {
+func uiTestReportHandler(ctx context.Context, args json.RawMessage, env ToolEnv) Result {
 	var input uiTestReportInput
 	if err := strictUIReportUnmarshal(args, &input); err != nil {
 		return Errf(CodeInvalidInput, "invalid ui_test_report input: %v", err)
 	}
-	report, evidenceSizes, runRoot, err := normalizeUITestReport(input, env)
+	report, sealedEvidence, runRoot, lock, err := normalizeUITestReport(ctx, input, env)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return Errf(CodeTimeout, "capture UI test report evidence: %v", err)
+		}
 		return Errf(CodeInvalidInput, "invalid ui_test_report input: %v", err)
 	}
-	defer runRoot.Close()
+	finish := func(result Result) Result {
+		releaseErr := lock.Release()
+		closeErr := runRoot.Close()
+		if err := errors.Join(releaseErr, closeErr); err != nil {
+			return Errf(CodeInternal, "release UI test report publication: %v", err)
+		}
+		return result
+	}
 
 	redacted, err := redactUITestReport(report)
 	if err != nil {
-		return Errf(CodeInternal, "redact UI test report: %v", err)
+		return finish(Errf(CodeInternal, "redact UI test report: %v", err))
 	}
 	reportJSON, err := marshalIndented(redacted)
 	if err != nil {
-		return Errf(CodeInternal, "encode UI test report: %v", err)
+		return finish(Errf(CodeInternal, "encode UI test report: %v", err))
 	}
 	reportMarkdown := renderUITestReportMarkdown(redacted)
 	comment := renderUITestComment(redacted)
 
 	runRel := uiTestRunRel(env.ArtifactDir, env.TaskID)
 	manifestEntries := make([]uiArtifactManifestEntry, 0, len(redacted.Artifacts)+3)
-	for _, artifact := range redacted.Artifacts {
+	for _, artifact := range sealedEvidence {
 		manifestEntries = append(manifestEntries, uiArtifactManifestEntry{
-			Path:        artifact.Path,
+			Path:        artifact.PublishedPath,
 			Type:        artifact.Type,
 			Description: artifact.Description,
-			Size:        evidenceSizes[artifact.Path],
+			Size:        int64(len(artifact.Content)),
 		})
 	}
 	generated := []uiReportOutput{
@@ -321,7 +356,7 @@ func uiTestReportHandler(_ context.Context, args json.RawMessage, env ToolEnv) R
 	sort.Slice(manifestEntries, func(i, j int) bool { return manifestEntries[i].Path < manifestEntries[j].Path })
 	manifestJSON, err := marshalIndented(uiArtifactManifest{Artifacts: manifestEntries})
 	if err != nil {
-		return Errf(CodeInternal, "encode UI test artifact manifest: %v", err)
+		return finish(Errf(CodeInternal, "encode UI test artifact manifest: %v", err))
 	}
 	outputs := []uiReportOutput{
 		generated[0],
@@ -331,17 +366,17 @@ func uiTestReportHandler(_ context.Context, args json.RawMessage, env ToolEnv) R
 	}
 
 	total := int64(0)
-	for _, size := range evidenceSizes {
-		total += size
+	for _, artifact := range sealedEvidence {
+		total += int64(len(artifact.Content))
 	}
 	for _, output := range outputs {
 		total += int64(len(output.Content))
 	}
 	if total > uiTestMaxPublishedBytes {
-		return Errf(CodeInvalidInput, "published UI test artifacts total %d bytes; maximum is %d", total, uiTestMaxPublishedBytes)
+		return finish(Errf(CodeInvalidInput, "published UI test artifacts total %d bytes; maximum is %d", total, uiTestMaxPublishedBytes))
 	}
-	if err := publishUITestOutputs(runRoot, outputs); err != nil {
-		return Errf(CodeInternal, "publish UI test report: %v", err)
+	if err := publishUITestOutputs(runRoot, sealedEvidence, outputs); err != nil {
+		return finish(Errf(CodeInternal, "publish UI test report: %v", err))
 	}
 
 	artifacts := make([]Artifact, 0, len(outputs))
@@ -351,7 +386,7 @@ func uiTestReportHandler(_ context.Context, args json.RawMessage, env ToolEnv) R
 			Path: filepath.ToSlash(filepath.Join(runRel, output.Name)),
 		})
 	}
-	return Result{
+	return finish(Result{
 		Status:  StatusOK,
 		Summary: fmt.Sprintf("UI test report: %s / %s", redacted.ExecutionStatus, redacted.Verdict),
 		MachineData: map[string]any{
@@ -360,7 +395,7 @@ func uiTestReportHandler(_ context.Context, args json.RawMessage, env ToolEnv) R
 			"counts":           redacted.Counts,
 		},
 		Artifacts: artifacts,
-	}
+	})
 }
 
 func strictUIReportUnmarshal(data json.RawMessage, value any) error {
@@ -379,66 +414,103 @@ func strictUIReportUnmarshal(data json.RawMessage, value any) error {
 	return nil
 }
 
-func normalizeUITestReport(input uiTestReportInput, env ToolEnv) (uiTestReport, map[string]int64, *os.Root, error) {
+func normalizeUITestReport(
+	ctx context.Context,
+	input uiTestReportInput,
+	env ToolEnv,
+) (uiTestReport, []uiSealedEvidence, *os.Root, *uiTestReportLock, error) {
 	if err := validateUITestTaskID(env.TaskID); err != nil {
-		return uiTestReport{}, nil, nil, err
+		return uiTestReport{}, nil, nil, nil, err
 	}
 	if err := validateUITestInput(input); err != nil {
-		return uiTestReport{}, nil, nil, err
+		return uiTestReport{}, nil, nil, nil, err
 	}
 	workDir, err := filepath.Abs(env.WorkDir)
 	if err != nil {
-		return uiTestReport{}, nil, nil, fmt.Errorf("resolve workdir: %w", err)
+		return uiTestReport{}, nil, nil, nil, fmt.Errorf("resolve workdir: %w", err)
 	}
 	workRoot, err := os.OpenRoot(workDir)
 	if err != nil {
-		return uiTestReport{}, nil, nil, fmt.Errorf("open workdir: %w", err)
+		return uiTestReport{}, nil, nil, nil, fmt.Errorf("open workdir: %w", err)
 	}
 	defer workRoot.Close()
 
 	runRel := uiTestRunRel(env.ArtifactDir, env.TaskID)
 	if filepath.IsAbs(runRel) || pathEscapesRoot(runRel) {
-		return uiTestReport{}, nil, nil, fmt.Errorf("UI test artifact root escapes workdir")
+		return uiTestReport{}, nil, nil, nil, fmt.Errorf("UI test artifact root escapes workdir")
 	}
 	if err := workRoot.MkdirAll(runRel, 0o755); err != nil {
-		return uiTestReport{}, nil, nil, fmt.Errorf("create UI test artifact root: %w", err)
+		return uiTestReport{}, nil, nil, nil, fmt.Errorf("create UI test artifact root: %w", err)
 	}
 	if err := rejectSymlinkComponents(workRoot, runRel); err != nil {
-		return uiTestReport{}, nil, nil, fmt.Errorf("unsafe UI test artifact root: %w", err)
+		return uiTestReport{}, nil, nil, nil, fmt.Errorf("unsafe UI test artifact root: %w", err)
+	}
+	sort.Slice(input.Artifacts, func(i, j int) bool { return input.Artifacts[i].Path < input.Artifacts[j].Path })
+	runRoot, err := workRoot.OpenRoot(runRel)
+	if err != nil {
+		return uiTestReport{}, nil, nil, nil, fmt.Errorf("open UI test artifact root: %w", err)
+	}
+	staleAge := 2 * env.Timeout
+	if staleAge <= 0 {
+		staleAge = 2 * DefaultTimeout
+	}
+	lock, err := acquireUITestReportLock(ctx, runRoot, staleAge)
+	if err != nil {
+		_ = runRoot.Close()
+		return uiTestReport{}, nil, nil, nil, fmt.Errorf("acquire UI test report lock: %w", err)
+	}
+	fail := func(cause error) (uiTestReport, []uiSealedEvidence, *os.Root, *uiTestReportLock, error) {
+		releaseErr := lock.Release()
+		closeErr := runRoot.Close()
+		return uiTestReport{}, nil, nil, nil, errors.Join(cause, releaseErr, closeErr)
 	}
 
-	evidenceSizes := make(map[string]int64, len(input.Artifacts))
-	evidencePaths := make(map[string]bool, len(input.Artifacts))
-	var total int64
+	sealed := make([]uiSealedEvidence, 0, len(input.Artifacts))
+	pathMap := make(map[string]string, len(input.Artifacts))
+	collisionKeys := make(map[string]string, len(input.Artifacts))
+	total := int64(0)
 	for i := range input.Artifacts {
-		artifact := &input.Artifacts[i]
-		normalizedPath, size, err := validateUITestEvidence(workRoot, runRel, *artifact)
+		sourcePath, captured, err := captureUITestEvidence(
+			ctx,
+			runRoot,
+			runRel,
+			input.Artifacts[i],
+			uiTestMaxPublishedBytes-total,
+		)
 		if err != nil {
-			return uiTestReport{}, nil, nil, fmt.Errorf("artifact %q: %w", artifact.Path, err)
+			return fail(fmt.Errorf("artifact %q: %w", input.Artifacts[i].Path, err))
 		}
-		if evidencePaths[normalizedPath] {
-			return uiTestReport{}, nil, nil, fmt.Errorf("duplicate artifact path %q", normalizedPath)
+		if _, duplicate := pathMap[sourcePath]; duplicate {
+			return fail(fmt.Errorf("duplicate artifact path %q", sourcePath))
 		}
-		evidencePaths[normalizedPath] = true
-		evidenceSizes[normalizedPath] = size
-		artifact.Path = normalizedPath
-		total += size
-		if total > uiTestMaxPublishedBytes {
-			return uiTestReport{}, nil, nil, fmt.Errorf("evidence totals %d bytes; maximum is %d", total, uiTestMaxPublishedBytes)
+		collisionKey := uiTestEvidenceCollisionKey(sourcePath)
+		if existing, collision := collisionKeys[collisionKey]; collision {
+			return fail(fmt.Errorf("artifact paths %q and %q collide", existing, sourcePath))
+		}
+		collisionKeys[collisionKey] = sourcePath
+		pathMap[sourcePath] = captured.PublishedPath
+		input.Artifacts[i].Path = captured.PublishedPath
+		sealed = append(sealed, captured)
+		total += int64(len(captured.Content))
+	}
+	for i := range input.ObjectiveChecks {
+		for j, sourcePath := range input.ObjectiveChecks[i].Evidence {
+			normalized := normalizeUITestPath(sourcePath)
+			published, ok := pathMap[normalized]
+			if !ok {
+				return fail(fmt.Errorf("objective check %q references unknown evidence %q", input.ObjectiveChecks[i].ID, sourcePath))
+			}
+			input.ObjectiveChecks[i].Evidence[j] = published
 		}
 	}
-	for _, check := range input.ObjectiveChecks {
-		for _, path := range check.Evidence {
-			if !evidencePaths[normalizeUITestPath(path)] {
-				return uiTestReport{}, nil, nil, fmt.Errorf("objective check %q references unknown evidence %q", check.ID, path)
+	for i := range input.AdvisoryFindings {
+		for j, sourcePath := range input.AdvisoryFindings[i].Evidence {
+			normalized := normalizeUITestPath(sourcePath)
+			published, ok := pathMap[normalized]
+			if !ok {
+				return fail(fmt.Errorf("advisory finding %q references unknown evidence %q", input.AdvisoryFindings[i].ID, sourcePath))
 			}
-		}
-	}
-	for _, finding := range input.AdvisoryFindings {
-		for _, path := range finding.Evidence {
-			if !evidencePaths[normalizeUITestPath(path)] {
-				return uiTestReport{}, nil, nil, fmt.Errorf("advisory finding %q references unknown evidence %q", finding.ID, path)
-			}
+			input.AdvisoryFindings[i].Evidence[j] = published
 		}
 	}
 
@@ -448,15 +520,9 @@ func normalizeUITestReport(input uiTestReportInput, env ToolEnv) (uiTestReport, 
 	sort.Slice(input.Artifacts, func(i, j int) bool { return input.Artifacts[i].Path < input.Artifacts[j].Path })
 	for i := range input.ObjectiveChecks {
 		sort.Strings(input.ObjectiveChecks[i].Evidence)
-		for j, path := range input.ObjectiveChecks[i].Evidence {
-			input.ObjectiveChecks[i].Evidence[j] = normalizeUITestPath(path)
-		}
 	}
 	for i := range input.AdvisoryFindings {
 		sort.Strings(input.AdvisoryFindings[i].Evidence)
-		for j, path := range input.AdvisoryFindings[i].Evidence {
-			input.AdvisoryFindings[i].Evidence[j] = normalizeUITestPath(path)
-		}
 	}
 
 	report := uiTestReport{
@@ -471,11 +537,7 @@ func normalizeUITestReport(input uiTestReportInput, env ToolEnv) (uiTestReport, 
 		Artifacts:        input.Artifacts,
 		Counts:           deriveUITestCounts(input),
 	}
-	runRoot, err := workRoot.OpenRoot(runRel)
-	if err != nil {
-		return uiTestReport{}, nil, nil, fmt.Errorf("open UI test artifact root: %w", err)
-	}
-	return report, evidenceSizes, runRoot, nil
+	return report, sealed, runRoot, lock, nil
 }
 
 func validateUITestInput(input uiTestReportInput) error {
@@ -550,11 +612,18 @@ func validateUITestInput(input uiTestReportInput) error {
 		if strings.TrimSpace(artifact.Path) == "" || strings.TrimSpace(artifact.Description) == "" {
 			return fmt.Errorf("artifact path and description are required")
 		}
+		if strings.Contains(artifact.Path, `\`) || containsUITestControl(artifact.Path) || containsUITestControl(artifact.Description) {
+			return fmt.Errorf("artifact path and description must not contain backslashes or control characters")
+		}
 		if !uiTestArtifactTypePattern.MatchString(artifact.Type) {
 			return fmt.Errorf("artifact %q has invalid type %q", artifact.Path, artifact.Type)
 		}
-		if uiTestSecretArtifactName.MatchString(artifact.Type) {
-			return fmt.Errorf("artifact %q has secret-bearing type %q", artifact.Path, artifact.Type)
+		if uiTestSecretArtifactName.MatchString(artifact.Path) ||
+			uiTestSecretArtifactName.MatchString(artifact.Type) {
+			return fmt.Errorf("artifact %q has secret-bearing metadata", artifact.Path)
+		}
+		if _, ok := classifyUITestEvidence(artifact.Type, artifact.Path); !ok {
+			return fmt.Errorf("artifact %q has unsupported type %q", artifact.Path, artifact.Type)
 		}
 	}
 	return nil
@@ -599,37 +668,161 @@ func validateUITestTaskID(taskID string) error {
 	return nil
 }
 
-func validateUITestEvidence(workRoot *os.Root, runRel string, artifact uiEvidenceArtifact) (string, int64, error) {
-	if uiTestSecretArtifactName.MatchString(artifact.Path) || redactUITestString(artifact.Path) != artifact.Path {
-		return "", 0, fmt.Errorf("secret-bearing artifact path is not publishable")
-	}
+func captureUITestEvidence(
+	ctx context.Context,
+	runRoot *os.Root,
+	runRel string,
+	artifact uiEvidenceArtifact,
+	maxBytes int64,
+) (string, uiSealedEvidence, error) {
 	clean := filepath.Clean(filepath.FromSlash(artifact.Path))
 	if filepath.IsAbs(clean) || pathEscapesRoot(clean) {
-		return "", 0, fmt.Errorf("path escapes workdir")
+		return "", uiSealedEvidence{}, fmt.Errorf("path escapes workdir")
 	}
 	relative, err := filepath.Rel(runRel, clean)
 	if err != nil || relative == "." || pathEscapesRoot(relative) {
-		return "", 0, fmt.Errorf("path must be a file under %s", filepath.ToSlash(runRel))
+		return "", uiSealedEvidence{}, fmt.Errorf("path must be a file under %s", filepath.ToSlash(runRel))
 	}
-	if isGeneratedUITestOutput(relative) {
-		return "", 0, fmt.Errorf("path uses reserved generated report name")
+	if isReservedUITestEvidenceSource(relative) {
+		return "", uiSealedEvidence{}, fmt.Errorf("path uses a reserved report publication name")
 	}
-	if err := rejectSymlinkComponents(workRoot, clean); err != nil {
-		return "", 0, err
-	}
-	file, err := workRoot.Open(clean)
+	before, err := runRoot.Lstat(relative)
 	if err != nil {
-		return "", 0, fmt.Errorf("open evidence: %w", err)
+		return "", uiSealedEvidence{}, fmt.Errorf("inspect evidence: %w", err)
 	}
-	defer file.Close()
-	info, err := file.Stat()
+	if !before.Mode().IsRegular() {
+		return "", uiSealedEvidence{}, fmt.Errorf("evidence is not a regular file")
+	}
+	file, err := openUITestEvidence(runRoot, relative)
 	if err != nil {
-		return "", 0, fmt.Errorf("stat evidence: %w", err)
+		return "", uiSealedEvidence{}, fmt.Errorf("open evidence without following links: %w", err)
 	}
-	if !info.Mode().IsRegular() {
-		return "", 0, fmt.Errorf("evidence is not a regular file")
+	opened, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return "", uiSealedEvidence{}, fmt.Errorf("stat opened evidence: %w", err)
 	}
-	return filepath.ToSlash(clean), info.Size(), nil
+	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
+		_ = file.Close()
+		return "", uiSealedEvidence{}, fmt.Errorf("evidence identity or type changed during open")
+	}
+	links, err := uiTestEvidenceLinkCount(file, opened)
+	if err != nil {
+		_ = file.Close()
+		return "", uiSealedEvidence{}, fmt.Errorf("inspect evidence link count: %w", err)
+	}
+	if links != 1 {
+		_ = file.Close()
+		return "", uiSealedEvidence{}, fmt.Errorf("evidence must have exactly one hard link")
+	}
+	if maxBytes < 0 || opened.Size() > maxBytes {
+		_ = file.Close()
+		return "", uiSealedEvidence{}, fmt.Errorf("evidence exceeds remaining publication limit")
+	}
+	first, err := readUITestEvidenceSnapshot(ctx, file, maxBytes)
+	if err != nil {
+		_ = file.Close()
+		return "", uiSealedEvidence{}, err
+	}
+	if hook, ok := ctx.Value(uiTestEvidenceCaptureHookContextKey{}).(uiTestEvidenceCaptureHook); ok {
+		if err := hook(); err != nil {
+			_ = file.Close()
+			return "", uiSealedEvidence{}, fmt.Errorf("run evidence capture hook: %w", err)
+		}
+	}
+	middle, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return "", uiSealedEvidence{}, fmt.Errorf("stat evidence after first capture: %w", err)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		_ = file.Close()
+		return "", uiSealedEvidence{}, fmt.Errorf("rewind evidence for stability check: %w", err)
+	}
+	second, err := readUITestEvidenceSnapshot(ctx, file, maxBytes)
+	if err != nil {
+		_ = file.Close()
+		return "", uiSealedEvidence{}, err
+	}
+	after, statErr := file.Stat()
+	closeErr := file.Close()
+	if err := errors.Join(statErr, closeErr); err != nil {
+		return "", uiSealedEvidence{}, fmt.Errorf("finish evidence capture: %w", err)
+	}
+	if !bytes.Equal(first, second) || !stableUITestEvidenceInfo(opened, middle) || !stableUITestEvidenceInfo(middle, after) {
+		return "", uiSealedEvidence{}, fmt.Errorf("evidence changed during capture")
+	}
+	encoding, _ := classifyUITestEvidence(artifact.Type, artifact.Path)
+	content, err := redactUITestEvidenceContent(encoding, second)
+	if err != nil {
+		return "", uiSealedEvidence{}, err
+	}
+	if int64(len(content)) > maxBytes {
+		return "", uiSealedEvidence{}, fmt.Errorf("sealed evidence exceeds remaining publication limit")
+	}
+	sourcePath := filepath.ToSlash(clean)
+	publishedRelative := filepath.Join(uiTestPublishedDir, relative)
+	return sourcePath, uiSealedEvidence{
+		RelativePath:  filepath.ToSlash(publishedRelative),
+		PublishedPath: filepath.ToSlash(filepath.Join(runRel, publishedRelative)),
+		Type:          artifact.Type,
+		Description:   redactUITestString(artifact.Description),
+		Content:       content,
+	}, nil
+}
+
+func readUITestEvidenceSnapshot(ctx context.Context, file *os.File, maxBytes int64) ([]byte, error) {
+	var out bytes.Buffer
+	buffer := make([]byte, 32*1024)
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		read, err := file.Read(buffer)
+		if read > 0 {
+			if int64(out.Len()+read) > maxBytes {
+				return nil, fmt.Errorf("evidence exceeds remaining publication limit")
+			}
+			_, _ = out.Write(buffer[:read])
+		}
+		if errors.Is(err, io.EOF) {
+			return out.Bytes(), nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read evidence: %w", err)
+		}
+	}
+}
+
+func stableUITestEvidenceInfo(before, after os.FileInfo) bool {
+	return before.Mode() == after.Mode() &&
+		before.Size() == after.Size() &&
+		before.ModTime().Equal(after.ModTime())
+}
+
+func redactUITestEvidenceContent(encoding uiTestEvidenceEncoding, content []byte) ([]byte, error) {
+	switch encoding {
+	case uiTestEvidenceBinary:
+		return append([]byte(nil), content...), nil
+	case uiTestEvidenceJSON:
+		var value any
+		decoder := json.NewDecoder(bytes.NewReader(content))
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("decode JSON evidence: %w", err)
+		}
+		var trailing any
+		if err := decoder.Decode(&trailing); err != io.EOF {
+			return nil, fmt.Errorf("decode JSON evidence: trailing content")
+		}
+		return marshalIndented(redactUITestValue(value))
+	case uiTestEvidenceText:
+		if !utf8.Valid(content) {
+			return nil, fmt.Errorf("text evidence is not valid UTF-8")
+		}
+		return []byte(redactUITestString(string(content))), nil
+	default:
+		return nil, fmt.Errorf("unsupported evidence encoding")
+	}
 }
 
 func rejectSymlinkComponents(root *os.Root, name string) error {
@@ -876,87 +1069,168 @@ func markdownCode(value string) string {
 	return strings.ReplaceAll(value, "`", "'")
 }
 
-func publishUITestOutputs(root *os.Root, outputs []uiReportOutput) error {
+func publishUITestOutputs(root *os.Root, evidence []uiSealedEvidence, outputs []uiReportOutput) error {
 	suffix, err := uiTestTempSuffix()
 	if err != nil {
 		return err
 	}
-	states := make([]uiReportPublishState, len(outputs))
-	for i, output := range outputs {
-		if info, statErr := root.Lstat(output.Name); statErr == nil {
-			if !info.Mode().IsRegular() {
-				return fmt.Errorf("existing output %s is not a regular file", output.Name)
+	states := make([]uiReportPublishState, 0, len(outputs)+1)
+	states = append(states, uiReportPublishState{
+		name:      uiTestPublishedDir,
+		temp:      "." + uiTestPublishedDir + ".tmp-" + suffix,
+		backup:    "." + uiTestPublishedDir + ".bak-" + suffix,
+		directory: true,
+	})
+	for _, output := range outputs {
+		states = append(states, uiReportPublishState{
+			name:   output.Name,
+			temp:   "." + output.Name + ".tmp-" + suffix,
+			backup: "." + output.Name + ".bak-" + suffix,
+		})
+	}
+	for i := range states {
+		item := &states[i]
+		info, statErr := root.Lstat(item.name)
+		if statErr == nil {
+			if item.directory && !info.IsDir() {
+				return fmt.Errorf("existing output %s is not a directory", item.name)
 			}
-			states[i].hadPrior = true
-		} else if !errors.Is(statErr, os.ErrNotExist) {
-			return fmt.Errorf("inspect existing output %s: %w", output.Name, statErr)
+			if !item.directory && !info.Mode().IsRegular() {
+				return fmt.Errorf("existing output %s is not a regular file", item.name)
+			}
+			item.hadPrior = true
+			continue
 		}
-		states[i].output = output
-		states[i].temp = "." + output.Name + ".tmp-" + suffix
-		states[i].backup = "." + output.Name + ".bak-" + suffix
+		if !errors.Is(statErr, os.ErrNotExist) {
+			return fmt.Errorf("inspect existing output %s: %w", item.name, statErr)
+		}
 	}
 	defer func() {
 		for _, item := range states {
-			_ = root.Remove(item.temp)
-			_ = root.Remove(item.backup)
+			_ = removeUITestPublicationPath(root, item.temp, item.directory)
 		}
 	}()
 
-	for _, item := range states {
-		file, openErr := root.OpenFile(item.temp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-		if openErr != nil {
-			return fmt.Errorf("stage %s: %w", item.output.Name, openErr)
-		}
-		_, writeErr := file.Write(item.output.Content)
-		if writeErr == nil {
-			writeErr = file.Sync()
-		}
-		closeErr := file.Close()
-		if writeErr != nil {
-			return fmt.Errorf("stage %s: %w", item.output.Name, writeErr)
-		}
-		if closeErr != nil {
-			return fmt.Errorf("stage %s: %w", item.output.Name, closeErr)
+	if err := stageUITestEvidence(root, states[0].temp, evidence); err != nil {
+		return err
+	}
+	for i, output := range outputs {
+		item := states[i+1]
+		if err := writeUITestStagedFile(root, item.temp, output.Content, 0o644); err != nil {
+			return fmt.Errorf("stage %s: %w", item.name, err)
 		}
 	}
 
-	backedUp := 0
 	for i := range states {
-		if !states[i].hadPrior {
+		item := &states[i]
+		if !item.hadPrior {
 			continue
 		}
-		if err := root.Rename(states[i].output.Name, states[i].backup); err != nil {
-			restoreUITestBackups(root, states[:backedUp])
-			return fmt.Errorf("backup %s: %w", states[i].output.Name, err)
+		if err := root.Rename(item.name, item.backup); err != nil {
+			rollbackErr := rollbackUITestPublication(root, states)
+			return errors.Join(fmt.Errorf("backup %s: %w", item.name, err), rollbackErr)
 		}
-		backedUp = i + 1
+		item.backedUp = true
 	}
 	for i := range states {
-		if err := root.Rename(states[i].temp, states[i].output.Name); err != nil {
-			for j := 0; j < i; j++ {
-				_ = root.Remove(states[j].output.Name)
-			}
-			restoreUITestBackups(root, states)
-			return fmt.Errorf("install %s: %w", states[i].output.Name, err)
+		item := &states[i]
+		if err := root.Rename(item.temp, item.name); err != nil {
+			rollbackErr := rollbackUITestPublication(root, states)
+			return errors.Join(fmt.Errorf("install %s: %w", item.name, err), rollbackErr)
 		}
-		states[i].installed = true
+		item.installed = true
 	}
-	for _, item := range states {
-		if item.hadPrior {
-			if err := root.Remove(item.backup); err != nil {
-				return fmt.Errorf("remove backup for %s: %w", item.output.Name, err)
+	for i := range states {
+		item := &states[i]
+		if !item.backedUp {
+			continue
+		}
+		if err := removeUITestPublicationPath(root, item.backup, item.directory); err != nil {
+			return fmt.Errorf("remove backup for %s: %w", item.name, err)
+		}
+		item.backedUp = false
+	}
+	return nil
+}
+
+func stageUITestEvidence(root *os.Root, tempDir string, evidence []uiSealedEvidence) error {
+	if err := root.Mkdir(tempDir, 0o700); err != nil {
+		return fmt.Errorf("stage %s: %w", uiTestPublishedDir, err)
+	}
+	for _, artifact := range evidence {
+		prefix := uiTestPublishedDir + "/"
+		if !strings.HasPrefix(artifact.RelativePath, prefix) {
+			return fmt.Errorf("invalid sealed evidence path %q", artifact.PublishedPath)
+		}
+		relative := filepath.Clean(filepath.FromSlash(strings.TrimPrefix(artifact.RelativePath, prefix)))
+		if relative == "." || pathEscapesRoot(relative) || filepath.IsAbs(relative) {
+			return fmt.Errorf("invalid sealed evidence path %q", artifact.PublishedPath)
+		}
+		stagedPath := filepath.Join(tempDir, relative)
+		if parent := filepath.Dir(stagedPath); parent != "." {
+			if err := root.MkdirAll(parent, 0o700); err != nil {
+				return fmt.Errorf("stage evidence directory %s: %w", filepath.ToSlash(parent), err)
 			}
+		}
+		if err := writeUITestStagedFile(root, stagedPath, artifact.Content, 0o600); err != nil {
+			return fmt.Errorf("stage evidence %s: %w", artifact.PublishedPath, err)
 		}
 	}
 	return nil
 }
 
-func restoreUITestBackups(root *os.Root, states []uiReportPublishState) {
-	for _, item := range states {
-		if item.hadPrior {
-			_ = root.Rename(item.backup, item.output.Name)
-		}
+func writeUITestStagedFile(root *os.Root, name string, content []byte, mode os.FileMode) error {
+	file, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
+		return err
 	}
+	written, writeErr := file.Write(content)
+	if writeErr == nil && written != len(content) {
+		writeErr = io.ErrShortWrite
+	}
+	if writeErr == nil {
+		writeErr = file.Sync()
+	}
+	closeErr := file.Close()
+	return errors.Join(writeErr, closeErr)
+}
+
+func rollbackUITestPublication(root *os.Root, states []uiReportPublishState) error {
+	var rollbackErrors []error
+	for i := len(states) - 1; i >= 0; i-- {
+		item := &states[i]
+		if !item.installed {
+			continue
+		}
+		if err := removeUITestPublicationPath(root, item.name, item.directory); err != nil {
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("remove new %s: %w", item.name, err))
+			continue
+		}
+		item.installed = false
+	}
+	for i := len(states) - 1; i >= 0; i-- {
+		item := &states[i]
+		if !item.backedUp {
+			continue
+		}
+		if err := root.Rename(item.backup, item.name); err != nil {
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("restore %s: %w", item.name, err))
+			continue
+		}
+		item.backedUp = false
+	}
+	return errors.Join(rollbackErrors...)
+}
+
+func removeUITestPublicationPath(root *os.Root, name string, directory bool) error {
+	if directory {
+		return root.RemoveAll(name)
+	}
+	err := root.Remove(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 func uiTestTempSuffix() (string, error) {
@@ -975,17 +1249,77 @@ func normalizeUITestPath(path string) string {
 	return filepath.ToSlash(filepath.Clean(filepath.FromSlash(path)))
 }
 
+func uiTestEvidenceCollisionKey(path string) string {
+	return strings.ToLower(normalizeUITestPath(path))
+}
+
+func containsUITestControl(value string) bool {
+	return strings.ContainsFunc(value, unicode.IsControl)
+}
+
+func classifyUITestEvidence(artifactType, path string) (uiTestEvidenceEncoding, bool) {
+	switch strings.ToLower(artifactType) {
+	case "json", "application/json":
+		return uiTestEvidenceJSON, true
+	case "console", "network", "log", "text", "markdown", "accessibility", "accessibility_snapshot", "text/plain", "text/markdown":
+		if strings.EqualFold(filepath.Ext(path), ".json") {
+			return uiTestEvidenceJSON, true
+		}
+		return uiTestEvidenceText, true
+	case "screenshot", "png", "image/png", "trace", "zip", "application/zip":
+		return uiTestEvidenceBinary, true
+	default:
+		return 0, false
+	}
+}
+
 func pathEscapesRoot(path string) bool {
 	return path == ".." || strings.HasPrefix(path, ".."+string(filepath.Separator))
 }
 
-func isGeneratedUITestOutput(path string) bool {
-	switch filepath.Base(path) {
-	case uiTestReportJSONName, uiTestReportMarkdownName, uiTestManifestName, uiTestCommentName:
-		return filepath.Dir(path) == "."
-	default:
+func isReservedUITestEvidenceSource(path string) bool {
+	clean := filepath.Clean(path)
+	first, _, _ := strings.Cut(filepath.ToSlash(clean), "/")
+	first = strings.ToLower(first)
+	if first == uiTestPublishedDir || first == uiTestReportLockDir || strings.HasPrefix(first, ".ui-test-report.") {
+		return true
+	}
+	if filepath.Dir(clean) != "." {
 		return false
 	}
+	if isGeneratedUITestOutput(clean) {
+		return true
+	}
+	for _, prefix := range []string{
+		"." + uiTestReportJSONName + ".",
+		"." + uiTestReportMarkdownName + ".",
+		"." + uiTestManifestName + ".",
+		"." + uiTestCommentName + ".",
+		"." + uiTestPublishedDir + ".",
+	} {
+		if strings.HasPrefix(strings.ToLower(filepath.Base(clean)), prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func isGeneratedUITestOutput(path string) bool {
+	if filepath.Dir(path) != "." {
+		return false
+	}
+	base := filepath.Base(path)
+	for _, generated := range []string{
+		uiTestReportJSONName,
+		uiTestReportMarkdownName,
+		uiTestManifestName,
+		uiTestCommentName,
+	} {
+		if strings.EqualFold(base, generated) {
+			return true
+		}
+	}
+	return false
 }
 
 func uiTestGeneratedDescription(name string) string {
