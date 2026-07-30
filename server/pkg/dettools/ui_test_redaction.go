@@ -27,21 +27,27 @@ var uiTestSecretKeys = map[string]bool{
 }
 
 func redactUITestValue(value any) any {
+	return redactUITestValueInContext(value, "")
+}
+
+func redactUITestValueInContext(value any, collection string) any {
 	switch value := value.(type) {
 	case map[string]any:
+		redactNamedValue := uiTestMapNamesCredential(value) || normalizeUITestSecretKey(collection) == "cookies"
 		redacted := make(map[string]any, len(value))
 		for key, item := range value {
-			if uiTestSecretKeys[normalizeUITestSecretKey(key)] {
+			normalizedKey := normalizeUITestSecretKey(key)
+			if uiTestSecretKeys[normalizedKey] || normalizedKey == "value" && redactNamedValue {
 				redacted[key] = uiTestRedacted
 				continue
 			}
-			redacted[key] = redactUITestValue(item)
+			redacted[key] = redactUITestValueInContext(item, key)
 		}
 		return redacted
 	case []any:
 		redacted := make([]any, len(value))
 		for i, item := range value {
-			redacted[i] = redactUITestValue(item)
+			redacted[i] = redactUITestValueInContext(item, collection)
 		}
 		return redacted
 	case string:
@@ -49,6 +55,48 @@ func redactUITestValue(value any) any {
 	default:
 		return value
 	}
+}
+
+func uiTestMapNamesCredential(value map[string]any) bool {
+	for key, item := range value {
+		if normalizeUITestSecretKey(key) != "name" {
+			continue
+		}
+		name, ok := item.(string)
+		return ok && isUITestCredentialName(name)
+	}
+	return false
+}
+
+func isUITestCredentialName(name string) bool {
+	normalized := normalizeUITestSecretKey(name)
+	if uiTestSecretKeys[normalized] {
+		return true
+	}
+	for _, suffix := range []string{"authorization", "token", "password", "secret"} {
+		if strings.HasSuffix(normalized, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func isUITestStorageStateValue(value any) bool {
+	object, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	hasCookies := false
+	hasOrigins := false
+	for key, item := range object {
+		switch normalizeUITestSecretKey(key) {
+		case "cookies":
+			_, hasCookies = item.([]any)
+		case "origins":
+			_, hasOrigins = item.([]any)
+		}
+	}
+	return hasCookies && hasOrigins
 }
 
 func normalizeUITestSecretKey(key string) string {

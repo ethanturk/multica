@@ -686,10 +686,13 @@ func TestUIReportPublishesOnlySealedRedactedEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	const (
-		bearerSecret = "sealed-bearer-secret"
-		jwtSecret    = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzZWFsZWQifQ.signature123"
-		cookieSecret = "sealed-cookie-secret"
-		tokenSecret  = "sealed-token-secret"
+		bearerSecret  = "sealed-bearer-secret"
+		jwtSecret     = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzZWFsZWQifQ.signature123"
+		cookieSecret  = "sealed-cookie-secret"
+		tokenSecret   = "sealed-token-secret"
+		headerSecret  = "sealed-structural-header"
+		harCookie     = "sealed-har-cookie"
+		machineSecret = "sealed-machine-secret"
 	)
 	consoleSource := filepath.Join(rawDir, "console.log")
 	consoleRaw := "Authorization: Bearer " + bearerSecret + "\nCookie: session=" + cookieSecret + "\nJWT " + jwtSecret + "\n"
@@ -697,12 +700,29 @@ func TestUIReportPublishesOnlySealedRedactedEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	jsonSource := filepath.Join(rawDir, "network.json")
-	jsonRaw := `{"Set-Cookie":"session=` + cookieSecret + `","nested":{"token":"` + tokenSecret + `"}}`
+	jsonRaw := `{
+		"Set-Cookie":"session=` + cookieSecret + `",
+		"nested":{"token":"` + tokenSecret + `"},
+		"log":{"entries":[{"request":{
+			"headers":[
+				{"name":"AUTHORIZATION","value":"Bearer ` + headerSecret + `"},
+				{"name":"X-Debug-ID","value":"diagnostic-123"}
+			],
+			"cookies":[{"name":"session","value":"` + harCookie + `"}]
+		}}]}
+	}`
 	if err := os.WriteFile(jsonSource, []byte(jsonRaw), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	input := uiReportFixture()
+	input["scenarios"] = []any{map[string]any{
+		"id": "scenario-login", "name": "Login", "status": "passed",
+		"machine_data": map[string]any{
+			"headers":    []any{map[string]any{"Name": "x-api-token", "Value": machineSecret}},
+			"diagnostic": map[string]any{"name": "duration", "value": "42ms"},
+		},
+	}}
 	input["artifacts"] = []any{
 		map[string]any{
 			"path": ".multica/artifacts/ui-test/task-sealed/raw/console.log", "type": "console",
@@ -741,10 +761,21 @@ func TestUIReportPublishesOnlySealedRedactedEvidence(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, secret := range []string{bearerSecret, jwtSecret, cookieSecret, tokenSecret} {
+		for _, secret := range []string{
+			bearerSecret, jwtSecret, cookieSecret, tokenSecret, headerSecret, harCookie, machineSecret,
+		} {
 			if strings.Contains(string(raw), secret) {
 				t.Errorf("%s contains secret %q", path, secret)
 			}
+		}
+	}
+	sealedNetwork, err := os.ReadFile(filepath.Join(runDir, uiTestPublishedDir, "raw", "network.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, diagnostic := range []string{"diagnostic-123", "X-Debug-ID"} {
+		if !strings.Contains(string(sealedNetwork), diagnostic) {
+			t.Errorf("sealed network evidence lost diagnostic %q: %s", diagnostic, sealedNetwork)
 		}
 	}
 	sourceAfter, err := os.ReadFile(consoleSource)
@@ -810,6 +841,35 @@ func TestUIReportRejectsHardlinkedSecretEvidenceWithoutReadingIt(t *testing.T) {
 	result := runUIReport(t, workDir, taskID, input)
 	if result.Status != StatusError || result.ErrorCode != CodeInvalidInput {
 		t.Fatalf("result = %+v, want error/INVALID_INPUT", result)
+	}
+}
+
+func TestUIReportRejectsCopiedStorageStateJSONUnderSafeName(t *testing.T) {
+	workDir := t.TempDir()
+	taskID := "task-storage-copy"
+	runDir := uiReportRunDir(workDir, taskID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(runDir, "safe-browser-data.json")
+	raw := `{
+		"cookies":[{"name":"session","value":"copied-storage-secret","domain":"localhost","path":"/"}],
+		"origins":[{"origin":"http://127.0.0.1:3000","localStorage":[{"name":"token","value":"copied-local-storage-secret"}]}]
+	}`
+	if err := os.WriteFile(source, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	input := uiReportFixture()
+	input["artifacts"] = []any{map[string]any{
+		"path": filepath.ToSlash(filepath.Join(DefaultArtifactDir, "ui-test", taskID, filepath.Base(source))),
+		"type": "json", "description": "Safe browser data",
+	}}
+	result := runUIReport(t, workDir, taskID, input)
+	if result.Status != StatusError || result.ErrorCode != CodeInvalidInput {
+		t.Fatalf("result = %+v, want copied storage state rejection", result)
+	}
+	if _, err := os.Stat(filepath.Join(runDir, uiTestPublishedDir)); !os.IsNotExist(err) {
+		t.Fatalf("storage state publication exists: %v", err)
 	}
 }
 

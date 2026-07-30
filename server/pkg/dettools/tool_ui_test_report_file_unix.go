@@ -3,6 +3,7 @@
 package dettools
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"syscall"
@@ -20,4 +21,12 @@ func uiTestEvidenceLinkCount(_ *os.File, info os.FileInfo) (uint64, error) {
 		return 0, fmt.Errorf("evidence file identity is unavailable")
 	}
 	return uint64(stat.Nlink), nil
+}
+
+func syncUITestDirectory(root *os.Root, name string) error {
+	directory, err := root.Open(name)
+	if err != nil {
+		return err
+	}
+	return errors.Join(directory.Sync(), directory.Close())
 }

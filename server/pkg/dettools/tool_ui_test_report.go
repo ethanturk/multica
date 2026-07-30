@@ -182,8 +182,6 @@ type uiReportPublishState struct {
 	backup    string
 	directory bool
 	hadPrior  bool
-	installed bool
-	backedUp  bool
 }
 
 var uiTestReportInputSchema = json.RawMessage(`{
@@ -308,6 +306,9 @@ func uiTestReportHandler(ctx context.Context, args json.RawMessage, env ToolEnv)
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return Errf(CodeTimeout, "capture UI test report evidence: %v", err)
 		}
+		if errors.Is(err, errUITestPublicationRecovery) {
+			return Errf(CodeInternal, "recover UI test report publication: %v", err)
+		}
 		return Errf(CodeInvalidInput, "invalid ui_test_report input: %v", err)
 	}
 	finish := func(result Result) Result {
@@ -375,7 +376,8 @@ func uiTestReportHandler(ctx context.Context, args json.RawMessage, env ToolEnv)
 	if total > uiTestMaxPublishedBytes {
 		return finish(Errf(CodeInvalidInput, "published UI test artifacts total %d bytes; maximum is %d", total, uiTestMaxPublishedBytes))
 	}
-	if err := publishUITestOutputs(runRoot, sealedEvidence, outputs); err != nil {
+	cleanupPending, err := publishUITestOutputsJournaled(ctx, runRoot, sealedEvidence, outputs)
+	if err != nil {
 		return finish(Errf(CodeInternal, "publish UI test report: %v", err))
 	}
 
@@ -386,15 +388,19 @@ func uiTestReportHandler(ctx context.Context, args json.RawMessage, env ToolEnv)
 			Path: filepath.ToSlash(filepath.Join(runRel, output.Name)),
 		})
 	}
+	machineData := map[string]any{
+		"execution_status": redacted.ExecutionStatus,
+		"verdict":          redacted.Verdict,
+		"counts":           redacted.Counts,
+	}
+	if cleanupPending {
+		machineData["publication_cleanup_pending"] = true
+	}
 	return finish(Result{
-		Status:  StatusOK,
-		Summary: fmt.Sprintf("UI test report: %s / %s", redacted.ExecutionStatus, redacted.Verdict),
-		MachineData: map[string]any{
-			"execution_status": redacted.ExecutionStatus,
-			"verdict":          redacted.Verdict,
-			"counts":           redacted.Counts,
-		},
-		Artifacts: artifacts,
+		Status:      StatusOK,
+		Summary:     fmt.Sprintf("UI test report: %s / %s", redacted.ExecutionStatus, redacted.Verdict),
+		MachineData: machineData,
+		Artifacts:   artifacts,
 	})
 }
 
@@ -463,6 +469,9 @@ func normalizeUITestReport(
 		releaseErr := lock.Release()
 		closeErr := runRoot.Close()
 		return uiTestReport{}, nil, nil, nil, errors.Join(cause, releaseErr, closeErr)
+	}
+	if err := recoverUITestPublication(ctx, runRoot); err != nil {
+		return fail(fmt.Errorf("%w: %v", errUITestPublicationRecovery, err))
 	}
 
 	sealed := make([]uiSealedEvidence, 0, len(input.Artifacts))
@@ -814,6 +823,9 @@ func redactUITestEvidenceContent(encoding uiTestEvidenceEncoding, content []byte
 		if err := decoder.Decode(&trailing); err != io.EOF {
 			return nil, fmt.Errorf("decode JSON evidence: trailing content")
 		}
+		if isUITestStorageStateValue(value) {
+			return nil, fmt.Errorf("JSON evidence matches browser storage-state structure")
+		}
 		return marshalIndented(redactUITestValue(value))
 	case uiTestEvidenceText:
 		if !utf8.Valid(content) {
@@ -1069,90 +1081,6 @@ func markdownCode(value string) string {
 	return strings.ReplaceAll(value, "`", "'")
 }
 
-func publishUITestOutputs(root *os.Root, evidence []uiSealedEvidence, outputs []uiReportOutput) error {
-	suffix, err := uiTestTempSuffix()
-	if err != nil {
-		return err
-	}
-	states := make([]uiReportPublishState, 0, len(outputs)+1)
-	states = append(states, uiReportPublishState{
-		name:      uiTestPublishedDir,
-		temp:      "." + uiTestPublishedDir + ".tmp-" + suffix,
-		backup:    "." + uiTestPublishedDir + ".bak-" + suffix,
-		directory: true,
-	})
-	for _, output := range outputs {
-		states = append(states, uiReportPublishState{
-			name:   output.Name,
-			temp:   "." + output.Name + ".tmp-" + suffix,
-			backup: "." + output.Name + ".bak-" + suffix,
-		})
-	}
-	for i := range states {
-		item := &states[i]
-		info, statErr := root.Lstat(item.name)
-		if statErr == nil {
-			if item.directory && !info.IsDir() {
-				return fmt.Errorf("existing output %s is not a directory", item.name)
-			}
-			if !item.directory && !info.Mode().IsRegular() {
-				return fmt.Errorf("existing output %s is not a regular file", item.name)
-			}
-			item.hadPrior = true
-			continue
-		}
-		if !errors.Is(statErr, os.ErrNotExist) {
-			return fmt.Errorf("inspect existing output %s: %w", item.name, statErr)
-		}
-	}
-	defer func() {
-		for _, item := range states {
-			_ = removeUITestPublicationPath(root, item.temp, item.directory)
-		}
-	}()
-
-	if err := stageUITestEvidence(root, states[0].temp, evidence); err != nil {
-		return err
-	}
-	for i, output := range outputs {
-		item := states[i+1]
-		if err := writeUITestStagedFile(root, item.temp, output.Content, 0o644); err != nil {
-			return fmt.Errorf("stage %s: %w", item.name, err)
-		}
-	}
-
-	for i := range states {
-		item := &states[i]
-		if !item.hadPrior {
-			continue
-		}
-		if err := root.Rename(item.name, item.backup); err != nil {
-			rollbackErr := rollbackUITestPublication(root, states)
-			return errors.Join(fmt.Errorf("backup %s: %w", item.name, err), rollbackErr)
-		}
-		item.backedUp = true
-	}
-	for i := range states {
-		item := &states[i]
-		if err := root.Rename(item.temp, item.name); err != nil {
-			rollbackErr := rollbackUITestPublication(root, states)
-			return errors.Join(fmt.Errorf("install %s: %w", item.name, err), rollbackErr)
-		}
-		item.installed = true
-	}
-	for i := range states {
-		item := &states[i]
-		if !item.backedUp {
-			continue
-		}
-		if err := removeUITestPublicationPath(root, item.backup, item.directory); err != nil {
-			return fmt.Errorf("remove backup for %s: %w", item.name, err)
-		}
-		item.backedUp = false
-	}
-	return nil
-}
-
 func stageUITestEvidence(root *os.Root, tempDir string, evidence []uiSealedEvidence) error {
 	if err := root.Mkdir(tempDir, 0o700); err != nil {
 		return fmt.Errorf("stage %s: %w", uiTestPublishedDir, err)
@@ -1193,33 +1121,6 @@ func writeUITestStagedFile(root *os.Root, name string, content []byte, mode os.F
 	}
 	closeErr := file.Close()
 	return errors.Join(writeErr, closeErr)
-}
-
-func rollbackUITestPublication(root *os.Root, states []uiReportPublishState) error {
-	var rollbackErrors []error
-	for i := len(states) - 1; i >= 0; i-- {
-		item := &states[i]
-		if !item.installed {
-			continue
-		}
-		if err := removeUITestPublicationPath(root, item.name, item.directory); err != nil {
-			rollbackErrors = append(rollbackErrors, fmt.Errorf("remove new %s: %w", item.name, err))
-			continue
-		}
-		item.installed = false
-	}
-	for i := len(states) - 1; i >= 0; i-- {
-		item := &states[i]
-		if !item.backedUp {
-			continue
-		}
-		if err := root.Rename(item.backup, item.name); err != nil {
-			rollbackErrors = append(rollbackErrors, fmt.Errorf("restore %s: %w", item.name, err))
-			continue
-		}
-		item.backedUp = false
-	}
-	return errors.Join(rollbackErrors...)
 }
 
 func removeUITestPublicationPath(root *os.Root, name string, directory bool) error {

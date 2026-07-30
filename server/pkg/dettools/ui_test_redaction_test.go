@@ -59,3 +59,57 @@ func TestUITestRedactionRecursivelyRemovesSecrets(t *testing.T) {
 		t.Errorf("network redaction = %q, want context %q", network, want)
 	}
 }
+
+func TestUITestRedactionUsesNameValueAndCollectionContext(t *testing.T) {
+	input := map[string]any{
+		"log": map[string]any{
+			"entries": []any{
+				map[string]any{
+					"request": map[string]any{
+						"headers": []any{
+							map[string]any{"name": "Authorization", "value": "Bearer structural-auth"},
+							map[string]any{"NAME": "set_cookie", "VALUE": "session=structural-set-cookie"},
+							map[string]any{"name": "X-API-Token", "value": "structural-api-token"},
+							map[string]any{"name": "X-Debug-ID", "value": "diagnostic-123"},
+						},
+						"cookies": []any{
+							map[string]any{"name": "session", "value": "structural-har-cookie"},
+						},
+						"queryString": []any{
+							map[string]any{"name": "refresh-token", "value": "structural-refresh-token"},
+							map[string]any{"name": "page", "value": "2"},
+						},
+					},
+				},
+			},
+		},
+		"machine_data": []any{
+			map[string]any{"Name": "PASSWORD", "Value": "structural-password"},
+			map[string]any{"name": "duration", "value": "42ms"},
+		},
+	}
+
+	redacted := redactUITestValue(input)
+	raw, err := json.Marshal(redacted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(raw)
+	for _, secret := range []string{
+		"structural-auth",
+		"structural-set-cookie",
+		"structural-api-token",
+		"structural-har-cookie",
+		"structural-refresh-token",
+		"structural-password",
+	} {
+		if strings.Contains(got, secret) {
+			t.Errorf("redacted output contains structural secret %q: %s", secret, got)
+		}
+	}
+	for _, diagnostic := range []string{"diagnostic-123", `"value":"2"`, `"value":"42ms"`} {
+		if !strings.Contains(got, diagnostic) {
+			t.Errorf("redacted output lost non-secret diagnostic %q: %s", diagnostic, got)
+		}
+	}
+}

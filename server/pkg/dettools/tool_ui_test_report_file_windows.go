@@ -19,3 +19,7 @@ func uiTestEvidenceLinkCount(file *os.File, _ os.FileInfo) (uint64, error) {
 	}
 	return uint64(info.NumberOfLinks), nil
 }
+
+func syncUITestDirectory(_ *os.Root, _ string) error {
+	return nil
+}
