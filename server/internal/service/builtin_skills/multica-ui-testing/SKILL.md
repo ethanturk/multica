@@ -65,6 +65,19 @@ tested flow. An application start, health, setup, authentication, or pre-use
 browser failure is infrastructure: set `execution_status` to
 `infrastructure_error` or `blocked`; the reporter derives `not_run`.
 
+## Execution outcomes
+
+Choose the execution outcome before evaluating objective-check status. For
+`infrastructure_error` and `blocked`, ignore earlier objective failures when
+selecting the verdict.
+
+| Case | Execution status | Objective failures | Verdict |
+| --- | --- | --- | --- |
+| completed_failed | completed | one_or_more | fail |
+| completed_passed | completed | none | pass |
+| infrastructure_error | infrastructure_error | ignored | not_run |
+| blocked | blocked | ignored | not_run |
+
 ## Safety and retries
 
 | Situation | Action | Condition |

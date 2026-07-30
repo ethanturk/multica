@@ -554,6 +554,7 @@ func TestBuiltinSkillsUITestContract(t *testing.T) {
 		"Modes",
 		"Workflow",
 		"Classification",
+		"Execution outcomes",
 		"Safety and retries",
 		"Publication",
 		"Source map",
@@ -660,6 +661,54 @@ func TestBuiltinSkillsUITestScenariosFollowStructuredPolicy(t *testing.T) {
 			"Local artifacts":   "retain",
 		},
 	})
+}
+
+func TestBuiltinSkillsUITestBlockedExecutionPrecedesObjectiveFailure(t *testing.T) {
+	skill, ok := findSkill(t, "multica-ui-testing")
+	if !ok {
+		return
+	}
+	_, body, _ := splitFrontmatter(skill.Content)
+
+	classifications := markdownTableByKey(t, body, "Classification", "Observation")
+	if got := classifications["assertion_failed"]; got["Channel"] != "objective" || got["Status"] != "failed" {
+		t.Fatalf("assertion failure policy = %v, want objective/failed", got)
+	}
+	safety := markdownTableByKey(t, body, "Safety and retries", "Situation")
+	if got := safety["external_navigation"]; got["Action"] != "prohibit" {
+		t.Fatalf("external navigation policy = %v, want prohibit", got)
+	}
+
+	outcomes := markdownTableByKey(t, body, "Execution outcomes", "Case")
+	requireTableCases(t, outcomes, map[string]map[string]string{
+		"completed_failed": {
+			"Execution status":   "completed",
+			"Objective failures": "one_or_more",
+			"Verdict":            "fail",
+		},
+		"completed_passed": {
+			"Execution status":   "completed",
+			"Objective failures": "none",
+			"Verdict":            "pass",
+		},
+		"infrastructure_error": {
+			"Execution status":   "infrastructure_error",
+			"Objective failures": "ignored",
+			"Verdict":            "not_run",
+		},
+		"blocked": {
+			"Execution status":   "blocked",
+			"Objective failures": "ignored",
+			"Verdict":            "not_run",
+		},
+	})
+
+	// Scenario: an assertion failed, then external navigation hit the policy
+	// boundary. The terminal blocked execution status overrides the earlier
+	// objective failure when selecting the report verdict.
+	if got := uiTestVerdictFromPolicy(t, outcomes, "blocked", true); got != "not_run" {
+		t.Errorf("blocked execution with prior objective failure = %q, want not_run", got)
+	}
 }
 
 func TestBuiltinSkillsUITestPublicationCommandShape(t *testing.T) {
@@ -972,6 +1021,44 @@ func requireTableCases(t *testing.T, rows, cases map[string]map[string]string) {
 			}
 		}
 	}
+}
+
+func uiTestVerdictFromPolicy(
+	t *testing.T,
+	outcomes map[string]map[string]string,
+	executionStatus string,
+	hasObjectiveFailure bool,
+) string {
+	t.Helper()
+	key := executionStatus
+	if executionStatus == "completed" {
+		if hasObjectiveFailure {
+			key = "completed_failed"
+		} else {
+			key = "completed_passed"
+		}
+	}
+	row, ok := outcomes[key]
+	if !ok {
+		t.Fatalf("execution outcome %q is missing", key)
+	}
+	if got := row["Execution status"]; got != executionStatus {
+		t.Fatalf("execution outcome %q status = %q, want %q", key, got, executionStatus)
+	}
+	switch objectiveRule := row["Objective failures"]; objectiveRule {
+	case "none":
+		if hasObjectiveFailure {
+			t.Fatalf("execution outcome %q requires no objective failures", key)
+		}
+	case "one_or_more":
+		if !hasObjectiveFailure {
+			t.Fatalf("execution outcome %q requires an objective failure", key)
+		}
+	case "ignored":
+	default:
+		t.Fatalf("execution outcome %q has unknown objective rule %q", key, objectiveRule)
+	}
+	return row["Verdict"]
 }
 
 func markdownFencedBlock(t *testing.T, section, language string) string {
