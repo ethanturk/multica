@@ -4,7 +4,6 @@ const INVALID_STATUS: UITestCapabilityStatus = {
   status: "broken",
   error: "Invalid UI testing status.",
 };
-const STATES = new Set(["unavailable", "installing", "ready", "broken"]);
 const STATUS_KEYS = new Set(["status", "version", "error"]);
 const MAX_ERROR_LENGTH = 160;
 
@@ -27,24 +26,38 @@ export function parseUITestCapabilityStatus(
   const candidate = value as Record<string, unknown>;
   if (
     Object.keys(candidate).some((key) => !STATUS_KEYS.has(key)) ||
-    typeof candidate.status !== "string" ||
-    !STATES.has(candidate.status) ||
-    (candidate.version !== undefined &&
-      typeof candidate.version !== "string") ||
-    (candidate.error !== undefined && typeof candidate.error !== "string")
+    typeof candidate.status !== "string"
   ) {
     return INVALID_STATUS;
   }
 
-  const version = candidate.version?.trim();
-  if (candidate.status === "ready" && !version) return INVALID_STATUS;
-  const error = candidate.error?.trim().slice(0, MAX_ERROR_LENGTH);
-
-  return {
-    status: candidate.status as UITestCapabilityStatus["status"],
-    ...(version ? { version } : {}),
-    ...(error ? { error } : {}),
-  };
+  switch (candidate.status) {
+    case "unavailable":
+    case "installing":
+      return candidate.version === undefined && candidate.error === undefined
+        ? { status: candidate.status }
+        : INVALID_STATUS;
+    case "ready": {
+      const version =
+        typeof candidate.version === "string"
+          ? candidate.version.trim()
+          : "";
+      return version && candidate.error === undefined
+        ? { status: "ready", version }
+        : INVALID_STATUS;
+    }
+    case "broken": {
+      const error =
+        typeof candidate.error === "string"
+          ? candidate.error.trim().slice(0, MAX_ERROR_LENGTH)
+          : "";
+      return error && candidate.version === undefined
+        ? { status: "broken", error }
+        : INVALID_STATUS;
+    }
+    default:
+      return INVALID_STATUS;
+  }
 }
 
 export function parseUITestCapabilityJSON(
@@ -87,11 +100,24 @@ export function createUITestCapabilityOperations(
 } {
   let installPromise: Promise<UITestCapabilityStatus> | null = null;
 
-  const status = async (): Promise<UITestCapabilityStatus> => {
+  const statusForProfile = async (
+    profile: string,
+  ): Promise<UITestCapabilityStatus> => {
     try {
       return parseUITestCapabilityJSON(
-        await run(buildUITestStatusArgs(await getProfile())),
+        await run(buildUITestStatusArgs(profile)),
       );
+    } catch {
+      return {
+        status: "broken",
+        error: "UI testing status check failed.",
+      };
+    }
+  };
+
+  const status = async (): Promise<UITestCapabilityStatus> => {
+    try {
+      return await statusForProfile(await getProfile());
     } catch {
       return {
         status: "broken",
@@ -104,8 +130,9 @@ export function createUITestCapabilityOperations(
     if (installPromise) return installPromise;
     installPromise = (async () => {
       try {
-        await run(buildUITestInstallArgs(await getProfile()));
-        return await status();
+        const profile = await getProfile();
+        await run(buildUITestInstallArgs(profile));
+        return await statusForProfile(profile);
       } catch {
         return {
           status: "broken",

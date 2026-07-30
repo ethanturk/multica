@@ -8,8 +8,10 @@ import {
   parseUITestCapabilityStatus,
 } from "./ui-test-status";
 import {
+  createUITestStatusObserver,
   getUITestCapabilityPresentation,
   getUITestCapabilityAction,
+  type UITestCapabilityStatus,
 } from "../shared/daemon-types";
 
 describe("parseUITestCapabilityStatus", () => {
@@ -37,6 +39,15 @@ describe("parseUITestCapabilityStatus", () => {
     { status: "ready", version: 78 },
     { status: "broken", error: false },
     { status: "ready", version: "0.0.78", extra: true },
+    { status: "unavailable", version: "0.0.78" },
+    { status: "unavailable", error: "unexpected" },
+    { status: "installing", version: "0.0.78" },
+    { status: "installing", error: "unexpected" },
+    { status: "ready", version: "" },
+    { status: "ready", version: "0.0.78", error: "unexpected" },
+    { status: "broken" },
+    { status: "broken", error: "" },
+    { status: "broken", error: "runtime missing", version: "0.0.78" },
   ])("fails closed on malformed status %#", (input) => {
     expect(parseUITestCapabilityStatus(input)).toEqual({
       status: "broken",
@@ -102,6 +113,65 @@ describe("UI test status presentation", () => {
     expect(
       getUITestCapabilityAction({ status: "installing" }, true),
     ).toEqual({ label: "Installing…", disabled: true });
+  });
+});
+
+describe("createUITestStatusObserver", () => {
+  it("refreshes once on profile change and ignores stale profile responses", async () => {
+    let resolveProfileA!: (status: {
+      status: "unavailable";
+    }) => void;
+    let resolveProfileB!: (status: {
+      status: "broken";
+      error: string;
+    }) => void;
+    const profileA = new Promise<{ status: "unavailable" }>((resolve) => {
+      resolveProfileA = resolve;
+    });
+    const profileB = new Promise<{
+      status: "broken";
+      error: string;
+    }>((resolve) => {
+      resolveProfileB = resolve;
+    });
+    const loadStatus = vi
+      .fn()
+      .mockReturnValueOnce(profileA)
+      .mockReturnValueOnce(profileB);
+    const published: Array<UITestCapabilityStatus | null> = [];
+    const observer = createUITestStatusObserver(loadStatus, (status) => {
+      published.push(status);
+    });
+
+    observer.observe({ profile: "profile-a" });
+    observer.observe({
+      profile: "profile-a",
+      uiTest: { status: "ready", version: "0.0.78" },
+    });
+    observer.observe({ profile: "profile-b" });
+    observer.observe({ profile: "profile-b" });
+
+    expect(loadStatus).toHaveBeenCalledTimes(2);
+    expect(published).toEqual([
+      null,
+      { status: "ready", version: "0.0.78" },
+      null,
+    ]);
+
+    resolveProfileA({ status: "unavailable" });
+    await profileA;
+    expect(published).toEqual([
+      null,
+      { status: "ready", version: "0.0.78" },
+      null,
+    ]);
+
+    resolveProfileB({ status: "broken", error: "profile B needs repair" });
+    await profileB;
+    expect(published.at(-1)).toEqual({
+      status: "broken",
+      error: "profile B needs repair",
+    });
   });
 });
 
@@ -186,5 +256,36 @@ describe("createUITestCapabilityOperations", () => {
       status: "broken",
       error: "UI testing installation failed.",
     });
+  });
+
+  it("uses one captured profile for install and its final status", async () => {
+    const profiles = ["profile-a", "profile-b"];
+    const run = vi.fn(async (args: readonly string[]) =>
+      args.includes("status")
+        ? '{"status":"ready","version":"0.0.78"}'
+        : "",
+    );
+    const operations = createUITestCapabilityOperations(
+      run,
+      () => profiles.shift() ?? "profile-b",
+    );
+
+    await expect(operations.install()).resolves.toEqual({
+      status: "ready",
+      version: "0.0.78",
+    });
+    expect(run.mock.calls).toEqual([
+      [["--profile", "profile-a", "ui-test", "install"]],
+      [
+        [
+          "--profile",
+          "profile-a",
+          "ui-test",
+          "status",
+          "--output",
+          "json",
+        ],
+      ],
+    ]);
   });
 });

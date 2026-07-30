@@ -1,4 +1,10 @@
-import { useState, useEffect, useCallback, type ReactNode } from "react";
+import {
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  type ReactNode,
+} from "react";
 import { AlertCircle, Info, LogIn } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
 import { Switch } from "@multica/ui/components/ui/switch";
@@ -19,6 +25,7 @@ import type {
 import {
   DAEMON_STATE_COLORS,
   DAEMON_STATE_LABELS,
+  createUITestStatusObserver,
   formatUptime,
   getUITestCapabilityAction,
   getUITestCapabilityPresentation,
@@ -58,17 +65,32 @@ export function DaemonSettingsTab() {
   const [status, setStatus] = useState<DaemonStatus>({ state: "stopped" });
   const [uiTest, setUITest] = useState<UITestCapabilityStatus | null>(null);
   const [reauthLoading, setReauthLoading] = useState(false);
+  const uiTestObserver = useMemo(
+    () =>
+      createUITestStatusObserver(
+        () => window.daemonAPI.getUITestStatus(),
+        setUITest,
+      ),
+    [],
+  );
 
   useEffect(() => {
     window.daemonAPI.getPrefs().then(setPrefs);
     window.daemonAPI.isCliInstalled().then(setCliInstalled);
-    window.daemonAPI.getStatus().then(setStatus);
-    window.daemonAPI.getUITestStatus().then(setUITest);
-    return window.daemonAPI.onStatusChange((nextStatus) => {
+    let cancelled = false;
+    const handleStatus = (nextStatus: DaemonStatus) => {
+      if (cancelled) return;
       setStatus(nextStatus);
-      if (nextStatus.uiTest) setUITest(nextStatus.uiTest);
-    });
-  }, []);
+      uiTestObserver.observe(nextStatus);
+    };
+    window.daemonAPI.getStatus().then(handleStatus);
+    const unsubscribe = window.daemonAPI.onStatusChange(handleStatus);
+    return () => {
+      cancelled = true;
+      unsubscribe();
+      uiTestObserver.dispose();
+    };
+  }, [uiTestObserver]);
 
   const handleReauth = useCallback(async () => {
     setReauthLoading(true);

@@ -134,6 +134,55 @@ export function getUITestCapabilityAction(
   }
 }
 
+export function createUITestStatusObserver(
+  loadStatus: () => Promise<UITestCapabilityStatus>,
+  publish: (status: UITestCapabilityStatus | null) => void,
+): {
+  observe(status: Pick<DaemonStatus, "profile" | "uiTest">): void;
+  dispose(): void;
+} {
+  let initialized = false;
+  let activeProfile = "";
+  let requestGeneration = 0;
+
+  return {
+    observe(status) {
+      const profile = status.profile ?? "";
+      const profileChanged = !initialized || profile !== activeProfile;
+      if (profileChanged) {
+        initialized = true;
+        activeProfile = profile;
+        requestGeneration++;
+        publish(null);
+      }
+
+      if (status.uiTest) {
+        requestGeneration++;
+        publish(status.uiTest);
+        return;
+      }
+      if (!profileChanged) return;
+
+      const request = ++requestGeneration;
+      loadStatus()
+        .then((capability) => {
+          if (request === requestGeneration) publish(capability);
+        })
+        .catch(() => {
+          if (request === requestGeneration) {
+            publish({
+              status: "broken",
+              error: "UI testing status check failed.",
+            });
+          }
+        });
+    },
+    dispose() {
+      requestGeneration++;
+    },
+  };
+}
+
 export function formatUptime(uptime?: string): string {
   if (!uptime) return "";
   const match = uptime.match(/(?:(\d+)h)?(\d+)m/);
