@@ -19,6 +19,7 @@ const DefaultArtifactDir = ".multica/artifacts"
 // OptionsFromEnv reads them here.
 type Options struct {
 	WorkDir      string
+	TaskID       string
 	AllowedTools []string
 	Timeout      time.Duration
 	AllowNetwork bool
@@ -60,9 +61,14 @@ func OptionsFromEnv() Options {
 	if artifactDir == "" {
 		artifactDir = DefaultArtifactDir
 	}
+	taskID := strings.TrimSpace(os.Getenv("MULTICA_TASK_ID"))
+	if taskID == "" {
+		taskID = "manual"
+	}
 
 	return Options{
 		WorkDir:      workDir,
+		TaskID:       taskID,
 		AllowedTools: allowed,
 		Timeout:      timeout,
 		AllowNetwork: boolEnv("MULTICA_DETTOOLS_ALLOW_NETWORK"),

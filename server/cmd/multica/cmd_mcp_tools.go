@@ -51,6 +51,7 @@ var mcpToolsServeCmd = &cobra.Command{
 
 		env := dettools.ToolEnv{
 			WorkDir:      opts.WorkDir,
+			TaskID:       opts.TaskID,
 			AllowNetwork: opts.AllowNetwork,
 			Timeout:      opts.Timeout,
 			ArtifactDir:  opts.ArtifactDir,

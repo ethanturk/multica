@@ -23,6 +23,19 @@ type detToolsStepFile struct {
 // server with the same name is left untouched (the merge stays additive).
 const dettoolsServerName = "multica-tools"
 
+func detToolsRuntimeGuidance() string {
+	return "\n\n## Deterministic Tools (MCP)\n\n" +
+		"The `multica-tools` MCP server provides typed, verifiable tools that must be used instead of shell commands for correctness-sensitive operations. Each tool returns an auditable Result with stable error codes.\n\n" +
+		"- **repo_facts** — current branch, changed files, package managers. USE over raw git commands.\n" +
+		"- **policy_check** — branch naming, forbidden paths, required files. USE instead of manual grep/git checks.\n" +
+		"- **build_probe** — toolchain detection with version. USE instead of raw `make`/`npm`/`cargo` probes.\n" +
+		"- **test_gate** — run test suites, normalize outcomes to pass/fail. USE instead of raw test runners.\n" +
+		"- **diff_summarize** — stable machine-readable diff. USE instead of `git diff`.\n" +
+		"- **artifact_emit** — write structured artifacts. USE instead of `echo > file`.\n" +
+		"- **ui_test_report** — validate UI-test evidence and publish deterministic report artifacts. USE for the final UI-test report instead of hand-written files.\n\n" +
+		"When a skill or workflow tells you to use one of these tools, call it through MCP. Do NOT replicate its behavior with shell commands — shell output lacks audit logging, policy enforcement, and typed results.\n"
+}
+
 // managedMCPExecOptionsProviders lists the providers that receive
 // daemon-managed MCP servers through ExecOptions.McpConfig. They all consume
 // the same Claude-style {"mcpServers":{name:{command,args,env}}} shape and
