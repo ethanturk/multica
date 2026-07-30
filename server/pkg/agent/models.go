@@ -162,7 +162,7 @@ func ListModels(ctx context.Context, providerType, executablePath string) (Catal
 			return discoverCopilotModels(ctx, executablePath)
 		})
 	case "dirge":
-		return []Model{}, nil
+		return Catalog{Models: []Model{}}, nil
 	case "hermes":
 		return cachedDiscovery(providerType, func() (Catalog, error) {
 			return discovered(discoverHermesModels(ctx, executablePath))
@@ -192,8 +192,8 @@ func ListModels(ctx context.Context, providerType, executablePath string) (Catal
 			return discovered(discoverPiModels(ctx, executablePath))
 		})
 	case "omp":
-		return cachedDiscovery(providerType, func() ([]Model, error) {
-			return discoverOmpModels(ctx, executablePath)
+		return cachedDiscovery(providerType, func() (Catalog, error) {
+			return discovered(discoverOmpModels(ctx, executablePath))
 		})
 	case "openclaw":
 		return cachedDiscovery(providerType, func() (Catalog, error) {

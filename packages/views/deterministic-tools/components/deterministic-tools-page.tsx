@@ -105,7 +105,7 @@ function StatusBadge({ status }: { status: string }) {
   return (
     <span
       className={
-        "inline-flex items-center rounded px-1.5 py-0.5 font-mono text-xs " +
+        "inline-flex items-center rounded px-1.5 py-0.5 font-mono text-caption " +
         (ok ? "bg-emerald-500/15 text-emerald-600" : "bg-destructive/15 text-destructive")
       }
     >
@@ -116,19 +116,19 @@ function StatusBadge({ status }: { status: string }) {
 
 function ResultPanel({ result }: { result: DeterministicToolResult | undefined }) {
   if (!result) {
-    return <p className="text-sm text-muted-foreground">{COPY.runHint}</p>;
+    return <p className="text-body text-muted-foreground">{COPY.runHint}</p>;
   }
   return (
-    <div className="flex flex-col gap-3 text-sm">
+    <div className="flex flex-col gap-3 text-body">
       <div className="flex items-center gap-2">
         <StatusBadge status={result.status} />
         {result.error_code ? (
-          <span className="font-mono text-xs text-muted-foreground">{result.error_code}</span>
+          <span className="font-mono text-caption text-muted-foreground">{result.error_code}</span>
         ) : null}
       </div>
       {result.summary ? <p className="text-foreground">{result.summary}</p> : null}
       {result.machine_data && Object.keys(result.machine_data).length > 0 ? (
-        <pre className="overflow-auto rounded-md bg-muted/50 p-3 font-mono text-xs text-muted-foreground">
+        <pre className="overflow-auto rounded-md bg-muted/50 p-3 font-mono text-caption text-muted-foreground">
           {JSON.stringify(result.machine_data, null, 2)}
         </pre>
       ) : null}
@@ -205,8 +205,8 @@ export function DeterministicToolsPage() {
       <PageHeader className="justify-between px-5">
         <div className="flex items-center gap-2">
           <Terminal className="h-4 w-4 text-muted-foreground" />
-          <h1 className="text-sm font-medium">{COPY.title}</h1>
-          <p className="ml-2 hidden text-xs text-muted-foreground md:block">{COPY.tagline}</p>
+          <h1 className="text-body font-medium">{COPY.title}</h1>
+          <p className="ml-2 hidden text-caption text-muted-foreground md:block">{COPY.tagline}</p>
         </div>
         <div className="flex items-center gap-2">
           <Button
@@ -247,7 +247,7 @@ export function DeterministicToolsPage() {
             {COPY.newTool}
           </Button>
           {tools.length === 0 ? (
-            <p className="px-2 py-1 text-xs text-muted-foreground">{COPY.empty}</p>
+            <p className="px-2 py-1 text-caption text-muted-foreground">{COPY.empty}</p>
           ) : (
             tools.map((t) => (
               <button
@@ -258,13 +258,13 @@ export function DeterministicToolsPage() {
                   test.reset();
                 }}
                 className={
-                  "flex items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent " +
+                  "flex items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-body hover:bg-accent " +
                   (draft.id === t.id ? "bg-accent" : "")
                 }
               >
-                <span className="truncate font-mono text-xs">{t.name}</span>
+                <span className="truncate font-mono text-caption">{t.name}</span>
                 {!t.enabled ? (
-                  <span className="shrink-0 text-[10px] text-muted-foreground">{COPY.disabledTag}</span>
+                  <span className="shrink-0 text-micro text-muted-foreground">{COPY.disabledTag}</span>
                 ) : null}
               </button>
             ))
@@ -275,16 +275,16 @@ export function DeterministicToolsPage() {
         <div className="flex min-h-0 flex-col gap-3 overflow-auto bg-background p-5">
           <div className="flex flex-wrap items-end gap-3">
             <div className="flex flex-1 flex-col gap-1.5">
-              <label className="text-xs font-medium text-muted-foreground">{COPY.nameLabel}</label>
+              <label className="text-caption font-medium text-muted-foreground">{COPY.nameLabel}</label>
               <Input
                 value={draft.name}
                 onChange={(e) => patch({ name: e.target.value })}
                 placeholder={COPY.namePlaceholder}
                 spellCheck={false}
-                className="font-mono text-xs"
+                className="font-mono text-caption"
               />
             </div>
-            <label className="flex items-center gap-2 pb-2 text-xs text-muted-foreground">
+            <label className="flex items-center gap-2 pb-2 text-caption text-muted-foreground">
               <Switch checked={draft.enabled} onCheckedChange={(v) => patch({ enabled: v })} />
               {COPY.enabledLabel}
             </label>
@@ -303,38 +303,38 @@ export function DeterministicToolsPage() {
             ) : null}
           </div>
           <div className="flex flex-col gap-1.5">
-            <label className="text-xs font-medium text-muted-foreground">{COPY.descriptionLabel}</label>
+            <label className="text-caption font-medium text-muted-foreground">{COPY.descriptionLabel}</label>
             <Input
               value={draft.description}
               onChange={(e) => patch({ description: e.target.value })}
               placeholder={COPY.descriptionPlaceholder}
-              className="text-xs"
+              className="text-caption"
             />
           </div>
           <div className="flex min-h-0 flex-1 flex-col gap-1.5">
-            <label className="text-xs font-medium text-muted-foreground">{COPY.codeLabel}</label>
+            <label className="text-caption font-medium text-muted-foreground">{COPY.codeLabel}</label>
             <Textarea
               value={draft.source}
               onChange={(e) => patch({ source: e.target.value })}
               spellCheck={false}
-              className="min-h-[16rem] flex-1 resize-none font-mono text-xs leading-relaxed"
+              className="min-h-[16rem] flex-1 resize-none font-mono text-caption leading-relaxed"
             />
           </div>
           <div className="flex flex-col gap-1.5">
-            <label className="text-xs font-medium text-muted-foreground">{COPY.inputLabel}</label>
+            <label className="text-caption font-medium text-muted-foreground">{COPY.inputLabel}</label>
             <Textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
               spellCheck={false}
-              className="min-h-[5rem] resize-none font-mono text-xs leading-relaxed"
+              className="min-h-[5rem] resize-none font-mono text-caption leading-relaxed"
             />
-            {inputError ? <p className="text-xs text-destructive">{inputError}</p> : null}
+            {inputError ? <p className="text-caption text-destructive">{inputError}</p> : null}
           </div>
         </div>
 
         {/* Result */}
         <div className="flex min-h-0 flex-col gap-2 overflow-auto bg-background p-5">
-          <span className="text-xs font-medium text-muted-foreground">{COPY.resultLabel}</span>
+          <span className="text-caption font-medium text-muted-foreground">{COPY.resultLabel}</span>
           <ResultPanel result={test.data} />
         </div>
       </div>

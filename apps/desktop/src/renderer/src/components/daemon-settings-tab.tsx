@@ -256,7 +256,7 @@ export function DaemonSettingsTab() {
         >
           <div className="flex items-center gap-3">
             {uiTestPresentation && (
-              <span className="inline-flex items-center gap-1.5 text-sm">
+              <span className="inline-flex items-center gap-1.5 text-body">
                 <span
                   className={cn(
                     "size-1.5 rounded-full",
