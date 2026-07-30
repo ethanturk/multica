@@ -50,12 +50,17 @@ class FakeChild extends EventEmitter {
     );
   }
 
-  fail(request, code = -32000, message = "upstream failed") {
+  fail(
+    request,
+    code = -32000,
+    message = "upstream failed",
+    data = { class: "browser" },
+  ) {
     this.stdout.write(
       `${JSON.stringify({
         jsonrpc: "2.0",
         id: request.id,
-        error: { code, message },
+        error: { code, message, data },
       })}\n`,
     );
   }
@@ -92,7 +97,9 @@ function successHandler(request, child) {
       request.params.name === "browser_navigate" &&
       request.params.arguments.url === "https://example.com"
     ) {
-      child.fail(request, -32602, "external target rejected");
+      child.fail(request, -32602, "external target rejected", {
+        class: "policy",
+      });
       return;
     }
     child.respond(request, {
@@ -106,10 +113,12 @@ function smokeOptions(overrides = {}) {
   const children = [];
   const spawns = [];
   const stats = [];
+  const removals = [];
   return {
     children,
     spawns,
     stats,
+    removals,
     options: {
       cwd: "/repo",
       env: {
@@ -124,6 +133,9 @@ function smokeOptions(overrides = {}) {
           url: "http://127.0.0.1:3000",
           health: "/login",
         }),
+      removeFile: async (path, options) => {
+        removals.push({ path, options });
+      },
       statFile: async (path) => {
         stats.push(path);
         return { isFile: () => true, size: 123 };
@@ -188,6 +200,9 @@ test("runs bounded MCP workflow in order and closes cleanly", async () => {
     filename: "smoke-screenshot.png",
   });
   assert.deepEqual(fixture.stats, [result.artifactPath]);
+  assert.deepEqual(fixture.removals, [
+    { path: result.artifactPath, options: { force: true } },
+  ]);
   assert.equal(fixture.children[0].stdinEnded, true);
   assert.deepEqual(fixture.children[0].kills, []);
 });
@@ -276,6 +291,93 @@ test("requires external navigation to be rejected", async () => {
     /external navigation was not rejected/,
   );
   assert.equal(fixture.children[0].stdinEnded, true);
+});
+
+test("does not mistake external request failures for policy rejection", async (t) => {
+  const scenarios = [
+    {
+      name: "timeout",
+      handleExternal() {},
+      pattern: /external navigation was not rejected/,
+    },
+    {
+      name: "browser-class invalid params",
+      handleExternal(request, child) {
+        child.fail(request, -32602, "browser rejected request", {
+          class: "browser",
+        });
+      },
+      pattern: /external navigation was not rejected/,
+    },
+    {
+      name: "policy-class generic upstream error",
+      handleExternal(request, child) {
+        child.fail(request, -32000, "generic upstream error", {
+          class: "policy",
+        });
+      },
+      pattern: /external navigation was not rejected/,
+    },
+    {
+      name: "malformed response",
+      handleExternal(_request, child) {
+        child.stdout.write("not-json\n");
+      },
+      pattern: /UI-test MCP returned malformed JSON/,
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const fixture = smokeOptions({
+        spawnProcess: () => {
+          const child = new FakeChild((request, current) => {
+            if (
+              request.method === "tools/call" &&
+              request.params.name === "browser_navigate" &&
+              request.params.arguments.url === "https://example.com"
+            ) {
+              scenario.handleExternal(request, current);
+            } else {
+              successHandler(request, current);
+            }
+          });
+          fixture.children.push(child);
+          return child;
+        },
+        requestTimeoutMs: 20,
+      });
+
+      await assert.rejects(runUiTestSmoke(fixture.options), scenario.pattern);
+      assert.equal(fixture.children[0].stdinEnded, true);
+    });
+  }
+});
+
+test("does not accept a stale screenshot from an earlier run", async () => {
+  let screenshotExists = true;
+  const removals = [];
+  const fixture = smokeOptions({
+    removeFile: async (path, options) => {
+      removals.push({ path, options });
+      screenshotExists = false;
+    },
+    statFile: async () => {
+      if (!screenshotExists) throw new Error("missing");
+      return { isFile: () => true, size: 123 };
+    },
+  });
+
+  await assert.rejects(
+    runUiTestSmoke(fixture.options),
+    /UI-test screenshot was not created/,
+  );
+  assert.deepEqual(removals, [
+    {
+      path: "/repo/.multica/artifacts/ui-test/task-10/smoke-screenshot.png",
+      options: { force: true },
+    },
+  ]);
 });
 
 test("does not expose screenshot filesystem diagnostics", async () => {

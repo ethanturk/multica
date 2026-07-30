@@ -24,6 +24,7 @@ The end-to-end MCP smoke is explicit and never installs:
 
 ```bash
 cd server
+mkdir -p ../.multica/bin
 go build -o ../.multica/bin/multica ./cmd/multica
 cd ..
 MULTICA_UI_TEST_BIN="$PWD/.multica/bin/multica" \

@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, rm, stat } from "node:fs/promises";
 import { isIP } from "node:net";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -80,6 +80,17 @@ function withTimeout(promise, timeoutMs, message) {
   ]).finally(() => clearTimeout(timer));
 }
 
+class MCPRequestError extends Error {
+  constructor(method, rpcError) {
+    const rpcCode = Number.isInteger(rpcError?.code) ? rpcError.code : -32000;
+    super(`MCP request failed: ${method} (${rpcCode})`);
+    this.name = "MCPRequestError";
+    this.rpcCode = rpcCode;
+    this.rpcClass =
+      typeof rpcError?.data?.class === "string" ? rpcError.data.class : "";
+  }
+}
+
 class MCPClient {
   constructor(child, requestTimeoutMs) {
     this.child = child;
@@ -140,12 +151,7 @@ class MCPClient {
       this.pending.delete(message.id);
       clearTimeout(pending.timer);
       if (message.error) {
-        const code = Number.isInteger(message.error.code)
-          ? message.error.code
-          : -32000;
-        pending.reject(
-          new Error(`MCP request failed: ${pending.method} (${code})`),
-        );
+        pending.reject(new MCPRequestError(pending.method, message.error));
       } else if (!Object.hasOwn(message, "result")) {
         pending.reject(new Error("UI-test MCP response is missing a result"));
       } else {
@@ -249,6 +255,7 @@ export async function runUiTestSmoke({
   env = process.env,
   spawnProcess = spawn,
   readFile: readManifest = readFile,
+  removeFile = rm,
   statFile = stat,
   requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   exitTimeoutMs = DEFAULT_EXIT_TIMEOUT_MS,
@@ -328,6 +335,11 @@ export async function runUiTestSmoke({
     await callTool(client, "browser_navigate", { url: target });
     await callTool(client, "browser_snapshot", {});
     await callTool(client, "browser_accessibility_scan", {});
+    try {
+      await removeFile(artifactPath, { force: true });
+    } catch {
+      throw new Error("UI-test stale screenshot could not be removed");
+    }
     await callTool(client, "browser_take_screenshot", {
       type: "png",
       filename: "smoke-screenshot.png",
@@ -344,13 +356,15 @@ export async function runUiTestSmoke({
 
     let externalRejected = false;
     try {
-      const external = await client.request("tools/call", {
+      await client.request("tools/call", {
         name: "browser_navigate",
         arguments: { url: "https://example.com" },
       });
-      externalRejected = external?.isError === true;
-    } catch {
-      externalRejected = true;
+    } catch (error) {
+      externalRejected =
+        error instanceof MCPRequestError &&
+        error.rpcCode === -32602 &&
+        error.rpcClass === "policy";
     }
     if (!externalRejected) {
       throw new Error("external navigation was not rejected");
