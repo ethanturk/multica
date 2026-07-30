@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -304,6 +305,28 @@ func TestStartUpstreamRunsMCPInTaskArtifactDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	configData, err := os.ReadFile(filepath.Join(taskStateDir(workDir, "artifact-cwd"), "playwright-mcp.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var launchConfig struct {
+		Browser struct {
+			LaunchOptions struct {
+				Proxy struct {
+					Server string `json:"server"`
+				} `json:"proxy"`
+			} `json:"launchOptions"`
+		} `json:"browser"`
+	}
+	if err := json.Unmarshal(configData, &launchConfig); err != nil {
+		t.Fatal(err)
+	}
+	proxyAddress := strings.TrimPrefix(launchConfig.Browser.LaunchOptions.Proxy.Server, "http://")
+	proxyConnection, err := net.Dial("tcp", proxyAddress)
+	if err != nil {
+		t.Fatalf("launch proxy unavailable while upstream runs: %v", err)
+	}
+	_ = proxyConnection.Close()
 	t.Cleanup(func() {
 		if err := upstream.Close(); err != nil {
 			t.Errorf("close upstream: %v", err)
@@ -329,6 +352,55 @@ func TestStartUpstreamRunsMCPInTaskArtifactDirectory(t *testing.T) {
 	if got := strings.TrimSpace(string(actual)); got != want {
 		t.Fatalf("Playwright MCP cwd = %q, want task artifact directory %q", got, want)
 	}
+	if err := upstream.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if connection, err := net.DialTimeout("tcp", proxyAddress, 50*time.Millisecond); err == nil {
+		_ = connection.Close()
+		t.Fatal("launch proxy remained reachable after upstream close")
+	}
+}
+
+func TestStartUpstreamClosesNetworkProxyWhenPreparationFails(t *testing.T) {
+	fixture := newRuntimeFixture(t)
+	workDir := t.TempDir()
+	config, err := loadManifest([]byte(`{
+		"start":"unused",
+		"url":"http://127.0.0.1:1",
+		"health":"/"
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := NewSession(SessionOptions{
+		WorkDir: workDir,
+		TaskID:  "proxy-start-error",
+		Runtime: fixture.runtime,
+		Config:  config,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	networkProxy, err := startLoopbackForwardProxy(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyAddress := strings.TrimPrefix(networkProxy.URL(), "http://")
+	_, _, err = startUpstreamWithNetworkProxy(
+		session,
+		ReadyRuntime{Directory: t.TempDir()},
+		fixture.trustedRoot,
+		nil,
+		networkProxy,
+	)
+	if err == nil {
+		t.Fatal("startUpstreamWithNetworkProxy succeeded with untrusted runtime")
+	}
+	if connection, dialErr := net.DialTimeout("tcp", proxyAddress, 50*time.Millisecond); dialErr == nil {
+		_ = connection.Close()
+		t.Fatal("launch proxy remained reachable after upstream preparation failure")
+	}
 }
 
 func TestUpstreamConfigUsesCanonicalManagedPathsAndFixedPolicy(t *testing.T) {
@@ -343,6 +415,7 @@ func TestUpstreamConfigUsesCanonicalManagedPathsAndFixedPolicy(t *testing.T) {
 		stateDir,
 		artifactDir,
 		Viewport{Width: 1440, Height: 900},
+		"http://127.0.0.1:43210",
 	)
 	if err != nil {
 		t.Fatalf("prepareUpstreamFiles() error = %v", err)
@@ -362,6 +435,9 @@ func TestUpstreamConfigUsesCanonicalManagedPathsAndFixedPolicy(t *testing.T) {
 			Isolated      bool   `json:"isolated"`
 			LaunchOptions struct {
 				Headless bool `json:"headless"`
+				Proxy    struct {
+					Server string `json:"server"`
+				} `json:"proxy"`
 			} `json:"launchOptions"`
 			ContextOptions struct {
 				Viewport Viewport `json:"viewport"`
@@ -379,6 +455,7 @@ func TestUpstreamConfigUsesCanonicalManagedPathsAndFixedPolicy(t *testing.T) {
 	}
 	if config.Browser.BrowserName != "chromium" || !config.Browser.Isolated ||
 		!config.Browser.LaunchOptions.Headless ||
+		config.Browser.LaunchOptions.Proxy.Server != "http://127.0.0.1:43210" ||
 		config.Browser.ContextOptions.Viewport != (Viewport{Width: 1440, Height: 900}) {
 		t.Fatalf("browser config = %#v", config.Browser)
 	}
@@ -411,6 +488,7 @@ func TestUpstreamConfigRejectsTaskPathSymlinkEscape(t *testing.T) {
 		stateDir,
 		taskArtifactDir(workDir, "task-escape"),
 		Viewport{Width: 1440, Height: 900},
+		"http://127.0.0.1:43210",
 	)
 	if err == nil || !strings.Contains(err.Error(), "escapes UI test workdir") {
 		t.Fatalf("prepareUpstreamFiles() error = %v, want symlink escape rejection", err)

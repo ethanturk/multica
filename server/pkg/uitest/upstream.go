@@ -40,10 +40,11 @@ type upstreamWireMessage struct {
 }
 
 type Upstream struct {
-	reader io.ReadCloser
-	writer io.WriteCloser
-	stop   func() error
-	logger *slog.Logger
+	reader       io.ReadCloser
+	writer       io.WriteCloser
+	stop         func() error
+	logger       *slog.Logger
+	networkProxy *loopbackForwardProxy
 
 	writeMu sync.Mutex
 	mu      sync.Mutex
@@ -139,7 +140,10 @@ func (u *Upstream) terminalError() error {
 func (u *Upstream) Close() error {
 	var closeErr error
 	u.closeOnce.Do(func() {
-		closeErr = errors.Join(u.writer.Close(), u.reader.Close())
+		if u.networkProxy != nil {
+			closeErr = u.networkProxy.Close()
+		}
+		closeErr = errors.Join(closeErr, u.writer.Close(), u.reader.Close())
 		if u.stop != nil {
 			closeErr = errors.Join(closeErr, u.stop())
 		}
@@ -316,6 +320,9 @@ type upstreamConfig struct {
 		Isolated      bool   `json:"isolated"`
 		LaunchOptions struct {
 			Headless bool `json:"headless"`
+			Proxy    struct {
+				Server string `json:"server"`
+			} `json:"proxy"`
 		} `json:"launchOptions"`
 		ContextOptions struct {
 			Viewport Viewport `json:"viewport"`
@@ -505,6 +512,7 @@ func prepareUpstreamFiles(
 	trustedRoot string,
 	workDir, stateDir, artifactDir string,
 	viewport Viewport,
+	proxyServer string,
 ) (upstreamPaths, error) {
 	files, err := resolveRuntimeFiles(runtime, trustedRoot)
 	if err != nil {
@@ -551,6 +559,10 @@ func prepareUpstreamFiles(
 	config.Browser.BrowserName = "chromium"
 	config.Browser.Isolated = true
 	config.Browser.LaunchOptions.Headless = true
+	if err := validateLoopbackProxyServer(proxyServer); err != nil {
+		return upstreamPaths{}, fmt.Errorf("UI test network proxy: %w", err)
+	}
+	config.Browser.LaunchOptions.Proxy.Server = proxyServer
 	config.Browser.ContextOptions.Viewport = viewport
 	config.OutputDir = artifactDir
 	config.OutputMaxSize = 10 * 1024 * 1024
@@ -562,6 +574,8 @@ func prepareUpstreamFiles(
 		"http://[::1]:*",
 		"https://[::1]:*",
 	}
+	// Playwright documents allowedOrigins as advisory. Launch proxy enforcement is
+	// the network boundary; these patterns remain useful defense in depth.
 	config.AllowUnrestrictedFileAccess = false
 	data, err := json.Marshal(config)
 	if err != nil {
@@ -589,6 +603,35 @@ func startUpstream(
 	trustedRoot string,
 	logger *slog.Logger,
 ) (*Upstream, runtimeFiles, error) {
+	networkProxy, err := startLoopbackForwardProxy(nil)
+	if err != nil {
+		return nil, runtimeFiles{}, err
+	}
+	return startUpstreamWithNetworkProxy(
+		session,
+		runtime,
+		trustedRoot,
+		logger,
+		networkProxy,
+	)
+}
+
+func startUpstreamWithNetworkProxy(
+	session *Session,
+	runtime ReadyRuntime,
+	trustedRoot string,
+	logger *slog.Logger,
+	networkProxy *loopbackForwardProxy,
+) (*Upstream, runtimeFiles, error) {
+	if networkProxy == nil {
+		return nil, runtimeFiles{}, fmt.Errorf("UI test network proxy is required")
+	}
+	keepNetworkProxy := true
+	defer func() {
+		if keepNetworkProxy {
+			_ = networkProxy.Close()
+		}
+	}()
 	paths, err := prepareUpstreamFiles(
 		runtime,
 		trustedRoot,
@@ -596,6 +639,7 @@ func startUpstream(
 		taskStateDir(session.opts.WorkDir, session.opts.TaskID),
 		session.opts.ArtifactDir,
 		session.opts.Config.Viewport,
+		networkProxy.URL(),
 	)
 	if err != nil {
 		return nil, runtimeFiles{}, err
@@ -642,6 +686,8 @@ func startUpstream(
 	}
 	upstream := newUpstream(stdout, stdin, process.stop)
 	upstream.logger = logger
+	upstream.networkProxy = networkProxy
+	keepNetworkProxy = false
 	return upstream, paths.runtimeFiles, nil
 }
 

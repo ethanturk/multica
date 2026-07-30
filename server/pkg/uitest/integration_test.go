@@ -36,9 +36,13 @@ document.getElementById('popup-attempted').textContent = 'external popup attempt
 window.open('https://example.com', '_blank');
 ">Open external popup</button>
 <p id="popup-attempted">popup not attempted</p>
+<p id="external-request">external request pending</p>
 <script>
 console.error("fixture console error");
 fetch("/missing");
+fetch("https://example.com/multica-ui-test-external-probe")
+  .then(() => document.getElementById("external-request").textContent = "external request escaped")
+  .catch(() => document.getElementById("external-request").textContent = "external request blocked");
 </script>`)
 	})
 	mux.HandleFunc("/missing", func(writer http.ResponseWriter, _ *http.Request) {
@@ -194,20 +198,27 @@ func TestUITestIntegrationRealBrowserPolicy(t *testing.T) {
 	if external.Error == nil || external.Error.Data.Class != ErrorPolicy {
 		t.Fatalf("external direct navigation was not blocked locally: %#v", external)
 	}
-	redirect := integrationToolCall(proxy, 7, "browser_navigate", map[string]any{"url": baseURL.String() + "/redirect"})
-	assertIntegrationNetworkPolicyBlock(t, redirect, "example.com")
-	tabs := integrationToolCall(proxy, 8, "browser_tabs", map[string]any{"action": "list"})
+	tabs := integrationToolCall(proxy, 7, "browser_tabs", map[string]any{"action": "list"})
 	assertIntegrationToolOK(t, tabs)
 	if strings.Contains(string(tabs.Result), "https://example.com") {
-		t.Fatalf("external popup escaped allowedOrigins: %s", tabs.Result)
+		t.Fatalf("external popup escaped browser network boundary: %s", tabs.Result)
 	}
 	if !strings.Contains(string(tabs.Result), address) {
 		t.Fatalf("local fixture tab missing after blocked popup: %s", tabs.Result)
 	}
+	assertIntegrationToolOK(t, integrationToolCall(proxy, 8, "browser_tabs", map[string]any{
+		"action": "select",
+		"index":  0,
+	}))
 	snapshot := integrationToolCall(proxy, 9, "browser_snapshot", map[string]any{})
 	assertIntegrationToolOK(t, snapshot)
 	if !strings.Contains(integrationResultText(t, snapshot.Result), "external popup attempted") {
 		t.Fatalf("fixture did not prove popup attempt before tab policy assertion: %s", snapshot.Result)
+	}
+	snapshotText := integrationResultText(t, snapshot.Result)
+	if !strings.Contains(snapshotText, "external request blocked") ||
+		strings.Contains(snapshotText, "external request escaped") {
+		t.Fatalf("external request was not proven blocked: %s", snapshot.Result)
 	}
 	network := integrationToolCall(proxy, 10, "browser_network_requests", map[string]any{"includeStatic": false})
 	assertIntegrationToolOK(t, network)
@@ -225,6 +236,8 @@ func TestUITestIntegrationRealBrowserPolicy(t *testing.T) {
 	if !strings.Contains(string(scan.Result), "button-name") {
 		t.Fatalf("critical Axe fixture missing from scan: %s", scan.Result)
 	}
+	redirect := integrationToolCall(proxy, 13, "browser_navigate", map[string]any{"url": baseURL.String() + "/redirect"})
+	assertIntegrationNetworkPolicyBlock(t, redirect, "example.com")
 }
 
 type integrationToolContent struct {
@@ -823,9 +836,12 @@ func assertIntegrationNetworkPolicyBlock(t *testing.T, response rpcResponse, des
 	hasPolicyReason := strings.Contains(evidence, "blocked") ||
 		strings.Contains(evidence, "not allowed") ||
 		strings.Contains(evidence, "allowed origin") ||
-		strings.Contains(evidence, "origin policy")
-	if !strings.Contains(evidence, strings.ToLower(destination)) || !hasPolicyReason {
-		t.Fatalf("navigation lacked destination-specific network policy rejection evidence: %s", data)
+		strings.Contains(evidence, "origin policy") ||
+		strings.Contains(evidence, "err_tunnel_connection_failed")
+	hasDestinationEvidence := strings.Contains(evidence, strings.ToLower(destination)) ||
+		strings.Contains(evidence, "err_tunnel_connection_failed")
+	if !hasDestinationEvidence || !hasPolicyReason {
+		t.Fatalf("navigation lacked network policy rejection evidence: %s", data)
 	}
 }
 
