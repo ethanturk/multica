@@ -408,6 +408,40 @@ func TestUIReportRecoveryRejectsHighCountCaseVariantJournalKeysWithoutMutation(t
 	assertUITransactionRecoveryRejectedWithoutMutation(t, workDir, taskID, runDir)
 }
 
+func TestUIReportRecoveryDiagnosticsAreStableForManyUnknownKeys(t *testing.T) {
+	workDir := t.TempDir()
+	taskID := "task-stable-recovery-diagnostic"
+	if result := runUIReport(t, workDir, taskID, uiTransactionModelInput(t, workDir, taskID, "old")); result.Status != StatusOK {
+		t.Fatalf("old publication = %+v", result)
+	}
+	interruptUITransaction(t, workDir, taskID, "after journal", false)
+	runDir := uiReportRunDir(workDir, taskID)
+	journalPath := filepath.Join(runDir, uiTestPublicationJournalName)
+	raw, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, alias := range uiTransactionCaseVariants("had_prior", 128) {
+		raw = addUITransactionJSONAlias(t, raw, "had_prior", alias, true)
+	}
+	if err := os.WriteFile(journalPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantState := snapshotUITransactionTree(t, runDir)
+	var wantResult Result
+	for iteration := 0; iteration < 100; iteration++ {
+		result := runUIReport(t, workDir, taskID, missingUITransactionEvidenceInput(taskID))
+		if iteration == 0 {
+			wantResult = result
+		} else if !reflect.DeepEqual(result, wantResult) {
+			t.Fatalf("iteration %d result = %#v, want %#v", iteration, result, wantResult)
+		}
+		if state := snapshotUITransactionTree(t, runDir); !reflect.DeepEqual(state, wantState) {
+			t.Fatalf("iteration %d changed malformed transaction state", iteration)
+		}
+	}
+}
+
 func TestUIReportRecoveryRejectsCaseVariantMarkerKeysWithoutMutation(t *testing.T) {
 	tests := []struct {
 		name      string

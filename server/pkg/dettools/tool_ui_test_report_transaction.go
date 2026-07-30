@@ -1064,10 +1064,15 @@ func decodeCanonicalUITestPublicationObject(
 			return nil, fmt.Errorf("publication state lacks canonical key %q", key)
 		}
 	}
+	unknown := make([]string, 0, len(object))
 	for key := range object {
 		if _, exists := allowed[key]; !exists {
-			return nil, fmt.Errorf("publication state contains noncanonical key %q", key)
+			unknown = append(unknown, key)
 		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		return nil, fmt.Errorf("publication state contains noncanonical key %q", unknown[0])
 	}
 	return object, nil
 }
