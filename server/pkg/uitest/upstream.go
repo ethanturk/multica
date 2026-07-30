@@ -341,6 +341,29 @@ func resolveRuntimeFiles(runtime ReadyRuntime, trustedRoot string) (runtimeFiles
 	if err != nil {
 		return runtimeFiles{}, err
 	}
+	return verifyRuntimeDirectory(canonical)
+}
+
+func verifyRuntimeDirectory(runtimeDirectory string) (runtimeFiles, error) {
+	if runtimeDirectory == "" {
+		return runtimeFiles{}, fmt.Errorf("runtime directory is required")
+	}
+	absolute, err := filepath.Abs(runtimeDirectory)
+	if err != nil {
+		return runtimeFiles{}, fmt.Errorf("resolve runtime directory: %w", err)
+	}
+	absolute = filepath.Clean(absolute)
+	info, err := os.Lstat(absolute)
+	if err != nil {
+		return runtimeFiles{}, fmt.Errorf("inspect runtime directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return runtimeFiles{}, fmt.Errorf("managed runtime directory must be a directory, not a symlink")
+	}
+	canonical, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return runtimeFiles{}, fmt.Errorf("resolve runtime directory: %w", err)
+	}
 	ready, err := openRegularManagedFile(filepath.Join(canonical, "ready.json"))
 	if err != nil {
 		return runtimeFiles{}, fmt.Errorf("open regular ready manifest: %w", err)
@@ -391,9 +414,14 @@ func resolveRuntimeFiles(runtime ReadyRuntime, trustedRoot string) (runtimeFiles
 	if err != nil {
 		return runtimeFiles{}, fmt.Errorf("Axe path: %w", err)
 	}
+	playwright, err := managedPath(canonical, manifest.PlaywrightPath)
+	if err != nil {
+		return runtimeFiles{}, fmt.Errorf("Playwright CLI path: %w", err)
+	}
 	for label, path := range map[string]string{
 		"Playwright MCP CLI": cli,
 		"Axe":                axe,
+		"Playwright CLI":     playwright,
 	} {
 		file, err := openRegularManagedFile(path)
 		if err != nil {

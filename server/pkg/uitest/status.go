@@ -83,46 +83,14 @@ func (m *Manager) Status() CapabilityStatus {
 }
 
 func inspectRuntime(runtimeDir string) CapabilityStatus {
-	data, err := os.ReadFile(filepath.Join(runtimeDir, "ready.json"))
-	if err != nil {
+	if _, err := os.Stat(runtimeDir); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			if _, statErr := os.Stat(runtimeDir); errors.Is(statErr, os.ErrNotExist) {
-				return CapabilityStatus{Status: StatusUnavailable}
-			}
+			return CapabilityStatus{Status: StatusUnavailable}
 		}
-		return brokenStatus(fmt.Errorf("read ready manifest: %w", err))
+		return brokenStatus(fmt.Errorf("inspect runtime directory: %w", err))
 	}
-
-	var manifest readyManifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return brokenStatus(fmt.Errorf("decode ready manifest: %w", err))
-	}
-	if manifest.MCPVersion != PlaywrightMCPVersion {
-		return brokenStatus(fmt.Errorf("Playwright MCP version is %q, want %q", manifest.MCPVersion, PlaywrightMCPVersion))
-	}
-	if manifest.AxeVersion != AxeCoreVersion {
-		return brokenStatus(fmt.Errorf("Axe version is %q, want %q", manifest.AxeVersion, AxeCoreVersion))
-	}
-	if manifest.Browser != "chromium" {
-		return brokenStatus(fmt.Errorf("browser is %q, want chromium", manifest.Browser))
-	}
-	for label, path := range map[string]string{
-		"Playwright MCP CLI": manifest.MCPCLIPath,
-		"Axe":                manifest.AxePath,
-		"Playwright CLI":     manifest.PlaywrightPath,
-		"Chromium":           manifest.BrowserPath,
-	} {
-		fullPath, err := managedPath(runtimeDir, path)
-		if err != nil {
-			return brokenStatus(fmt.Errorf("%s path: %w", label, err))
-		}
-		info, err := os.Stat(fullPath)
-		if err != nil {
-			return brokenStatus(fmt.Errorf("%s is missing: %w", label, err))
-		}
-		if !info.Mode().IsRegular() {
-			return brokenStatus(fmt.Errorf("%s is not a file", label))
-		}
+	if _, err := verifyRuntimeDirectory(runtimeDir); err != nil {
+		return brokenStatus(err)
 	}
 	return CapabilityStatus{Status: StatusReady, Version: PlaywrightMCPVersion}
 }

@@ -135,10 +135,7 @@ func (m *Manager) Install(ctx context.Context) (CapabilityStatus, error) {
 		return CapabilityStatus{}, fmt.Errorf("resolve Chromium executable: path is outside managed runtime")
 	}
 
-	manifest, err := verifyInstalledRuntime(temp, browserRelative, m.now())
-	if err != nil {
-		return CapabilityStatus{}, err
-	}
+	manifest := readyManifestForInstall(browserRelative, m.now())
 	manifestData, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return CapabilityStatus{}, fmt.Errorf("encode ready manifest: %w", err)
@@ -373,27 +370,8 @@ func commandFailure(result CommandResult, err error) error {
 	return fmt.Errorf("%w: %s", err, bounded(detail))
 }
 
-func verifyInstalledRuntime(temp, browserRelative string, installedAt time.Time) (readyManifest, error) {
-	for path, want := range map[string]string{
-		filepath.Join(temp, "node_modules", "@playwright", "mcp", "package.json"): PlaywrightMCPVersion,
-		filepath.Join(temp, "node_modules", "axe-core", "package.json"):           AxeCoreVersion,
-	} {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return readyManifest{}, fmt.Errorf("inspect installed package: %w", err)
-		}
-		var pkg struct {
-			Version string `json:"version"`
-		}
-		if err := json.Unmarshal(data, &pkg); err != nil {
-			return readyManifest{}, fmt.Errorf("inspect installed package: %w", err)
-		}
-		if pkg.Version != want {
-			return readyManifest{}, fmt.Errorf("installed package version is %q, want %q", pkg.Version, want)
-		}
-	}
-
-	manifest := readyManifest{
+func readyManifestForInstall(browserRelative string, installedAt time.Time) readyManifest {
+	return readyManifest{
 		MCPVersion:     PlaywrightMCPVersion,
 		AxeVersion:     AxeCoreVersion,
 		Browser:        "chromium",
@@ -403,25 +381,12 @@ func verifyInstalledRuntime(temp, browserRelative string, installedAt time.Time)
 		PlaywrightPath: filepath.ToSlash(filepath.Join("node_modules", ".bin", "playwright")),
 		BrowserPath:    filepath.ToSlash(browserRelative),
 	}
-	for label, path := range map[string]string{
-		"Playwright MCP CLI": manifest.MCPCLIPath,
-		"Axe":                manifest.AxePath,
-		"Playwright CLI":     manifest.PlaywrightPath,
-		"Chromium":           manifest.BrowserPath,
-	} {
-		fullPath, err := managedPath(temp, path)
-		if err != nil {
-			return readyManifest{}, fmt.Errorf("verify %s: %w", label, err)
-		}
-		info, err := os.Stat(fullPath)
-		if err != nil || !info.Mode().IsRegular() {
-			return readyManifest{}, fmt.Errorf("verify %s: required file is missing", label)
-		}
-	}
-	return manifest, nil
 }
 
 func (m *Manager) promote(temp, target string) error {
+	if _, err := verifyRuntimeDirectory(temp); err != nil {
+		return fmt.Errorf("verify runtime before promotion: %w", err)
+	}
 	if status := inspectRuntime(target); status.Status == StatusReady {
 		return nil
 	}

@@ -257,6 +257,52 @@ func TestProxyDefaultDeniesHiddenUnknownAndUnsupportedMethods(t *testing.T) {
 	}
 }
 
+func TestProxyHidesDetailedNetworkRequestAndNeverForwardsSensitiveInspection(t *testing.T) {
+	const secret = "Bearer ui-test-secret"
+	upstream := newFakeProxyUpstream()
+	upstream.responses["tools/list"] = rpcResponse{
+		JSONRPC: "2.0",
+		Result: json.RawMessage(`{"tools":[
+			{"name":"browser_network_request","inputSchema":{"type":"object"}},
+			{"name":"browser_network_requests","inputSchema":{"type":"object"}}
+		]}`),
+	}
+	input := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"browser_network_request","arguments":{"url":"http://127.0.0.1/private","headers":{"authorization":"` + secret + `"}}}}`,
+	}, "\n") + "\n"
+
+	responses := runProxy(t, &fakeProxySession{}, upstream, nil, input)
+	if len(responses) != 2 {
+		t.Fatalf("responses = %d, want list and denied call", len(responses))
+	}
+	var listed struct {
+		Tools []toolDescriptor `json:"tools"`
+	}
+	if err := json.Unmarshal(responses[0].Result, &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Tools) != 2 ||
+		listed.Tools[0].Name != "browser_network_requests" ||
+		listed.Tools[1].Name != "browser_accessibility_scan" {
+		t.Fatalf("listed tools = %#v, want summary only plus accessibility scan", listed.Tools)
+	}
+	if responses[1].Error == nil || responses[1].Error.Data.Class != ErrorPolicy {
+		t.Fatalf("detailed request response = %#v, want policy error", responses[1])
+	}
+	encoded, err := json.Marshal(responses[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(secret)) {
+		t.Fatalf("policy response exposed sensitive request data: %s", encoded)
+	}
+	calls := upstream.calls()
+	if len(calls) != 1 || calls[0].Method != "tools/list" {
+		t.Fatalf("upstream calls = %#v, want tools/list only", calls)
+	}
+}
+
 func TestProxyRejectsExternalNavigateBeforeSessionAndUpstream(t *testing.T) {
 	upstream := newFakeProxyUpstream()
 	session := &fakeProxySession{}

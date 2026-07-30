@@ -20,7 +20,6 @@ const ALLOWED_TOOLS = new Set([
   "browser_hover",
   "browser_navigate",
   "browser_navigate_back",
-  "browser_network_request",
   "browser_network_requests",
   "browser_press_key",
   "browser_resize",

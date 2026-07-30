@@ -88,6 +88,20 @@ func TestUIRuntimeStatusStates(t *testing.T) {
 			},
 			want: StatusBroken,
 		},
+		{
+			name: "mismatched installed package version is broken",
+			setup: func(t *testing.T, root string) {
+				writeReadyRuntime(t, root, PlaywrightMCPVersion, AxeCoreVersion)
+				runtimeDir := filepath.Join(root, "runtimes", PlaywrightMCPVersion)
+				writeTestRuntimeFile(
+					t,
+					runtimeDir,
+					filepath.Join("node_modules", "@playwright", "mcp", "package.json"),
+					`{"version":"0.0.77"}`,
+				)
+			},
+			want: StatusBroken,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "ui-test")
@@ -575,6 +589,73 @@ func TestUIRuntimeInstallRepairsBrokenRuntimeByAtomicPromotion(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].Name() != PlaywrightMCPVersion {
 		t.Fatalf("runtime entries = %v, want repaired runtime only", entryNames(entries))
+	}
+}
+
+func TestUIRuntimeInstallRepairsManifestReadyRuntimeWithCorruptedPackage(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	root := filepath.Join(t.TempDir(), "ui-test")
+	runtimeDir := filepath.Join(root, "runtimes", PlaywrightMCPVersion)
+	writeReadyRuntime(t, root, PlaywrightMCPVersion, AxeCoreVersion)
+	writeTestRuntimeFile(
+		t,
+		runtimeDir,
+		filepath.Join("node_modules", "@playwright", "mcp", "package.json"),
+		`{"version":"0.0.77"}`,
+	)
+	var commands int
+	manager := testManager(root, now, func(_ context.Context, command Command) (CommandResult, error) {
+		commands++
+		switch {
+		case command.Path == "/tools/npm":
+			createFakeInstall(t, command.Args[2])
+		case strings.HasSuffix(command.Path, filepath.Join("node_modules", ".bin", "playwright")):
+		case command.Path == "/tools/node":
+			return CommandResult{Stdout: filepath.Join(command.Dir, "browsers", "chromium")}, nil
+		default:
+			t.Fatalf("unexpected command: %#v", command)
+		}
+		return CommandResult{}, nil
+	})
+
+	got, err := manager.Install(context.Background())
+	if err != nil {
+		t.Fatalf("Install() repair error = %v", err)
+	}
+	if got.Status != StatusReady || commands != 3 {
+		t.Fatalf("Install() repair = %+v with %d commands, want ready reinstall", got, commands)
+	}
+	if err := verifyManagedPackageVersion(
+		filepath.Join(runtimeDir, "node_modules", "@playwright", "mcp", "package.json"),
+		PlaywrightMCPVersion,
+	); err != nil {
+		t.Fatalf("repaired package: %v", err)
+	}
+}
+
+func TestUIRuntimePromotionRejectsCorruptedCandidate(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "ui-test")
+	target := filepath.Join(root, "runtimes", PlaywrightMCPVersion)
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	candidateRoot := filepath.Join(t.TempDir(), "candidate-root")
+	writeReadyRuntime(t, candidateRoot, PlaywrightMCPVersion, AxeCoreVersion)
+	candidate := filepath.Join(candidateRoot, "runtimes", PlaywrightMCPVersion)
+	writeTestRuntimeFile(
+		t,
+		candidate,
+		filepath.Join("node_modules", "axe-core", "package.json"),
+		`{"version":"4.12.0"}`,
+	)
+
+	manager := testManager(root, time.Now(), nil)
+	if err := manager.promote(candidate, target); err == nil ||
+		!strings.Contains(err.Error(), "Axe package") {
+		t.Fatalf("promote() error = %v, want corrupted package rejection", err)
+	}
+	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("corrupted candidate promoted: %v", err)
 	}
 }
 

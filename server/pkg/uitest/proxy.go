@@ -23,7 +23,9 @@ var SafeBrowserTools = map[string]bool{
 	"browser_hover":            true,
 	"browser_navigate":         true,
 	"browser_navigate_back":    true,
-	"browser_network_request":  true,
+	// The singular request inspector returns full headers and bodies, including
+	// credentials injected by the local reverse proxy. Keep only the bounded
+	// request summary surface available to the agent.
 	"browser_network_requests": true,
 	"browser_press_key":        true,
 	"browser_resize":           true,
