@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -166,12 +165,14 @@ func TestUITestInjectionOpenClawUsesCwdFallback(t *testing.T) {
 func TestUITestInjectionOpenClawPreservesNativeInheritance(t *testing.T) {
 	for _, input := range []json.RawMessage{nil, json.RawMessage("null")} {
 		t.Run(string(input), func(t *testing.T) {
-			writeOpenClawMCPConfig(t, map[string]string{
+			d := newUITestInjectionDaemon(uitest.StatusReady)
+			setOpenclawNativeMCP(t, d, map[string]string{
 				"native-browser": "native-browser-command",
 			})
-			d := newUITestInjectionDaemon(uitest.StatusReady)
 
-			got, injected := d.injectExecenvUITest(input, "openclaw", "task-1", discardUITestLogger())
+			got, injected := d.injectExecenvUITestWithBin(
+				input, "openclaw", "/test/openclaw", "task-1", discardUITestLogger(),
+			)
 			if !injected {
 				t.Fatal("managed UI server not injected")
 			}
@@ -183,34 +184,45 @@ func TestUITestInjectionOpenClawPreservesNativeInheritance(t *testing.T) {
 }
 
 func TestUITestInjectionOpenClawNativeCollisionsWin(t *testing.T) {
-	writeOpenClawMCPConfig(t, map[string]string{
+	d := newUITestInjectionDaemon(uitest.StatusReady)
+	resolverCalls := setOpenclawNativeMCP(t, d, map[string]string{
 		uiTestServerName:   "native-ui-command",
 		dettoolsServerName: "native-tools-command",
 	})
-	d := newUITestInjectionDaemon(uitest.StatusReady)
 	d.cfg.DetTools = testDetToolsCfg()
 
-	got := d.injectExecenvTools(nil, "openclaw", nil, nil, discardUITestLogger())
-	got, injected := d.injectExecenvUITest(got, "openclaw", "task-1", discardUITestLogger())
+	got := d.injectExecenvToolsWithBin(
+		nil, "openclaw", "/test/openclaw", nil, nil, discardUITestLogger(),
+	)
+	got, injected := d.injectExecenvUITestWithBin(
+		got, "openclaw", "/test/openclaw", "task-1", discardUITestLogger(),
+	)
 	if injected {
 		t.Fatal("native UI collision reported as managed injection")
 	}
 	servers := parseServers(t, got)
 	assertMCPCommand(t, servers, uiTestServerName, "native-ui-command")
 	assertMCPCommand(t, servers, dettoolsServerName, "native-tools-command")
+	if *resolverCalls != 1 {
+		t.Fatalf("active config resolved %d times, want once for combined overlay", *resolverCalls)
+	}
 }
 
 func TestUITestInjectionOpenClawCombinesNativeUITestAndDettools(t *testing.T) {
 	for _, input := range []json.RawMessage{nil, json.RawMessage("null")} {
 		t.Run(string(input), func(t *testing.T) {
-			writeOpenClawMCPConfig(t, map[string]string{
+			d := newUITestInjectionDaemon(uitest.StatusReady)
+			resolverCalls := setOpenclawNativeMCP(t, d, map[string]string{
 				"native-browser": "native-browser-command",
 			})
-			d := newUITestInjectionDaemon(uitest.StatusReady)
 			d.cfg.DetTools = testDetToolsCfg()
 
-			got := d.injectExecenvTools(input, "openclaw", nil, nil, discardUITestLogger())
-			got, injected := d.injectExecenvUITest(got, "openclaw", "task-1", discardUITestLogger())
+			got := d.injectExecenvToolsWithBin(
+				input, "openclaw", "/test/openclaw", nil, nil, discardUITestLogger(),
+			)
+			got, injected := d.injectExecenvUITestWithBin(
+				got, "openclaw", "/test/openclaw", "task-1", discardUITestLogger(),
+			)
 			if !injected {
 				t.Fatal("managed UI server not injected")
 			}
@@ -220,7 +232,65 @@ func TestUITestInjectionOpenClawCombinesNativeUITestAndDettools(t *testing.T) {
 				t.Fatal("deterministic tool server was dropped")
 			}
 			assertMCPCommand(t, servers, uiTestServerName, "/resolved/multica")
+			if *resolverCalls != 1 {
+				t.Fatalf("active config resolved %d times, want once for combined overlay", *resolverCalls)
+			}
 		})
+	}
+}
+
+func TestUITestInjectionOpenClawResolverCallGating(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		status    string
+		provider  string
+		wantCalls int
+	}{
+		{name: "ready_openclaw", status: uitest.StatusReady, provider: "openclaw", wantCalls: 1},
+		{name: "unready_openclaw", status: uitest.StatusInstalling, provider: "openclaw", wantCalls: 0},
+		{name: "unsupported_provider", status: uitest.StatusReady, provider: "claude", wantCalls: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			d := newUITestInjectionDaemon(test.status)
+			calls := 0
+			d.openclawMCPResolver = func(bin string) (map[string]json.RawMessage, error) {
+				calls++
+				if bin != "/test/openclaw" {
+					t.Fatalf("resolver bin = %q", bin)
+				}
+				return map[string]json.RawMessage{}, nil
+			}
+
+			d.injectExecenvUITestWithBin(
+				nil, test.provider, "/test/openclaw", "task-1", discardUITestLogger(),
+			)
+			if calls != test.wantCalls {
+				t.Fatalf("resolver calls = %d, want %d", calls, test.wantCalls)
+			}
+		})
+	}
+}
+
+func TestManagedOpenClawMCPResolverErrorsAreNonfatal(t *testing.T) {
+	original := json.RawMessage("null")
+	d := newUITestInjectionDaemon(uitest.StatusReady)
+	d.openclawMCPResolver = func(string) (map[string]json.RawMessage, error) {
+		return nil, errors.New("active config unavailable")
+	}
+
+	got, injected := d.injectExecenvUITestWithBin(
+		original, "openclaw", "/test/openclaw", "task-1", discardUITestLogger(),
+	)
+	if injected || string(got) != string(original) {
+		t.Fatal("UI resolver error changed task MCP config")
+	}
+
+	d.cfg.DetTools = testDetToolsCfg()
+	got = d.injectExecenvToolsWithBin(
+		original, "openclaw", "/test/openclaw", nil, nil, discardUITestLogger(),
+	)
+	if string(got) != string(original) {
+		t.Fatal("dettools resolver error changed task MCP config")
 	}
 }
 
@@ -358,6 +428,9 @@ func newUITestInjectionDaemon(status string) *Daemon {
 		uiTestExecutable: func() (string, error) {
 			return "/resolved/multica", nil
 		},
+		openclawMCPResolver: func(string) (map[string]json.RawMessage, error) {
+			return map[string]json.RawMessage{}, nil
+		},
 	}
 }
 
@@ -385,29 +458,22 @@ func discardUITestLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-func writeOpenClawMCPConfig(t *testing.T, servers map[string]string) {
+func setOpenclawNativeMCP(t *testing.T, d *Daemon, servers map[string]string) *int {
 	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("CLAWDBOT_CONFIG_PATH", "")
-	t.Setenv("OPENCLAW_STATE_DIR", "")
-	entries := make(map[string]any, len(servers))
-	for name, command := range servers {
-		entries[name] = map[string]any{"command": command}
+	calls := 0
+	d.openclawMCPResolver = func(bin string) (map[string]json.RawMessage, error) {
+		calls++
+		if bin != "/test/openclaw" {
+			t.Fatalf("resolver bin = %q", bin)
+		}
+		entries := make(map[string]json.RawMessage, len(servers))
+		for name, command := range servers {
+			entry, _ := json.Marshal(map[string]any{"command": command})
+			entries[name] = entry
+		}
+		return entries, nil
 	}
-	data, err := json.Marshal(map[string]any{
-		"mcp": map[string]any{"servers": entries},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	configDir := filepath.Join(home, ".openclaw")
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(configDir, "openclaw.json"), data, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	return &calls
 }
 
 func assertMCPCommand(t *testing.T, servers map[string]json.RawMessage, name, want string) {

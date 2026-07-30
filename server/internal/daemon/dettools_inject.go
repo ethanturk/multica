@@ -59,7 +59,7 @@ func (d *Daemon) injectExecOptionsTools(agentCfg json.RawMessage, provider, work
 	if !d.cfg.DetTools.Enabled || !managedMCPExecOptionsProviders[provider] {
 		return agentCfg
 	}
-	return d.mergeDetTools(agentCfg, provider, workDir, runtimeConfig, steps, logger)
+	return d.mergeDetTools(agentCfg, provider, "", workDir, runtimeConfig, steps, logger)
 }
 
 // injectExecenvTools merges the deterministic tool server into agentCfg for
@@ -68,16 +68,20 @@ func (d *Daemon) injectExecOptionsTools(agentCfg json.RawMessage, provider, work
 // empty: the tool server falls back to the cwd OpenClaw spawns it with, which is
 // the pinned task workspace.
 func (d *Daemon) injectExecenvTools(agentCfg json.RawMessage, provider string, runtimeConfig json.RawMessage, steps []DeterministicToolData, logger *slog.Logger) json.RawMessage {
+	return d.injectExecenvToolsWithBin(agentCfg, provider, "", runtimeConfig, steps, logger)
+}
+
+func (d *Daemon) injectExecenvToolsWithBin(agentCfg json.RawMessage, provider, openclawBin string, runtimeConfig json.RawMessage, steps []DeterministicToolData, logger *slog.Logger) json.RawMessage {
 	if !d.cfg.DetTools.Enabled || provider != "openclaw" {
 		return agentCfg
 	}
-	return d.mergeDetTools(agentCfg, provider, "", runtimeConfig, steps, logger)
+	return d.mergeDetTools(agentCfg, provider, openclawBin, "", runtimeConfig, steps, logger)
 }
 
 // mergeDetTools computes the effective tool allowlist for the agent and merges
 // the deterministic server into agentCfg. Fail-open: any error logs and returns
 // the original config so a tool-plane problem never blocks a task launch.
-func (d *Daemon) mergeDetTools(agentCfg json.RawMessage, provider, workDir string, runtimeConfig json.RawMessage, steps []DeterministicToolData, logger *slog.Logger) json.RawMessage {
+func (d *Daemon) mergeDetTools(agentCfg json.RawMessage, provider, openclawBin, workDir string, runtimeConfig json.RawMessage, steps []DeterministicToolData, logger *slog.Logger) json.RawMessage {
 	effective := computeEffectiveAllowed(d.cfg.DetTools, runtimeConfig)
 	profile := parseAgentDetToolsProfile(runtimeConfig)
 	allowedSteps := filterStepsByProfile(steps, profile, d.cfg.DetTools.DeniedTools)
@@ -106,7 +110,7 @@ func (d *Daemon) mergeDetTools(agentCfg json.RawMessage, provider, workDir strin
 	}
 
 	if provider == "openclaw" {
-		baseConfig, err := openClawManagedMCPBase(agentCfg)
+		baseConfig, err := d.openClawManagedMCPBase(agentCfg, openclawBin)
 		if err != nil {
 			logger.Warn("dettools: native MCP merge failed; launching without tool plane", "error", err)
 			return agentCfg

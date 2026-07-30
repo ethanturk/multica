@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 	"github.com/multica-ai/multica/server/pkg/uitest"
 )
 
@@ -27,7 +28,7 @@ func (d *Daemon) injectExecOptionsUITest(
 	if !managedMCPExecOptionsProviders[provider] {
 		return agentConfig, false
 	}
-	return d.injectUITest(agentConfig, provider, workDir, taskID, logger)
+	return d.injectUITest(agentConfig, provider, "", workDir, taskID, logger)
 }
 
 func (d *Daemon) injectExecenvUITest(
@@ -35,15 +36,23 @@ func (d *Daemon) injectExecenvUITest(
 	provider, taskID string,
 	logger *slog.Logger,
 ) (json.RawMessage, bool) {
+	return d.injectExecenvUITestWithBin(agentConfig, provider, "", taskID, logger)
+}
+
+func (d *Daemon) injectExecenvUITestWithBin(
+	agentConfig json.RawMessage,
+	provider, openclawBin, taskID string,
+	logger *slog.Logger,
+) (json.RawMessage, bool) {
 	if provider != "openclaw" {
 		return agentConfig, false
 	}
-	return d.injectUITest(agentConfig, provider, "", taskID, logger)
+	return d.injectUITest(agentConfig, provider, openclawBin, "", taskID, logger)
 }
 
 func (d *Daemon) injectUITest(
 	agentConfig json.RawMessage,
-	provider, workDir, taskID string,
+	provider, openclawBin, workDir, taskID string,
 	logger *slog.Logger,
 ) (json.RawMessage, bool) {
 	status, runtimeDir, err := d.probeUITestCapability()
@@ -65,7 +74,7 @@ func (d *Daemon) injectUITest(
 	}
 	baseConfig := agentConfig
 	if provider == "openclaw" {
-		baseConfig, err = openClawManagedMCPBase(agentConfig)
+		baseConfig, err = d.openClawManagedMCPBase(agentConfig, openclawBin)
 		if err != nil {
 			logger.Warn("ui-test: native MCP merge failed; launching without managed UI testing", "error", err)
 			return agentConfig, false
@@ -169,12 +178,24 @@ func (d *Daemon) resolveUITestExecutable() (string, error) {
 
 // openClawManagedMCPBase preserves native OpenClaw MCP inheritance when the
 // daemon needs to add its first managed server. execenv treats every non-null
-// mcp_config as a strict replacement, so seed absent configs with the same
-// local runtime servers already used for managed agent configurations.
-func openClawManagedMCPBase(agentConfig json.RawMessage) (json.RawMessage, error) {
+// mcp_config as a strict replacement, so seed absent configs from OpenClaw's
+// active, fully resolved configuration.
+func (d *Daemon) openClawManagedMCPBase(agentConfig json.RawMessage, openclawBin string) (json.RawMessage, error) {
 	trimmed := bytes.TrimSpace(agentConfig)
 	if len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null")) {
 		return agentConfig, nil
 	}
-	return mergeRuntimeAndAgentMcpConfig("openclaw", json.RawMessage(`{"mcpServers":{}}`))
+	resolver := d.openclawMCPResolver
+	if resolver == nil {
+		resolver = execenv.ResolveOpenclawNativeMCPServers
+	}
+	servers, err := resolver(openclawBin)
+	if err != nil {
+		return nil, err
+	}
+	encodedServers, err := json.Marshal(servers)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(map[string]json.RawMessage{"mcpServers": encodedServers})
 }
