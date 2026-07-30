@@ -187,7 +187,7 @@ func TestUITestIntegrationRealBrowserPolicy(t *testing.T) {
 	popupRef := integrationSnapshotRef(t, beforePopup.Result)
 	assertIntegrationToolOK(t, integrationToolCall(proxy, 5, "browser_click", map[string]any{
 		"element": "Open external popup",
-		"ref":     popupRef,
+		"target":  popupRef,
 	}))
 
 	external := integrationToolCall(proxy, 6, "browser_navigate", map[string]any{"url": "https://example.com"})
