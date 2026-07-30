@@ -22,7 +22,7 @@
   ],
   "tasks": {
     "build": {
-      "dependsOn": ["^build"],
+      "dependsOn": ["^build", "typecheck"],
       // No explicit `inputs`: turbo's default (every git-tracked file in the
       // package) is the only safe hash source now that the cache is actually
       // restored in CI. The previous narrow glob list matched neither

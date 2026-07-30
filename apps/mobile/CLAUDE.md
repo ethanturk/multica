@@ -154,11 +154,10 @@ Never copy the visual shape of an existing hand-written `components/ui/` compone
 ## Build & release
 
 - **Main CI** (`.github/workflows/ci.yml`) excludes mobile via `--filter='!@multica/mobile'`. Mobile failures do NOT block web/desktop PRs.
-- **Mobile verify** (`.github/workflows/mobile-verify.yml`): triggered on `apps/mobile/**` or `packages/core/types/**` changes — runs typecheck/lint/test only, no IPA build.
-- **Mobile release** (`.github/workflows/mobile-release.yml`): triggered by `mobile-v*.*.*` tag → `eas build` + `eas submit`.
-- **OTA** — EAS Update for JS-only fixes that don't change the runtime version. Manual / on-demand push to preview/production channels.
-
-Mobile release cadence is decoupled from main `v*.*.*` tags (server / CLI / desktop).
+- **Mobile verify** (`.github/workflows/mobile-verify.yml`): triggered on mobile or transitive core/config changes — runs typecheck/lint/test only, with no native artifact build.
+- **Android staging distribution** (`.github/workflows/mobile-android-distribute.yml`): manual dispatch only. Builds and signs `ai.multica.mobile.staging`, retains the APK for seven days, authenticates through GitHub OIDC, and uploads to configured Firebase App Distribution tester groups.
+- **External Android release state**: the `android-staging` GitHub environment, Workload Identity Federation, Firebase app/tester groups, and durable keystore must be provisioned outside the repository.
+- **Not implemented**: production Play submission, iOS release automation, and EAS Build/Submit/Update. Do not describe or depend on a `mobile-release.yml` workflow unless one is added.
 
 ## Realtime / WebSocket strategy
 

@@ -1,5 +1,17 @@
 import type { ExpoConfig, ConfigContext } from "expo/config";
 
+const resolveAndroidVersionCode = () => {
+  const rawVersionCode = process.env.ANDROID_VERSION_CODE;
+  if (rawVersionCode === undefined) return 1;
+
+  const versionCode = Number(rawVersionCode);
+  if (!Number.isInteger(versionCode) || versionCode <= 0) {
+    throw new Error("ANDROID_VERSION_CODE must be a positive integer");
+  }
+
+  return versionCode;
+};
+
 /**
  * Dynamic Expo config — replaces app.json so we can read APP_ENV at runtime
  * and switch bundleIdentifier / display name for dev / staging / production.
@@ -13,14 +25,25 @@ export default ({ config }: ConfigContext): ExpoConfig => {
   const env = process.env.APP_ENV ?? "development";
   const isProd = env === "production";
   const isStaging = env === "staging";
+  const appName = isProd
+    ? "Multica"
+    : isStaging
+      ? "Multica (Staging)"
+      : "Multica (Dev)";
+  const androidPackage = isProd
+    ? "ai.multica.mobile"
+    : isStaging
+      ? "ai.multica.mobile.staging"
+      : "ai.multica.mobile.dev";
+  const iosBundleIdentifier = isProd
+    ? (process.env.EXPO_BUNDLE_IDENTIFIER_PROD ?? "ai.multica.mobile")
+    : isStaging
+      ? "ai.multica.mobile.staging"
+      : (process.env.EXPO_BUNDLE_IDENTIFIER_DEV ?? "ai.multica.mobile.dev");
 
   return {
     ...config,
-    name: isProd
-      ? "Multica"
-      : isStaging
-        ? "Multica (Staging)"
-        : "Multica (Dev)",
+    name: appName,
     slug: "multica-mobile",
     version: "0.1.0",
     orientation: "portrait",
@@ -41,13 +64,18 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       // `EXPO_BUNDLE_IDENTIFIER` would leak across variants (Expo CLI
       // auto-loads `.env.<mode>.local` regardless of APP_ENV) and collapse
       // dev / staging / prod onto a single id.
-      bundleIdentifier: isProd
-        ? (process.env.EXPO_BUNDLE_IDENTIFIER_PROD ?? "ai.multica.mobile")
-        : isStaging
-          ? "ai.multica.mobile.staging"
-          : (process.env.EXPO_BUNDLE_IDENTIFIER_DEV ?? "ai.multica.mobile.dev"),
+      bundleIdentifier: iosBundleIdentifier,
+    },
+    android: {
+      package: androidPackage,
+      versionCode: resolveAndroidVersionCode(),
+      adaptiveIcon: {
+        foregroundImage: "./assets/icon.png",
+        backgroundColor: "#090909",
+      },
     },
     plugins: [
+      "./plugins/with-android-release-signing.ts",
       "expo-router",
       "expo-secure-store",
       "@react-native-community/datetimepicker",

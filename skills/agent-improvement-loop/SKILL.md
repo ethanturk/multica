@@ -15,6 +15,7 @@ The loop is split across three sub-skills. Load only the one you need for the cu
 |---|---|---|
 | 2 + 3 | `analyzer` | Capture and index telemetry events; produce pain-bucket digests with repeat signatures and candidate suggestions |
 | 4 | `evaluator` | Evaluate candidate dettools against deterministic subsets of historical events |
+| 5 | `evaluator` | Consume Stage 4 decisions and route each recommendation to approval, review, or defer |
 | 6 | `evaluator` | Generate the approved candidate scaffold (source + test + manifest entry) |
 | 7 | `evaluator` | Replay-based evaluation with strict determinism profile and rerun filters |
 | 8 | `evaluator` | Promote the winning candidate into production via the transactional helper |
@@ -29,7 +30,8 @@ The loop is split across three sub-skills. Load only the one you need for the cu
 
 1. **One-time setup**: read `SETUP.md`, create the `Agent Improvement Analyzer` and `Agent Improvement Evaluator` agents, and wire the Stage 2+3 nightly autopilot at `0 2 * * *` UTC.
 2. **Nightly (Stage 2-3)**: the analyzer agent runs `multica ail run` and posts a digest comment on the tuning issue.
-3. **On demand (Stage 4-8)**: a human approves a candidate suggestion; the evaluator agent drives Stage 6 scaffold → Stage 7 replay → Stage 8 promotion.
+3. **Immediate handoff (Stage 3 -> Stage 4)**: after Stage 3 completes, load `diagnostics/stage3/stage3_digest.json` and `diagnostics/stage3/stage3_signatures.jsonl`, then call the default-allowlisted `agent_improvement_evaluate` dettool with the Stage 3 `candidate_dettools` and `repeat_signatures` payloads. There is no `multica ail stage4` CLI command in this workflow.
+4. **On demand (Stage 4-8)**: the evaluator consumes the Stage 4 decisions. `ready_for_candidate` flows into Stage 6 after human approval, `ready_for_review` is posted for human review, and `defer` stops without scaffolding.
 
 ## Required deterministic tools
 

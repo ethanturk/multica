@@ -1,7 +1,7 @@
-// Package agent provides a unified interface for executing prompts via
-// coding agents (Claude Code, CodeBuddy, Codex, Copilot, OpenCode, DevEco Code,
-// OpenClaw, Hermes, Pi, Cursor, Kimi, Kiro, Antigravity, Qoder, Trae, Grok,
-// Qwen Code). It
+// Package agent provides a unified interface for executing prompts via coding
+// agents including Claude Code, CodeBuddy, Codex, Copilot, OpenCode, DevEco
+// Code, OpenClaw, Hermes, Pi, Cursor, Kimi, Kiro, Antigravity, Dirge, Qoder,
+// Trae, Grok, and Qwen Code. It
 // mirrors the happy-cli AgentBackend pattern, translated to idiomatic Go.
 package agent
 
@@ -206,7 +206,7 @@ type Result struct {
 
 // Config configures a Backend instance.
 type Config struct {
-	ExecutablePath string            // path to CLI binary (claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, cursor, kimi, kiro-cli, agy, qodercli, traecli, grok, qwen)
+	ExecutablePath string            // path to CLI binary (claude, codebuddy, codex, copilot, opencode, deveco, openclaw, hermes, pi, cursor, kimi, kiro-cli, agy, dirge, qodercli, traecli, grok, qwen)
 	CLIVersion     string            // detected version paired with ExecutablePath; observation only, never used to choose behavior
 	Env            map[string]string // extra environment variables
 	Logger         *slog.Logger
@@ -217,13 +217,14 @@ type Config struct {
 }
 
 // New creates a Backend for the given agent type.
-// Supported types: "claude", "codebuddy", "codex", "copilot", "opencode", "deveco", "openclaw", "hermes", "pi", "cursor", "kimi", "kiro", "antigravity", "qoder", "traecli", "grok", "qwen".
+// Supported types: "claude", "codebuddy", "codex", "copilot", "opencode", "deveco", "openclaw", "hermes", "pi", "cursor", "kimi", "kiro", "antigravity", "dirge", "qoder", "traecli", "grok", and "qwen".
 //
 // SupportedTypes is the canonical whitelist of agent types eligible to back a
 // custom runtime profile. It MUST stay in lockstep with the
 // runtime_profile.protocol_family CHECK constraint (migration 120, widened by
 // migration 134 to add qoder, migration 136 to add traecli, migration 175 to
-// add deveco, migration 179 to add grok, and migration 202 to add qwen): a
+// add deveco, migration 179 to add grok, migration 234 to add qwen, and
+// migration 235 to add dirge): a
 // custom runtime profile may only
 // be based on a backend Multica officially supports.
 // qoder is exposed here so Qoder CN (`qoderclicn`) users can point the Qoder
@@ -247,6 +248,7 @@ var SupportedTypes = []string{
 	"kimi",
 	"kiro",
 	"antigravity",
+	"dirge",
 	"qoder",
 	"traecli",
 	"grok",
@@ -324,6 +326,8 @@ func New(agentType string, cfg Config) (Backend, error) {
 		return &kiroBackend{cfg: cfg}, nil
 	case "antigravity":
 		return &antigravityBackend{cfg: cfg}, nil
+	case "dirge":
+		return &dirgeBackend{cfg: cfg}, nil
 	case "qoder":
 		return &qoderBackend{cfg: cfg}, nil
 	case "traecli":
@@ -333,7 +337,7 @@ func New(agentType string, cfg Config) (Backend, error) {
 	case "qwen":
 		return &qwenBackend{cfg: cfg}, nil
 	default:
-		return nil, fmt.Errorf("unknown agent type: %q (supported: claude, codebuddy, codex, copilot, opencode, deveco, openclaw, hermes, pi, cursor, kimi, kiro, antigravity, qoder, traecli, grok, qwen)", agentType)
+		return nil, fmt.Errorf("unknown agent type: %q (supported: claude, codebuddy, codex, copilot, opencode, deveco, openclaw, hermes, pi, cursor, kimi, kiro, antigravity, dirge, qoder, traecli, grok, qwen)", agentType)
 	}
 }
 
@@ -356,6 +360,7 @@ var launchHeaders = map[string]string{
 	"copilot":     "copilot (json)",
 	"cursor":      "cursor-agent (stream-json)",
 	"deveco":      "deveco run (json)",
+	"dirge":       "dirge --print (json)",
 	"hermes":      "hermes acp",
 	"kimi":        "kimi acp",
 	"kiro":        "kiro-cli acp",
