@@ -20,6 +20,23 @@ downloads a browser. A compatible daemon injects `multica-ui-test` only when
 the pinned runtime is `ready`; browser and application processes start lazily
 on the first managed browser action.
 
+The end-to-end MCP smoke is explicit and never installs:
+
+```bash
+cd server
+go build -o ../.multica/bin/multica ./cmd/multica
+cd ..
+MULTICA_UI_TEST_BIN="$PWD/.multica/bin/multica" \
+MULTICA_UI_TEST_TASK_ID=smoke \
+MULTICA_UI_TEST_RUNTIME_DIR="$HOME/.multica/ui-test/runtimes/0.0.78" \
+pnpm ui-test:smoke
+```
+
+For a named test profile, also set `MULTICA_UI_TEST_PROFILE` and use that
+profile's exact ready runtime directory. The smoke starts the supplied binary
+directly as `ui-test serve`; it never invokes `install`, prompts for
+credentials, or publishes an issue comment.
+
 ## Repository contract
 
 Add `.multica/ui-test.json` when conservative inference is ambiguous:
@@ -150,3 +167,39 @@ Use focused PNG, text, or JSON evidence instead.
 
 Application and browser process groups are daemon-owned and cleaned up on
 success, error, timeout, cancellation, or completion.
+
+## Contract checks
+
+The focused smoke and backend suites cover the managed product boundary:
+
+```bash
+node --test e2e/ui-test-setup.test.mjs scripts/ui-test-mcp-smoke.test.mjs
+cd server
+go test -race ./pkg/uitest ./pkg/dettools ./internal/daemon ./internal/service ./internal/handler ./cmd/multica
+```
+
+- An ordinary issue is the entry point; non-UI tasks neither provision nor
+  launch the browser.
+- Installation and status are explicit. Runtime inspection verifies pinned
+  Playwright MCP, Axe, Playwright, and isolated Chromium files.
+- `tools/list` exposes only the allowlist plus the fixed Axe scan.
+  `tools/call` also rejects hidden or unknown tools.
+- Loopback policy is enforced for direct navigation and through Playwright
+  allowed-origin handling for redirects, popups, and requests.
+- Daemon-owned process groups are checked on success, failure, cancellation,
+  and timeout. The smoke closes stdin and requires clean proxy/application
+  exit.
+- `ui_test_report` distinguishes product failures from infrastructure
+  `not_run`; advisory findings do not change a passing verdict.
+- Audit mode leaves the tracked tree clean. Regression mode writes only focused
+  Playwright coverage and runs it through `test_gate`.
+- Publication uses `comment.md`, `report.json`, `report.md`, and
+  `artifact-manifest.json`, plus only relevant sealed evidence. Smoke and report
+  verdict validation do not publish.
+- Client diagnostics cap protocol frames, request count, request time, and
+  child stderr capture. They never render child stderr, environment values,
+  cookies, tokens, authorization data, or storage state.
+
+Real managed-browser checks remain opt-in because installation needs network
+and profile-local filesystem access. Cross-platform process ownership is
+validated by native tests where available and compile checks elsewhere.
