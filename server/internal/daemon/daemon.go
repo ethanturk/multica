@@ -4866,9 +4866,15 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// OpenClaw materializes mcp.servers from this config during execenv.Prepare,
 	// so daemon-managed servers must be merged in before Prepare/Reuse. No-op
 	// for every other provider.
-	effectiveMcpConfig = d.injectExecenvToolsWithBin(effectiveMcpConfig, provider, openclawBin, agentRuntimeConfig, task.DeterministicTools, d.logger)
-	var uiTestInjected bool
-	effectiveMcpConfig, uiTestInjected = d.injectExecenvUITestWithBin(effectiveMcpConfig, provider, openclawBin, task.ID, d.logger)
+	effectiveMcpConfig, uiTestInjected := d.injectExecenvOpenClawOverlays(
+		effectiveMcpConfig,
+		provider,
+		openclawBin,
+		agentRuntimeConfig,
+		task.DeterministicTools,
+		task.ID,
+		d.logger,
+	)
 
 	var agentEnvOverrides map[string]string
 	var agentCustomArgs []string

@@ -191,11 +191,8 @@ func TestUITestInjectionOpenClawNativeCollisionsWin(t *testing.T) {
 	})
 	d.cfg.DetTools = testDetToolsCfg()
 
-	got := d.injectExecenvToolsWithBin(
-		nil, "openclaw", "/test/openclaw", nil, nil, discardUITestLogger(),
-	)
-	got, injected := d.injectExecenvUITestWithBin(
-		got, "openclaw", "/test/openclaw", "task-1", discardUITestLogger(),
+	got, injected := d.injectExecenvOpenClawOverlays(
+		nil, "openclaw", "/test/openclaw", nil, nil, "task-1", discardUITestLogger(),
 	)
 	if injected {
 		t.Fatal("native UI collision reported as managed injection")
@@ -217,11 +214,8 @@ func TestUITestInjectionOpenClawCombinesNativeUITestAndDettools(t *testing.T) {
 			})
 			d.cfg.DetTools = testDetToolsCfg()
 
-			got := d.injectExecenvToolsWithBin(
-				input, "openclaw", "/test/openclaw", nil, nil, discardUITestLogger(),
-			)
-			got, injected := d.injectExecenvUITestWithBin(
-				got, "openclaw", "/test/openclaw", "task-1", discardUITestLogger(),
+			got, injected := d.injectExecenvOpenClawOverlays(
+				input, "openclaw", "/test/openclaw", nil, nil, "task-1", discardUITestLogger(),
 			)
 			if !injected {
 				t.Fatal("managed UI server not injected")
@@ -236,6 +230,29 @@ func TestUITestInjectionOpenClawCombinesNativeUITestAndDettools(t *testing.T) {
 				t.Fatalf("active config resolved %d times, want once for combined overlay", *resolverCalls)
 			}
 		})
+	}
+}
+
+func TestUITestInjectionOpenClawDettoolsWorksWhenUITestUnavailable(t *testing.T) {
+	d := newUITestInjectionDaemon(uitest.StatusInstalling)
+	resolverCalls := setOpenclawNativeMCP(t, d, map[string]string{
+		"native-browser": "native-browser-command",
+	})
+	d.cfg.DetTools = testDetToolsCfg()
+
+	got, injected := d.injectExecenvOpenClawOverlays(
+		nil, "openclaw", "/test/openclaw", nil, nil, "task-1", discardUITestLogger(),
+	)
+	if injected {
+		t.Fatal("unavailable UI runtime reported as injected")
+	}
+	servers := parseServers(t, got)
+	assertMCPCommand(t, servers, "native-browser", "native-browser-command")
+	if _, ok := servers[dettoolsServerName]; !ok {
+		t.Fatal("deterministic tool server was not injected")
+	}
+	if *resolverCalls != 1 {
+		t.Fatalf("active config resolved %d times, want once", *resolverCalls)
 	}
 }
 
@@ -274,23 +291,31 @@ func TestUITestInjectionOpenClawResolverCallGating(t *testing.T) {
 func TestManagedOpenClawMCPResolverErrorsAreNonfatal(t *testing.T) {
 	original := json.RawMessage("null")
 	d := newUITestInjectionDaemon(uitest.StatusReady)
+	d.cfg.DetTools = testDetToolsCfg()
+	resolverCalls := 0
 	d.openclawMCPResolver = func(string) (map[string]json.RawMessage, error) {
+		resolverCalls++
 		return nil, errors.New("active config unavailable")
 	}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
 
-	got, injected := d.injectExecenvUITestWithBin(
-		original, "openclaw", "/test/openclaw", "task-1", discardUITestLogger(),
+	got, injected := d.injectExecenvOpenClawOverlays(
+		original, "openclaw", "/test/openclaw", nil, nil, "task-1", logger,
 	)
 	if injected || string(got) != string(original) {
-		t.Fatal("UI resolver error changed task MCP config")
+		t.Fatal("resolver error changed task MCP config")
 	}
-
-	d.cfg.DetTools = testDetToolsCfg()
-	got = d.injectExecenvToolsWithBin(
-		original, "openclaw", "/test/openclaw", nil, nil, discardUITestLogger(),
-	)
-	if string(got) != string(original) {
-		t.Fatal("dettools resolver error changed task MCP config")
+	if resolverCalls != 1 {
+		t.Fatalf("active config resolved %d times, want once after shared failure", resolverCalls)
+	}
+	for _, warning := range []string{
+		"dettools: native MCP merge failed",
+		"ui-test: native MCP merge failed",
+	} {
+		if !strings.Contains(logs.String(), warning) {
+			t.Fatalf("missing warning %q in logs: %s", warning, logs.String())
+		}
 	}
 }
 

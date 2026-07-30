@@ -15,6 +15,8 @@ import (
 
 const uiTestServerName = "multica-ui-test"
 
+type openClawMCPBaseResolver func(json.RawMessage) (json.RawMessage, error)
+
 const uiTestRuntimeBrief = "\n\n## UI Testing (MCP)\n\n" +
 	"The `multica-ui-test` MCP server provides a managed local Chromium session.\n" +
 	"Follow the built-in `multica-ui-testing` skill. Do not replace its safe browser\n" +
@@ -28,7 +30,7 @@ func (d *Daemon) injectExecOptionsUITest(
 	if !managedMCPExecOptionsProviders[provider] {
 		return agentConfig, false
 	}
-	return d.injectUITest(agentConfig, provider, "", workDir, taskID, logger)
+	return d.injectUITest(agentConfig, provider, nil, workDir, taskID, logger)
 }
 
 func (d *Daemon) injectExecenvUITest(
@@ -47,12 +49,47 @@ func (d *Daemon) injectExecenvUITestWithBin(
 	if provider != "openclaw" {
 		return agentConfig, false
 	}
-	return d.injectUITest(agentConfig, provider, openclawBin, "", taskID, logger)
+	return d.injectExecenvUITestWithResolver(
+		agentConfig, provider, d.newOpenClawMCPBaseResolver(openclawBin), taskID, logger,
+	)
+}
+
+func (d *Daemon) injectExecenvUITestWithResolver(
+	agentConfig json.RawMessage,
+	provider string,
+	resolveBase openClawMCPBaseResolver,
+	taskID string,
+	logger *slog.Logger,
+) (json.RawMessage, bool) {
+	if provider != "openclaw" {
+		return agentConfig, false
+	}
+	return d.injectUITest(agentConfig, provider, resolveBase, "", taskID, logger)
+}
+
+func (d *Daemon) injectExecenvOpenClawOverlays(
+	agentConfig json.RawMessage,
+	provider, openclawBin string,
+	runtimeConfig json.RawMessage,
+	steps []DeterministicToolData,
+	taskID string,
+	logger *slog.Logger,
+) (json.RawMessage, bool) {
+	if provider != "openclaw" {
+		return agentConfig, false
+	}
+	resolveBase := d.newOpenClawMCPBaseResolver(openclawBin)
+	agentConfig = d.injectExecenvToolsWithResolver(
+		agentConfig, provider, resolveBase, runtimeConfig, steps, logger,
+	)
+	return d.injectExecenvUITestWithResolver(agentConfig, provider, resolveBase, taskID, logger)
 }
 
 func (d *Daemon) injectUITest(
 	agentConfig json.RawMessage,
-	provider, openclawBin, workDir, taskID string,
+	provider string,
+	resolveBase openClawMCPBaseResolver,
+	workDir, taskID string,
 	logger *slog.Logger,
 ) (json.RawMessage, bool) {
 	status, runtimeDir, err := d.probeUITestCapability()
@@ -74,7 +111,7 @@ func (d *Daemon) injectUITest(
 	}
 	baseConfig := agentConfig
 	if provider == "openclaw" {
-		baseConfig, err = d.openClawManagedMCPBase(agentConfig, openclawBin)
+		baseConfig, err = resolveBase(agentConfig)
 		if err != nil {
 			logger.Warn("ui-test: native MCP merge failed; launching without managed UI testing", "error", err)
 			return agentConfig, false
@@ -174,6 +211,23 @@ func (d *Daemon) resolveUITestExecutable() (string, error) {
 		resolver = resolveSelfExecutable
 	}
 	return resolver()
+}
+
+func (d *Daemon) newOpenClawMCPBaseResolver(openclawBin string) openClawMCPBaseResolver {
+	var attempted bool
+	var resolved json.RawMessage
+	var resolveErr error
+	return func(agentConfig json.RawMessage) (json.RawMessage, error) {
+		trimmed := bytes.TrimSpace(agentConfig)
+		if len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null")) {
+			return agentConfig, nil
+		}
+		if !attempted {
+			attempted = true
+			resolved, resolveErr = d.openClawManagedMCPBase(agentConfig, openclawBin)
+		}
+		return resolved, resolveErr
+	}
 }
 
 // openClawManagedMCPBase preserves native OpenClaw MCP inheritance when the
