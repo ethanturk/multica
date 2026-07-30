@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/color"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -290,14 +291,14 @@ func TestUIReportRejectsEvidenceGrowthDuringCaptureAndPreservesPrior(t *testing.
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	priorEvidence := filepath.Join(runDir, "prior.png")
+	priorEvidence := filepath.Join(runDir, "prior.log")
 	if err := os.WriteFile(priorEvidence, []byte("prior-sealed-evidence"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	priorInput := uiReportFixture()
 	priorInput["artifacts"] = []any{map[string]any{
-		"path": filepath.ToSlash(filepath.Join(DefaultArtifactDir, "ui-test", taskID, "prior.png")),
-		"type": "screenshot", "description": "Prior evidence",
+		"path": filepath.ToSlash(filepath.Join(DefaultArtifactDir, "ui-test", taskID, "prior.log")),
+		"type": "console", "description": "Prior evidence",
 	}}
 	if result := runUIReport(t, workDir, taskID, priorInput); result.Status != StatusOK {
 		t.Fatalf("prior publication = %+v", result)
@@ -306,7 +307,7 @@ func TestUIReportRejectsEvidenceGrowthDuringCaptureAndPreservesPrior(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	priorSealed, err := os.ReadFile(filepath.Join(runDir, uiTestPublishedDir, "prior.png"))
+	priorSealed, err := os.ReadFile(filepath.Join(runDir, uiTestPublishedDir, "prior.log"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +345,7 @@ func TestUIReportRejectsEvidenceGrowthDuringCaptureAndPreservesPrior(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	sealedAfter, err := os.ReadFile(filepath.Join(runDir, uiTestPublishedDir, "prior.png"))
+	sealedAfter, err := os.ReadFile(filepath.Join(runDir, uiTestPublishedDir, "prior.log"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,13 +364,15 @@ func TestUIReportRendersFourDeterministicRedactedOutputs(t *testing.T) {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for name, content := range map[string]string{
-		"b-console.log": "console evidence",
-		"a-screen.png":  "image evidence",
-	} {
-		if err := os.WriteFile(filepath.Join(runDir, name), []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.WriteFile(filepath.Join(runDir, "b-console.log"), []byte("console evidence"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(runDir, "a-screen.png"),
+		uiTestPNGFixture(t, color.RGBA{R: 1, G: 2, B: 3, A: 255}),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
 	}
 
 	input := uiReportFixture()
@@ -555,18 +558,18 @@ func TestUIReportConcurrentPublishersLeaveOneCoherentSnapshot(t *testing.T) {
 	for i := range publishers {
 		name := fmt.Sprintf("model-%02d", i)
 		content := "sealed-content-" + name
-		sourcePath := filepath.Join(sourceDir, name+".bin")
+		sourcePath := filepath.Join(sourceDir, name+".log")
 		if err := os.WriteFile(sourcePath, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		artifactPath := filepath.ToSlash(filepath.Join(DefaultArtifactDir, "ui-test", taskID, "sources", name+".bin"))
-		publishedPath := filepath.ToSlash(filepath.Join(DefaultArtifactDir, "ui-test", taskID, uiTestPublishedDir, "sources", name+".bin"))
+		artifactPath := filepath.ToSlash(filepath.Join(DefaultArtifactDir, "ui-test", taskID, "sources", name+".log"))
+		publishedPath := filepath.ToSlash(filepath.Join(DefaultArtifactDir, "ui-test", taskID, uiTestPublishedDir, "sources", name+".log"))
 		input := uiReportFixture()
 		input["scenarios"] = []any{map[string]any{
 			"id": "scenario-" + name, "name": name, "status": "passed",
 		}}
 		input["artifacts"] = []any{map[string]any{
-			"path": artifactPath, "type": "screenshot", "description": name,
+			"path": artifactPath, "type": "console", "description": name,
 		}}
 		raw, err := json.Marshal(input)
 		if err != nil {
@@ -795,7 +798,7 @@ func TestUIReportSealedBinarySnapshotSurvivesSourceReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := filepath.Join(runDir, "screen.png")
-	original := []byte("original-binary-snapshot")
+	original := uiTestPNGFixture(t, color.RGBA{R: 4, G: 5, B: 6, A: 255})
 	if err := os.WriteFile(source, original, 0o600); err != nil {
 		t.Fatal(err)
 	}

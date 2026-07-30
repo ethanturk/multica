@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/png"
 	"io"
 	"net/url"
 	"os"
@@ -182,6 +183,8 @@ type uiReportPublishState struct {
 	backup    string
 	directory bool
 	hadPrior  bool
+	oldDigest string
+	newDigest string
 }
 
 var uiTestReportInputSchema = json.RawMessage(`{
@@ -761,6 +764,9 @@ func captureUITestEvidence(
 	if !bytes.Equal(first, second) || !stableUITestEvidenceInfo(opened, middle) || !stableUITestEvidenceInfo(middle, after) {
 		return "", uiSealedEvidence{}, fmt.Errorf("evidence changed during capture")
 	}
+	if err := validateUITestEvidenceContent(artifact.Type, second); err != nil {
+		return "", uiSealedEvidence{}, err
+	}
 	encoding, _ := classifyUITestEvidence(artifact.Type, artifact.Path)
 	content, err := redactUITestEvidenceContent(encoding, second)
 	if err != nil {
@@ -807,6 +813,28 @@ func stableUITestEvidenceInfo(before, after os.FileInfo) bool {
 	return before.Mode() == after.Mode() &&
 		before.Size() == after.Size() &&
 		before.ModTime().Equal(after.ModTime())
+}
+
+func validateUITestEvidenceContent(artifactType string, content []byte) error {
+	if json.Valid(content) {
+		var value any
+		if err := json.Unmarshal(content, &value); err == nil && isUITestStorageStateValue(value) {
+			return fmt.Errorf("JSON evidence matches browser storage-state structure")
+		}
+	}
+	switch strings.ToLower(artifactType) {
+	case "screenshot", "png", "image/png":
+		reader := bytes.NewReader(content)
+		if _, err := png.Decode(reader); err != nil {
+			return fmt.Errorf("screenshot evidence is not a valid PNG: %w", err)
+		}
+		if reader.Len() != 0 {
+			return fmt.Errorf("screenshot evidence contains trailing non-PNG content")
+		}
+	case "trace", "zip", "application/zip":
+		return fmt.Errorf("trace evidence is not supported for publication in schema version 1")
+	}
+	return nil
 }
 
 func redactUITestEvidenceContent(encoding uiTestEvidenceEncoding, content []byte) ([]byte, error) {

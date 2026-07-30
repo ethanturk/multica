@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -281,6 +282,243 @@ func TestUIReportRecoveryRejectsForgedOrMalformedJournalWithoutCanonicalWrites(t
 	}
 }
 
+func TestUIReportRecoveryRequiresExplicitUniqueHadPrior(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(t *testing.T, raw []byte) []byte
+	}{
+		{
+			name: "omitted",
+			mutate: func(t *testing.T, raw []byte) []byte {
+				t.Helper()
+				changed := bytes.Replace(raw, []byte(`,"had_prior":true`), nil, 1)
+				if bytes.Equal(changed, raw) {
+					t.Fatal("generated journal had no had_prior field")
+				}
+				return changed
+			},
+		},
+		{
+			name: "duplicate",
+			mutate: func(t *testing.T, raw []byte) []byte {
+				t.Helper()
+				changed := bytes.Replace(
+					raw,
+					[]byte(`"had_prior":true`),
+					[]byte(`"had_prior":true,"had_prior":false`),
+					1,
+				)
+				if bytes.Equal(changed, raw) {
+					t.Fatal("generated journal had no had_prior field")
+				}
+				return changed
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			taskID := "task-required-had-prior"
+			if result := runUIReport(t, workDir, taskID, uiTransactionModelInput(t, workDir, taskID, "old")); result.Status != StatusOK {
+				t.Fatalf("old publication = %+v", result)
+			}
+			interruptUITransaction(t, workDir, taskID, "after journal", false)
+			runDir := uiReportRunDir(workDir, taskID)
+			journalPath := filepath.Join(runDir, uiTestPublicationJournalName)
+			raw, err := os.ReadFile(journalPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(journalPath, tt.mutate(t, raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before := snapshotUITransactionTree(t, runDir)
+
+			result := runUIReport(t, workDir, taskID, missingUITransactionEvidenceInput(taskID))
+			if result.Status != StatusError || result.ErrorCode != CodeInternal {
+				t.Fatalf("recovery result = %+v, want fail-closed INTERNAL_ERROR", result)
+			}
+			after := snapshotUITransactionTree(t, runDir)
+			if !reflect.DeepEqual(after, before) {
+				t.Fatal("invalid had_prior journal changed transaction state")
+			}
+		})
+	}
+}
+
+func TestUIReportRecoveryRejectsTamperedCommittedCanonicalBeforeCleanup(t *testing.T) {
+	tests := []struct {
+		name       string
+		tamperPath string
+	}{
+		{name: "generated report", tamperPath: uiTestReportJSONName},
+		{
+			name:       "evidence tree",
+			tamperPath: filepath.Join(uiTestPublishedDir, "sources", "new.log"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			taskID := "task-tampered-committed"
+			if result := runUIReport(t, workDir, taskID, uiTransactionModelInput(t, workDir, taskID, "old")); result.Status != StatusOK {
+				t.Fatalf("old publication = %+v", result)
+			}
+			interruptUITransaction(t, workDir, taskID, "after commit marker", true)
+			runDir := uiReportRunDir(workDir, taskID)
+			if err := os.WriteFile(filepath.Join(runDir, tt.tamperPath), []byte("tampered"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			before := snapshotUITransactionTree(t, runDir)
+
+			result := runUIReport(t, workDir, taskID, missingUITransactionEvidenceInput(taskID))
+			if result.Status != StatusError || result.ErrorCode != CodeInternal {
+				t.Fatalf("recovery result = %+v, want fail-closed INTERNAL_ERROR", result)
+			}
+			after := snapshotUITransactionTree(t, runDir)
+			if !reflect.DeepEqual(after, before) {
+				t.Fatal("tampered committed publication changed during failed recovery")
+			}
+		})
+	}
+}
+
+func TestUIReportRecoveryDoesNotDeleteUnknownNewCanonical(t *testing.T) {
+	workDir := t.TempDir()
+	taskID := "task-unknown-new-canonical"
+	interruptUITransaction(t, workDir, taskID, "after install report.json", false)
+	runDir := uiReportRunDir(workDir, taskID)
+	if err := os.WriteFile(
+		filepath.Join(runDir, uiTestReportJSONName),
+		[]byte(`{"unrecognized":"content"}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotUITransactionTree(t, runDir)
+
+	result := runUIReport(t, workDir, taskID, missingUITransactionEvidenceInput(taskID))
+	if result.Status != StatusError || result.ErrorCode != CodeInternal {
+		t.Fatalf("recovery result = %+v, want fail-closed INTERNAL_ERROR", result)
+	}
+	after := snapshotUITransactionTree(t, runDir)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatal("unknown new canonical changed during failed recovery")
+	}
+}
+
+func TestUIReportRecoveryRejectsCorruptedBackupBeforeRollback(t *testing.T) {
+	workDir := t.TempDir()
+	taskID := "task-corrupted-backup"
+	if result := runUIReport(t, workDir, taskID, uiTransactionModelInput(t, workDir, taskID, "old")); result.Status != StatusOK {
+		t.Fatalf("old publication = %+v", result)
+	}
+	interruptUITransaction(t, workDir, taskID, "after install report.json", false)
+	runDir := uiReportRunDir(workDir, taskID)
+	raw, err := os.ReadFile(filepath.Join(runDir, uiTestPublicationJournalName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var journal uiTestPublicationJournal
+	if err := json.Unmarshal(raw, &journal); err != nil {
+		t.Fatal(err)
+	}
+	backupPath := filepath.Join(runDir, "."+uiTestReportJSONName+".bak-"+journal.Token)
+	if err := os.WriteFile(backupPath, []byte(`{"corrupted":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotUITransactionTree(t, runDir)
+
+	result := runUIReport(t, workDir, taskID, missingUITransactionEvidenceInput(taskID))
+	if result.Status != StatusError || result.ErrorCode != CodeInternal {
+		t.Fatalf("recovery result = %+v, want fail-closed INTERNAL_ERROR", result)
+	}
+	after := snapshotUITransactionTree(t, runDir)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatal("corrupted backup transaction changed during failed recovery")
+	}
+}
+
+func interruptUITransaction(t *testing.T, workDir, taskID, point string, committed bool) {
+	t.Helper()
+	raw, err := json.Marshal(uiTransactionModelInput(t, workDir, taskID, "new"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	triggered := false
+	ctx := context.WithValue(
+		context.Background(),
+		uiTestPublicationFailpointContextKey{},
+		uiTestPublicationFailpoint(func(candidate string) error {
+			if candidate != point || triggered {
+				return nil
+			}
+			triggered = true
+			return errUITestPublicationInterrupted
+		}),
+	)
+	result := uiTestReportHandler(ctx, raw, ToolEnv{
+		WorkDir: workDir, ArtifactDir: DefaultArtifactDir, TaskID: taskID,
+	})
+	if !triggered {
+		t.Fatalf("failpoint %q was not reached", point)
+	}
+	if committed {
+		if result.Status != StatusOK {
+			t.Fatalf("committed interruption = %+v", result)
+		}
+		return
+	}
+	if result.Status != StatusError || result.ErrorCode != CodeInternal {
+		t.Fatalf("precommit interruption = %+v", result)
+	}
+}
+
+func missingUITransactionEvidenceInput(taskID string) map[string]any {
+	input := uiReportFixture()
+	input["artifacts"] = []any{map[string]any{
+		"path": filepath.ToSlash(filepath.Join(DefaultArtifactDir, "ui-test", taskID, "missing.png")),
+		"type": "screenshot", "description": "Missing after recovery",
+	}}
+	return input
+}
+
+type uiTransactionTreeEntry struct {
+	Mode    os.FileMode
+	Content []byte
+}
+
+func snapshotUITransactionTree(t *testing.T, runDir string) map[string]uiTransactionTreeEntry {
+	t.Helper()
+	snapshot := make(map[string]uiTransactionTreeEntry)
+	err := filepath.WalkDir(runDir, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(runDir, path)
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		item := uiTransactionTreeEntry{Mode: info.Mode()}
+		if info.Mode().IsRegular() {
+			item.Content, err = os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+		}
+		snapshot[filepath.ToSlash(relative)] = item
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
 func uiTransactionModelInput(t *testing.T, workDir, taskID, model string) map[string]any {
 	t.Helper()
 	runDir := uiReportRunDir(workDir, taskID)
@@ -288,7 +526,7 @@ func uiTransactionModelInput(t *testing.T, workDir, taskID, model string) map[st
 	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	source := filepath.Join(sourceDir, model+".png")
+	source := filepath.Join(sourceDir, model+".log")
 	if err := os.WriteFile(source, []byte("evidence-"+model), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -298,8 +536,8 @@ func uiTransactionModelInput(t *testing.T, workDir, taskID, model string) map[st
 		"id": "scenario-model", "name": model, "status": "passed",
 	}}
 	input["artifacts"] = []any{map[string]any{
-		"path": filepath.ToSlash(filepath.Join(DefaultArtifactDir, "ui-test", taskID, "sources", model+".png")),
-		"type": "screenshot", "description": model,
+		"path": filepath.ToSlash(filepath.Join(DefaultArtifactDir, "ui-test", taskID, "sources", model+".log")),
+		"type": "console", "description": model,
 	}}
 	return input
 }
@@ -316,7 +554,7 @@ func assertUITransactionModel(t *testing.T, workDir, taskID, model string) {
 		t.Fatal(err)
 	}
 	wantEvidencePath := filepath.ToSlash(filepath.Join(
-		DefaultArtifactDir, "ui-test", taskID, uiTestPublishedDir, "sources", model+".png",
+		DefaultArtifactDir, "ui-test", taskID, uiTestPublishedDir, "sources", model+".log",
 	))
 	if len(report.Scenarios) != 1 || report.Scenarios[0].Name != model ||
 		len(report.Artifacts) != 1 || report.Artifacts[0].Path != wantEvidencePath {
@@ -342,8 +580,8 @@ func assertUITransactionModel(t *testing.T, workDir, taskID, model string) {
 		if artifact.Path == wantEvidencePath {
 			found = true
 		}
-		if strings.Contains(artifact.Path, "/old.png") && model != "old" ||
-			strings.Contains(artifact.Path, "/new.png") && model != "new" {
+		if strings.Contains(artifact.Path, "/old.log") && model != "old" ||
+			strings.Contains(artifact.Path, "/new.log") && model != "new" {
 			t.Fatalf("manifest mixes models: %+v", manifest.Artifacts)
 		}
 	}

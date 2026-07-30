@@ -113,3 +113,40 @@ func TestUITestRedactionUsesNameValueAndCollectionContext(t *testing.T) {
 		}
 	}
 }
+
+func TestUITestRedactionDeterministicallyHandlesNormalizedNameConflicts(t *testing.T) {
+	for iteration := 0; iteration < 1000; iteration++ {
+		secret := "conflicting-secret"
+		input := map[string]any{
+			"nested": []any{
+				map[string]any{
+					"name":  "duration",
+					"Name":  "Authorization",
+					"value": secret,
+				},
+				map[string]any{
+					"name":  "duration",
+					"NAME":  "page",
+					"value": "ambiguous-diagnostic",
+				},
+				map[string]any{
+					"name":  "duration",
+					"value": "42ms",
+				},
+			},
+		}
+		raw, err := json.Marshal(redactUITestValue(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := string(raw)
+		for _, mustRedact := range []string{secret, "ambiguous-diagnostic"} {
+			if strings.Contains(got, mustRedact) {
+				t.Fatalf("iteration %d retained ambiguous value %q: %s", iteration, mustRedact, got)
+			}
+		}
+		if !strings.Contains(got, `"value":"42ms"`) {
+			t.Fatalf("iteration %d lost unrelated diagnostic: %s", iteration, got)
+		}
+	}
+}

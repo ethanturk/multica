@@ -58,14 +58,18 @@ func redactUITestValueInContext(value any, collection string) any {
 }
 
 func uiTestMapNamesCredential(value map[string]any) bool {
+	names := 0
 	for key, item := range value {
 		if normalizeUITestSecretKey(key) != "name" {
 			continue
 		}
+		names++
 		name, ok := item.(string)
-		return ok && isUITestCredentialName(name)
+		if ok && isUITestCredentialName(name) {
+			return true
+		}
 	}
-	return false
+	return names > 1
 }
 
 func isUITestCredentialName(name string) bool {
