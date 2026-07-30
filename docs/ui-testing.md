@@ -139,8 +139,13 @@ Use focused PNG, text, or JSON evidence instead.
 
 ## Security limits
 
-- Test only loopback HTTP/HTTPS targets. External top-level navigation,
-  redirects, popups, and disallowed requests are blocked.
+| Layer | Role | Enforcement |
+| --- | --- | --- |
+| launch_proxy | security_boundary | The managed Chromium launch proxy rejects non-loopback HTTP destinations and CONNECT targets before DNS or dial. |
+| allowed_origins | defense_in_depth | Playwright request filtering narrows normal requests but is advisory and does not enforce redirects. |
+
+- Test only loopback HTTP/HTTPS targets. The launch proxy blocks external
+  top-level navigation, redirects, popups, and subresource requests.
 - Use the managed role/name-based browser tools. Arbitrary page evaluation and
   `browser_run_code_unsafe` are hidden and rejected.
 - Use a fresh task-scoped Chromium profile. Never start an ad-hoc browser.
@@ -185,8 +190,9 @@ go test -race ./pkg/uitest ./pkg/dettools ./internal/daemon ./internal/service .
   Playwright MCP, Axe, Playwright, and isolated Chromium files.
 - `tools/list` exposes only the allowlist plus the fixed Axe scan.
   `tools/call` also rejects hidden or unknown tools.
-- Loopback policy is enforced for direct navigation and through Playwright
-  allowed-origin handling for redirects, popups, and requests.
+- Direct navigation is rejected before tool dispatch. The managed Chromium
+  launch proxy enforces loopback-only redirects, popups, and requests;
+  Playwright allowed-origin handling remains defense in depth.
 - Daemon-owned process groups are checked on success, failure, cancellation,
   and timeout. The smoke closes stdin and requires clean proxy/application
   exit.

@@ -656,7 +656,8 @@ func startUpstreamWithNetworkProxy(
 	cmd := exec.Command(node, paths.MCPCLI, "--config", paths.Config, "--storage-state", paths.StorageState)
 	cmd.Dir = session.opts.ArtifactDir
 	cmd.Env = replaceEnvironment(os.Environ(), map[string]string{
-		"PLAYWRIGHT_BROWSERS_PATH": paths.Browsers,
+		"PLAYWRIGHT_BROWSERS_PATH":                            paths.Browsers,
+		"PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK": "",
 	})
 	cmd.Stderr = logFile
 	stdout, err := cmd.StdoutPipe()

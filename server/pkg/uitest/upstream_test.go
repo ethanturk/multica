@@ -291,15 +291,21 @@ func TestStartUpstreamRunsMCPInTaskArtifactDirectory(t *testing.T) {
 	})
 
 	cwdPath := filepath.Join(t.TempDir(), "cwd")
+	proxyOverridePath := filepath.Join(t.TempDir(), "proxy-override")
 	binDir := t.TempDir()
 	nodePath := filepath.Join(binDir, "node")
 	if err := os.WriteFile(nodePath, []byte(
-		"#!/bin/sh\npwd > \"$MULTICA_UI_TEST_FAKE_NODE_CWD\"\nexec /bin/sleep 60\n",
+		"#!/bin/sh\n"+
+			"printf '%s' \"$PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK\" > \"$MULTICA_UI_TEST_FAKE_PROXY_OVERRIDE\"\n"+
+			"pwd > \"$MULTICA_UI_TEST_FAKE_NODE_CWD\"\n"+
+			"exec /bin/sleep 60\n",
 	), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir)
 	t.Setenv("MULTICA_UI_TEST_FAKE_NODE_CWD", cwdPath)
+	t.Setenv("MULTICA_UI_TEST_FAKE_PROXY_OVERRIDE", proxyOverridePath)
+	t.Setenv("PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK", "hostile")
 
 	upstream, _, err := startUpstream(session, fixture.runtime, fixture.trustedRoot, nil)
 	if err != nil {
@@ -351,6 +357,13 @@ func TestStartUpstreamRunsMCPInTaskArtifactDirectory(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(actual)); got != want {
 		t.Fatalf("Playwright MCP cwd = %q, want task artifact directory %q", got, want)
+	}
+	override, err := os.ReadFile(proxyOverridePath)
+	if err != nil {
+		t.Fatalf("read fake node proxy override: %v", err)
+	}
+	if len(override) != 0 {
+		t.Fatalf("child inherited forced-loopback disable override %q", override)
 	}
 	if err := upstream.Close(); err != nil {
 		t.Fatal(err)

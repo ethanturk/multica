@@ -763,13 +763,15 @@ func TestBuiltinSkillsUITestSourceMapLinksResolve(t *testing.T) {
 	sourceMap := skillFileContent(t, skill, "references/ui-testing-source-map.md")
 	sources := markdownTableByKey(t, sourceMap, "Sources", "Contract")
 	requireTableCases(t, sources, map[string]map[string]string{
-		"managed_runtime":       {"Target": "server/pkg/uitest/"},
-		"daemon_injection":      {"Target": "server/internal/daemon/ui_test_inject.go"},
-		"deterministic_report":  {"Target": "server/pkg/dettools/tool_ui_test_report.go"},
-		"ui_test_cli":           {"Target": "server/cmd/multica/cmd_uitest.go"},
-		"issue_publication":     {"Target": "server/cmd/multica/cmd_issue.go"},
-		"repository_manifest":   {"Target": ".multica/ui-test.json"},
-		"playwright_regression": {"Target": "playwright.config.ts"},
+		"managed_runtime":          {"Target": "server/pkg/uitest/"},
+		"browser_launch_policy":    {"Target": "server/pkg/uitest/upstream.go"},
+		"browser_network_boundary": {"Target": "server/pkg/uitest/network_proxy.go"},
+		"daemon_injection":         {"Target": "server/internal/daemon/ui_test_inject.go"},
+		"deterministic_report":     {"Target": "server/pkg/dettools/tool_ui_test_report.go"},
+		"ui_test_cli":              {"Target": "server/cmd/multica/cmd_uitest.go"},
+		"issue_publication":        {"Target": "server/cmd/multica/cmd_issue.go"},
+		"repository_manifest":      {"Target": ".multica/ui-test.json"},
+		"playwright_regression":    {"Target": "playwright.config.ts"},
 	})
 
 	root := repositoryRoot(t)
@@ -821,6 +823,11 @@ func TestBuiltinSkillsUITestDocumentationStructure(t *testing.T) {
 		"png":       {"V1 report input": "accepted"},
 		"text_json": {"V1 report input": "accepted"},
 		"trace_zip": {"V1 report input": "rejected"},
+	})
+	boundaries := markdownTableByKey(t, doc, "Security limits", "Layer")
+	requireTableCases(t, boundaries, map[string]map[string]string{
+		"launch_proxy":    {"Role": "security_boundary"},
+		"allowed_origins": {"Role": "defense_in_depth"},
 	})
 }
 

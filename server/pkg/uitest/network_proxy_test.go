@@ -159,7 +159,12 @@ func TestLoopbackProxyForwardsHTTPUpgrade(t *testing.T) {
 		}
 		_ = request.Body.Close()
 		_, _ = io.WriteString(connection,
-			"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n")
+			"HTTP/1.1 101 Switching Protocols\r\n"+
+				"Connection: Upgrade, X-Remove-Response\r\n"+
+				"Upgrade: websocket\r\n"+
+				"Proxy-Connection: keep-alive\r\n"+
+				"Keep-Alive: timeout=5\r\n"+
+				"X-Remove-Response: secret\r\n\r\n")
 		_, _ = io.Copy(connection, connection)
 	}()
 
@@ -180,6 +185,13 @@ func TestLoopbackProxyForwardsHTTPUpgrade(t *testing.T) {
 	}
 	if response.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("upgrade status = %d, want 101", response.StatusCode)
+	}
+	if response.Header.Get("Connection") != "Upgrade" ||
+		response.Header.Get("Upgrade") != "websocket" ||
+		response.Header.Get("Proxy-Connection") != "" ||
+		response.Header.Get("Keep-Alive") != "" ||
+		response.Header.Get("X-Remove-Response") != "" {
+		t.Fatalf("unsafe upgrade response headers reached client: %v", response.Header)
 	}
 	if _, err := io.WriteString(connection, "upgrade"); err != nil {
 		t.Fatal(err)

@@ -40,7 +40,7 @@ window.open('https://example.com', '_blank');
 <script>
 console.error("fixture console error");
 fetch("/missing");
-fetch("https://example.com/multica-ui-test-external-probe")
+fetch("https://example.com/multica-ui-test-external-probe", {mode: "no-cors"})
   .then(() => document.getElementById("external-request").textContent = "external request escaped")
   .catch(() => document.getElementById("external-request").textContent = "external request blocked");
 </script>`)

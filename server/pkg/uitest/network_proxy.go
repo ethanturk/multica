@@ -160,6 +160,7 @@ func (p *loopbackForwardProxy) forwardUpgrade(writer http.ResponseWriter, respon
 		http.Error(writer, "UI test proxy upgrade unavailable", http.StatusInternalServerError)
 		return
 	}
+	stripProxyHopHeaders(response.Header, true)
 	client, buffered, err := hijacker.Hijack()
 	if err != nil {
 		_ = upstream.Close()
