@@ -1009,7 +1009,67 @@ func readUITestPublicationJSON(root *os.Root, name string, value any) error {
 	if err := rejectDuplicateUITestPublicationJSONKeys(raw); err != nil {
 		return fmt.Errorf("%s: %w", name, err)
 	}
+	if err := validateCanonicalUITestPublicationJSONKeys(raw, value); err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
 	return strictUIReportUnmarshal(raw, value)
+}
+
+func validateCanonicalUITestPublicationJSONKeys(raw []byte, value any) error {
+	switch value.(type) {
+	case *uiTestPublicationJournal:
+		root, err := decodeCanonicalUITestPublicationObject(
+			raw, "schema", "version", "token", "items",
+		)
+		if err != nil {
+			return err
+		}
+		var items []json.RawMessage
+		if err := json.Unmarshal(root["items"], &items); err != nil {
+			return fmt.Errorf("publication journal items must be an array: %w", err)
+		}
+		for index, item := range items {
+			if _, err := decodeCanonicalUITestPublicationObject(
+				item, "name", "directory", "had_prior", "old_digest", "new_digest",
+			); err != nil {
+				return fmt.Errorf("publication journal item %d: %w", index, err)
+			}
+		}
+		return nil
+	case *uiTestPublicationCommit:
+		_, err := decodeCanonicalUITestPublicationObject(
+			raw, "schema", "version", "token", "new_digests",
+		)
+		return err
+	default:
+		return fmt.Errorf("unsupported publication state type")
+	}
+}
+
+func decodeCanonicalUITestPublicationObject(
+	raw []byte,
+	required ...string,
+) (map[string]json.RawMessage, error) {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return nil, fmt.Errorf("publication state must be an object: %w", err)
+	}
+	if object == nil {
+		return nil, fmt.Errorf("publication state must be an object")
+	}
+	allowed := make(map[string]struct{}, len(required))
+	for _, key := range required {
+		allowed[key] = struct{}{}
+		if _, exists := object[key]; !exists {
+			return nil, fmt.Errorf("publication state lacks canonical key %q", key)
+		}
+	}
+	for key := range object {
+		if _, exists := allowed[key]; !exists {
+			return nil, fmt.Errorf("publication state contains noncanonical key %q", key)
+		}
+	}
+	return object, nil
 }
 
 func rejectDuplicateUITestPublicationJSONKeys(raw []byte) error {

@@ -277,7 +277,10 @@ var uiTestReportInputSchema = json.RawMessage(`{
         "type": "object",
         "properties": {
           "path": {"type": "string"},
-          "type": {"type": "string"},
+          "type": {
+            "type": "string",
+            "description": "V1 accepts PNG screenshots (screenshot, png, image/png) and supported text/JSON evidence types. Trace/ZIP evidence is rejected."
+          },
           "description": {"type": "string"},
           "machine_data": {"type": "object"}
         },
@@ -293,7 +296,7 @@ var uiTestReportInputSchema = json.RawMessage(`{
 func uiTestReportTool() Tool {
 	return Tool{
 		Name:        uiTestReportToolName,
-		Description: "Validate, normalize, redact, and publish deterministic UI-test results. Verdict is derived from execution and objective checks; callers must not supply it. Writes four task-scoped report artifacts.",
+		Description: "Validate, normalize, redact, and publish deterministic UI-test results. V1 accepts PNG screenshots and supported text/JSON evidence; trace/ZIP evidence is rejected. Verdict is derived from execution and objective checks; callers must not supply it. Writes four task-scoped report artifacts.",
 		InputSchema: uiTestReportInputSchema,
 		Handler:     uiTestReportHandler,
 	}

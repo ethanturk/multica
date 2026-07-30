@@ -346,6 +346,102 @@ func TestUIReportRecoveryRequiresExplicitUniqueHadPrior(t *testing.T) {
 	}
 }
 
+func TestUIReportRecoveryRejectsCaseVariantJournalKeysWithoutMutation(t *testing.T) {
+	tests := []struct {
+		name      string
+		canonical string
+		alias     string
+		item      bool
+	}{
+		{name: "root schema", canonical: "schema", alias: "Schema"},
+		{name: "root version", canonical: "version", alias: "Version"},
+		{name: "root token", canonical: "token", alias: "TOKEN"},
+		{name: "root items", canonical: "items", alias: "ITEMS"},
+		{name: "item name", canonical: "name", alias: "Name", item: true},
+		{name: "item directory", canonical: "directory", alias: "Directory", item: true},
+		{name: "item had prior", canonical: "had_prior", alias: "HAD_PRIOR", item: true},
+		{name: "item old digest", canonical: "old_digest", alias: "OLD_DIGEST", item: true},
+		{name: "item new digest", canonical: "new_digest", alias: "NEW_DIGEST", item: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			taskID := "task-journal-key-alias"
+			if result := runUIReport(t, workDir, taskID, uiTransactionModelInput(t, workDir, taskID, "old")); result.Status != StatusOK {
+				t.Fatalf("old publication = %+v", result)
+			}
+			interruptUITransaction(t, workDir, taskID, "after journal", false)
+			runDir := uiReportRunDir(workDir, taskID)
+			journalPath := filepath.Join(runDir, uiTestPublicationJournalName)
+			raw, err := os.ReadFile(journalPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw = addUITransactionJSONAlias(t, raw, tt.canonical, tt.alias, tt.item)
+			if err := os.WriteFile(journalPath, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			assertUITransactionRecoveryRejectedWithoutMutation(t, workDir, taskID, runDir)
+		})
+	}
+}
+
+func TestUIReportRecoveryRejectsHighCountCaseVariantJournalKeysWithoutMutation(t *testing.T) {
+	workDir := t.TempDir()
+	taskID := "task-many-journal-key-aliases"
+	if result := runUIReport(t, workDir, taskID, uiTransactionModelInput(t, workDir, taskID, "old")); result.Status != StatusOK {
+		t.Fatalf("old publication = %+v", result)
+	}
+	interruptUITransaction(t, workDir, taskID, "after journal", false)
+	runDir := uiReportRunDir(workDir, taskID)
+	journalPath := filepath.Join(runDir, uiTestPublicationJournalName)
+	raw, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, alias := range uiTransactionCaseVariants("had_prior", 128) {
+		raw = addUITransactionJSONAlias(t, raw, "had_prior", alias, true)
+	}
+	if err := os.WriteFile(journalPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertUITransactionRecoveryRejectedWithoutMutation(t, workDir, taskID, runDir)
+}
+
+func TestUIReportRecoveryRejectsCaseVariantMarkerKeysWithoutMutation(t *testing.T) {
+	tests := []struct {
+		name      string
+		canonical string
+		alias     string
+	}{
+		{name: "schema", canonical: "schema", alias: "Schema"},
+		{name: "version", canonical: "version", alias: "Version"},
+		{name: "token", canonical: "token", alias: "TOKEN"},
+		{name: "new digests", canonical: "new_digests", alias: "NEW_DIGESTS"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			taskID := "task-marker-key-alias"
+			if result := runUIReport(t, workDir, taskID, uiTransactionModelInput(t, workDir, taskID, "old")); result.Status != StatusOK {
+				t.Fatalf("old publication = %+v", result)
+			}
+			interruptUITransaction(t, workDir, taskID, "after commit marker", true)
+			runDir := uiReportRunDir(workDir, taskID)
+			markerPath := filepath.Join(runDir, uiTestPublicationCommitName)
+			raw, err := os.ReadFile(markerPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw = addUITransactionJSONAlias(t, raw, tt.canonical, tt.alias, false)
+			if err := os.WriteFile(markerPath, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			assertUITransactionRecoveryRejectedWithoutMutation(t, workDir, taskID, runDir)
+		})
+	}
+}
+
 func TestUIReportRecoveryRejectsTamperedCommittedCanonicalBeforeCleanup(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -436,6 +532,78 @@ func TestUIReportRecoveryRejectsCorruptedBackupBeforeRollback(t *testing.T) {
 	after := snapshotUITransactionTree(t, runDir)
 	if !reflect.DeepEqual(after, before) {
 		t.Fatal("corrupted backup transaction changed during failed recovery")
+	}
+}
+
+func addUITransactionJSONAlias(
+	t *testing.T,
+	raw []byte,
+	canonical string,
+	alias string,
+	item bool,
+) []byte {
+	t.Helper()
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &root); err != nil {
+		t.Fatal(err)
+	}
+	fields := root
+	if item {
+		var items []map[string]json.RawMessage
+		if err := json.Unmarshal(root["items"], &items); err != nil {
+			t.Fatal(err)
+		}
+		fields = items[0]
+	}
+	value, ok := fields[canonical]
+	if !ok {
+		t.Fatalf("generated transaction state lacks %q", canonical)
+	}
+	needle := append([]byte(`"`+canonical+`":`), value...)
+	replacement := append(append([]byte(nil), needle...), []byte(`,"`+alias+`":`)...)
+	replacement = append(replacement, value...)
+	changed := bytes.Replace(raw, needle, replacement, 1)
+	if bytes.Equal(changed, raw) {
+		t.Fatalf("generated transaction state pair %q was not found", canonical)
+	}
+	return changed
+}
+
+func uiTransactionCaseVariants(value string, limit int) []string {
+	letters := make([]int, 0, len(value))
+	for index, character := range value {
+		if character >= 'a' && character <= 'z' {
+			letters = append(letters, index)
+		}
+	}
+	variants := make([]string, 0, limit)
+	for mask := 1; mask < 1<<len(letters) && len(variants) < limit; mask++ {
+		candidate := []byte(value)
+		for bit, index := range letters {
+			if mask&(1<<bit) != 0 {
+				candidate[index] -= 'a' - 'A'
+			}
+		}
+		variants = append(variants, string(candidate))
+	}
+	return variants
+}
+
+func assertUITransactionRecoveryRejectedWithoutMutation(
+	t *testing.T,
+	workDir string,
+	taskID string,
+	runDir string,
+) {
+	t.Helper()
+	before := snapshotUITransactionTree(t, runDir)
+	result := runUIReport(t, workDir, taskID, missingUITransactionEvidenceInput(taskID))
+	if result.Status != StatusError || result.ErrorCode != CodeInternal {
+		t.Fatalf("recovery result = %+v, want fail-closed INTERNAL_ERROR", result)
+	}
+	after := snapshotUITransactionTree(t, runDir)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatal("invalid transaction key alias changed transaction state")
 	}
 }
 
