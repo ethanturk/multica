@@ -820,6 +820,9 @@ func stableUITestEvidenceInfo(before, after os.FileInfo) bool {
 
 func validateUITestEvidenceContent(artifactType string, content []byte) error {
 	if json.Valid(content) {
+		if err := rejectDuplicateUITestJSONKeys(content, "JSON evidence"); err != nil {
+			return err
+		}
 		var value any
 		if err := json.Unmarshal(content, &value); err == nil && isUITestStorageStateValue(value) {
 			return fmt.Errorf("JSON evidence matches browser storage-state structure")
@@ -845,6 +848,9 @@ func redactUITestEvidenceContent(encoding uiTestEvidenceEncoding, content []byte
 	case uiTestEvidenceBinary:
 		return append([]byte(nil), content...), nil
 	case uiTestEvidenceJSON:
+		if err := rejectDuplicateUITestJSONKeys(content, "JSON evidence"); err != nil {
+			return nil, fmt.Errorf("decode JSON evidence: %w", err)
+		}
 		var value any
 		decoder := json.NewDecoder(bytes.NewReader(content))
 		if err := decoder.Decode(&value); err != nil {

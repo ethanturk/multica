@@ -1078,21 +1078,25 @@ func decodeCanonicalUITestPublicationObject(
 }
 
 func rejectDuplicateUITestPublicationJSONKeys(raw []byte) error {
+	return rejectDuplicateUITestJSONKeys(raw, "publication state")
+}
+
+func rejectDuplicateUITestJSONKeys(raw []byte, subject string) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
-	if err := consumeUITestPublicationJSONValue(decoder); err != nil {
+	if err := consumeUITestJSONValue(decoder, subject); err != nil {
 		return err
 	}
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
 		if err == nil {
-			return fmt.Errorf("publication state contains trailing JSON")
+			return fmt.Errorf("%s contains trailing JSON", subject)
 		}
 		return err
 	}
 	return nil
 }
 
-func consumeUITestPublicationJSONValue(decoder *json.Decoder) error {
+func consumeUITestJSONValue(decoder *json.Decoder, subject string) error {
 	token, err := decoder.Token()
 	if err != nil {
 		return err
@@ -1111,13 +1115,13 @@ func consumeUITestPublicationJSONValue(decoder *json.Decoder) error {
 			}
 			key, ok := keyToken.(string)
 			if !ok {
-				return fmt.Errorf("publication state object key is not a string")
+				return fmt.Errorf("%s object key is not a string", subject)
 			}
 			if _, duplicate := seen[key]; duplicate {
-				return fmt.Errorf("publication state contains duplicate key %q", key)
+				return fmt.Errorf("%s contains duplicate key %q", subject, key)
 			}
 			seen[key] = struct{}{}
-			if err := consumeUITestPublicationJSONValue(decoder); err != nil {
+			if err := consumeUITestJSONValue(decoder, subject); err != nil {
 				return err
 			}
 		}
@@ -1126,11 +1130,11 @@ func consumeUITestPublicationJSONValue(decoder *json.Decoder) error {
 			return err
 		}
 		if closeToken != json.Delim('}') {
-			return fmt.Errorf("publication state object is not closed")
+			return fmt.Errorf("%s object is not closed", subject)
 		}
 	case '[':
 		for decoder.More() {
-			if err := consumeUITestPublicationJSONValue(decoder); err != nil {
+			if err := consumeUITestJSONValue(decoder, subject); err != nil {
 				return err
 			}
 		}
@@ -1139,10 +1143,10 @@ func consumeUITestPublicationJSONValue(decoder *json.Decoder) error {
 			return err
 		}
 		if closeToken != json.Delim(']') {
-			return fmt.Errorf("publication state array is not closed")
+			return fmt.Errorf("%s array is not closed", subject)
 		}
 	default:
-		return fmt.Errorf("unexpected publication state delimiter %q", delim)
+		return fmt.Errorf("unexpected %s delimiter %q", subject, delim)
 	}
 	return nil
 }

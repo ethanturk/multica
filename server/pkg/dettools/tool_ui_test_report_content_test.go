@@ -181,6 +181,100 @@ func TestUIReportRejectsAmbiguousStorageStateAliasesDeterministically(t *testing
 	}
 }
 
+func TestUIReportRejectsDuplicateEvidenceKeysDeterministically(t *testing.T) {
+	workDir := t.TempDir()
+	taskID := "task-duplicate-evidence-key"
+	if result := runUIReport(t, workDir, taskID, uiReportFixture()); result.Status != StatusOK {
+		t.Fatalf("prior publication = %+v", result)
+	}
+	runDir := uiReportRunDir(workDir, taskID)
+	source := filepath.Join(runDir, "safe.json")
+	content := []byte(`{"cookies":[],"cookies":"wrong","origins":[{"origin":"http://127.0.0.1","localStorage":[{"name":"theme","value":"local-secret"}]}]}`)
+	if err := os.WriteFile(source, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantState := snapshotUITransactionTree(t, runDir)
+	input := uiReportFixture()
+	input["artifacts"] = []any{map[string]any{
+		"path": filepath.ToSlash(filepath.Join(DefaultArtifactDir, "ui-test", taskID, "safe.json")),
+		"type": "json", "description": "Safe name",
+	}}
+	var want Result
+	for iteration := 0; iteration < 128; iteration++ {
+		result := runUIReport(t, workDir, taskID, input)
+		if result.Status != StatusError || result.ErrorCode != CodeInvalidInput {
+			t.Fatalf("iteration %d result = %+v, want INVALID_INPUT", iteration, result)
+		}
+		if iteration == 0 {
+			want = result
+		} else if !reflect.DeepEqual(result, want) {
+			t.Fatalf("iteration %d result = %#v, want %#v", iteration, result, want)
+		}
+		if state := snapshotUITransactionTree(t, runDir); !reflect.DeepEqual(state, wantState) {
+			t.Fatalf("iteration %d changed prior publication", iteration)
+		}
+	}
+}
+
+func TestUITestEvidenceRejectsDuplicateObjectNamesRecursively(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		reject  bool
+	}{
+		{
+			name:    "root cookies",
+			content: `{"cookies":[],"cookies":"wrong","origins":[]}`,
+			reject:  true,
+		},
+		{
+			name:    "nested local storage",
+			content: `{"origins":[{"localStorage":[],"localStorage":"wrong"}]}`,
+			reject:  true,
+		},
+		{
+			name:    "nested name",
+			content: `{"entries":[{"name":"first","name":"second"}]}`,
+			reject:  true,
+		},
+		{
+			name:    "nested value in arrays",
+			content: `{"rows":[[{"value":1,"value":2}]]}`,
+			reject:  true,
+		},
+		{
+			name:    "benign arrays and primitives",
+			content: `[null,true,false,1,"text",[1,2],{"name":"duration","value":"42ms"}]`,
+		},
+		{
+			name:    "unique nested objects",
+			content: `{"cookies":"enabled","origins":"source","nested":{"name":"duration","value":"42ms"}}`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			validateErr := validateUITestEvidenceContent("json", []byte(test.content))
+			_, redactErr := redactUITestEvidenceContent(uiTestEvidenceJSON, []byte(test.content))
+			if test.reject {
+				if validateErr == nil {
+					t.Fatal("validation accepted duplicate object name")
+				}
+				if redactErr == nil {
+					t.Fatal("redaction accepted duplicate object name")
+				}
+				return
+			}
+			if validateErr != nil {
+				t.Fatalf("validation rejected valid JSON: %v", validateErr)
+			}
+			if redactErr != nil {
+				t.Fatalf("redaction rejected valid JSON: %v", redactErr)
+			}
+		})
+	}
+}
+
 func uiTestPNGFixture(t *testing.T, pixel color.RGBA) []byte {
 	t.Helper()
 	var out bytes.Buffer
