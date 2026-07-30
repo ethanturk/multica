@@ -150,3 +150,75 @@ func TestUITestRedactionDeterministicallyHandlesNormalizedNameConflicts(t *testi
 		}
 	}
 }
+
+func TestUITestStorageStateDetectionHandlesAliasesConservatively(t *testing.T) {
+	tests := []struct {
+		name  string
+		value any
+		want  bool
+	}{
+		{
+			name: "conflicting cookie aliases",
+			value: map[string]any{
+				"cookies": "wrong",
+				"Cookies": []any{},
+				"origins": []any{},
+			},
+			want: true,
+		},
+		{
+			name: "mixed case storage state",
+			value: map[string]any{
+				"CoOkIeS": []any{},
+				"ORIGINS": []any{},
+			},
+			want: true,
+		},
+		{
+			name: "nested local storage alias conflict",
+			value: map[string]any{
+				"origins": []any{
+					map[string]any{
+						"localStorage":  []any{},
+						"Local_Storage": "wrong",
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "cookies alone",
+			value: map[string]any{
+				"cookies": []any{},
+			},
+		},
+		{
+			name: "origins alone",
+			value: map[string]any{
+				"origins": []any{},
+			},
+		},
+		{
+			name: "consistent local storage aliases",
+			value: map[string]any{
+				"localStorage":  []any{},
+				"Local_Storage": []any{},
+			},
+		},
+		{
+			name: "unrelated scalar fields",
+			value: map[string]any{
+				"cookies": "enabled",
+				"origins": "source",
+			},
+		},
+	}
+
+	for iteration := 0; iteration < 1000; iteration++ {
+		for _, test := range tests {
+			if got := isUITestStorageStateValue(test.value); got != test.want {
+				t.Fatalf("iteration %d %s = %t, want %t", iteration, test.name, got, test.want)
+			}
+		}
+	}
+}

@@ -86,21 +86,51 @@ func isUITestCredentialName(name string) bool {
 }
 
 func isUITestStorageStateValue(value any) bool {
-	object, ok := value.(map[string]any)
-	if !ok {
-		return false
-	}
-	hasCookies := false
-	hasOrigins := false
-	for key, item := range object {
-		switch normalizeUITestSecretKey(key) {
-		case "cookies":
-			_, hasCookies = item.([]any)
-		case "origins":
-			_, hasOrigins = item.([]any)
+	storageState, ambiguous := inspectUITestStorageStateValue(value)
+	return storageState || ambiguous
+}
+
+func inspectUITestStorageStateValue(value any) (bool, bool) {
+	switch value := value.(type) {
+	case map[string]any:
+		type shape struct {
+			seen  bool
+			array bool
 		}
+		shapes := map[string]shape{}
+		nestedStorage := false
+		ambiguous := false
+		for key, item := range value {
+			if storage, conflict := inspectUITestStorageStateValue(item); storage || conflict {
+				nestedStorage = nestedStorage || storage
+				ambiguous = ambiguous || conflict
+			}
+			normalized := normalizeUITestSecretKey(key)
+			if normalized != "cookies" && normalized != "origins" && normalized != "localstorage" {
+				continue
+			}
+			_, array := item.([]any)
+			prior := shapes[normalized]
+			if prior.seen && prior.array != array {
+				ambiguous = true
+			}
+			shapes[normalized] = shape{seen: true, array: prior.array || array}
+		}
+		cookies := shapes["cookies"]
+		origins := shapes["origins"]
+		return nestedStorage || cookies.array && origins.array, ambiguous
+	case []any:
+		storageState := false
+		ambiguous := false
+		for _, item := range value {
+			storage, conflict := inspectUITestStorageStateValue(item)
+			storageState = storageState || storage
+			ambiguous = ambiguous || conflict
+		}
+		return storageState, ambiguous
+	default:
+		return false, false
 	}
-	return hasCookies && hasOrigins
 }
 
 func normalizeUITestSecretKey(key string) string {

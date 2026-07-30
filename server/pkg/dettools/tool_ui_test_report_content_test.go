@@ -8,6 +8,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -141,6 +142,41 @@ func TestUIReportAcceptsValidatedPNGScreenshot(t *testing.T) {
 		}
 		if strings.Contains(string(raw), "report-secret") {
 			t.Fatalf("%s contains report secret", name)
+		}
+	}
+}
+
+func TestUIReportRejectsAmbiguousStorageStateAliasesDeterministically(t *testing.T) {
+	workDir := t.TempDir()
+	taskID := "task-storage-alias"
+	if result := runUIReport(t, workDir, taskID, uiReportFixture()); result.Status != StatusOK {
+		t.Fatalf("prior publication = %+v", result)
+	}
+	runDir := uiReportRunDir(workDir, taskID)
+	source := filepath.Join(runDir, "safe.json")
+	content := []byte(`{"cookies":"wrong","Cookies":[],"origins":[{"origin":"http://127.0.0.1","localStorage":[{"name":"theme","value":"local-secret"}]}]}`)
+	if err := os.WriteFile(source, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantState := snapshotUITransactionTree(t, runDir)
+	input := uiReportFixture()
+	input["artifacts"] = []any{map[string]any{
+		"path": filepath.ToSlash(filepath.Join(DefaultArtifactDir, "ui-test", taskID, "safe.json")),
+		"type": "json", "description": "Safe name",
+	}}
+	var want Result
+	for iteration := 0; iteration < 128; iteration++ {
+		result := runUIReport(t, workDir, taskID, input)
+		if result.Status != StatusError || result.ErrorCode != CodeInvalidInput {
+			t.Fatalf("iteration %d result = %+v, want INVALID_INPUT", iteration, result)
+		}
+		if iteration == 0 {
+			want = result
+		} else if !reflect.DeepEqual(result, want) {
+			t.Fatalf("iteration %d result = %#v, want %#v", iteration, result, want)
+		}
+		if state := snapshotUITransactionTree(t, runDir); !reflect.DeepEqual(state, wantState) {
+			t.Fatalf("iteration %d changed prior publication", iteration)
 		}
 	}
 }
