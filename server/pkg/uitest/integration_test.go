@@ -99,17 +99,9 @@ func TestUITestIntegrationRealBrowserPolicy(t *testing.T) {
 		_ = session.Close()
 		t.Fatalf("start pinned Playwright MCP (also validates config schema): %v", err)
 	}
+	var managedProcesses []integrationManagedProcessReference
 	var chromiumProcesses []integrationProcessIdentity
 	defer func() {
-		session.registry.mu.Lock()
-		childPIDs := make([]int, 0, len(session.registry.processes))
-		for pid := range session.registry.processes {
-			childPIDs = append(childPIDs, pid)
-		}
-		session.registry.mu.Unlock()
-		if len(childPIDs) < 2 {
-			t.Errorf("managed process registry contained %d children before close, want app and browser owner", len(childPIDs))
-		}
 		if err := upstream.Close(); err != nil {
 			t.Errorf("close upstream: %v", err)
 		}
@@ -119,13 +111,20 @@ func TestUITestIntegrationRealBrowserPolicy(t *testing.T) {
 		if _, err := os.Stat(taskStateDir(workDir, "integration")); !os.IsNotExist(err) {
 			t.Errorf("managed children/process metadata remain after close: %v", err)
 		}
-		for _, pid := range childPIDs {
+		for _, managed := range managedProcesses {
 			deadline := time.Now().Add(2 * time.Second)
-			for platformProcessAlive(pid) && time.Now().Before(deadline) {
+			for !integrationManagedProcessComplete(managed.Done) &&
+				time.Now().Before(deadline) {
 				time.Sleep(10 * time.Millisecond)
 			}
-			if platformProcessAlive(pid) {
-				t.Errorf("managed child PID %d remained alive after close", pid)
+			if !integrationManagedProcessComplete(managed.Done) {
+				t.Errorf(
+					"managed %s PID %d (%s, birth %s) did not complete after close",
+					managed.Kind,
+					managed.Identity.PID,
+					managed.Identity.Executable,
+					managed.Identity.BirthToken,
+				)
 			}
 		}
 		for _, process := range chromiumProcesses {
@@ -145,10 +144,10 @@ func TestUITestIntegrationRealBrowserPolicy(t *testing.T) {
 				t.Errorf("check Chromium descendant PID %d after close: %v", process.PID, identityErr)
 			} else if alive {
 				t.Errorf(
-					"Chromium descendant PID %d (%s, started %s) remained alive after close",
+					"Chromium descendant PID %d (%s, birth %s) remained alive after close",
 					process.PID,
 					process.Executable,
-					process.StartedAt,
+					process.BirthToken,
 				)
 			}
 		}
@@ -164,6 +163,11 @@ func TestUITestIntegrationRealBrowserPolicy(t *testing.T) {
 		Params: json.RawMessage(`{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"integration","version":"1"}}`),
 	}))
 	assertIntegrationToolOK(t, integrationToolCall(proxy, 2, "browser_navigate", map[string]any{"url": baseURL.String()}))
+	managedProcesses, err = integrationManagedProcessReferences(session)
+	if err != nil {
+		t.Fatalf("capture managed process completion references: %v", err)
+	}
+	browserOwner := integrationBrowserOwnerIdentity(t, managedProcesses)
 	screenshot := assertIntegrationToolOK(t, integrationToolCall(proxy, 3, "browser_take_screenshot", map[string]any{
 		"type": "png", "filename": "integration.png",
 	}))
@@ -171,13 +175,12 @@ func TestUITestIntegrationRealBrowserPolicy(t *testing.T) {
 	if err := validateIntegrationScreenshot(screenshot, screenshotPath); err != nil {
 		t.Fatalf("screenshot capture evidence: %v", err)
 	}
-	browserOwnerPID := integrationBrowserOwnerPID(t, session)
-	chromiumProcesses, err = integrationChromiumDescendantProcesses(browserOwnerPID)
+	chromiumProcesses, err = integrationChromiumDescendantProcesses(browserOwner)
 	if err != nil {
 		t.Fatalf("capture live Chromium descendants: %v", err)
 	}
 	if len(chromiumProcesses) == 0 {
-		t.Fatalf("browser owner PID %d had no live Chromium descendants", browserOwnerPID)
+		t.Fatalf("browser owner PID %d had no live Chromium descendants", browserOwner.PID)
 	}
 	beforePopup := integrationToolCall(proxy, 4, "browser_snapshot", map[string]any{})
 	assertIntegrationToolOK(t, beforePopup)
@@ -325,42 +328,174 @@ func validateIntegrationScreenshot(result integrationToolResult, path string) er
 	return nil
 }
 
-func integrationBrowserOwnerPID(t *testing.T, session *Session) int {
-	t.Helper()
-	session.registry.mu.Lock()
-	defer session.registry.mu.Unlock()
-	for _, process := range session.registry.processes {
-		if process.record.Kind == "browser" && process.record.ChildPID > 0 {
-			return process.record.ChildPID
-		}
-	}
-	t.Fatal("managed browser owner missing from live process registry")
-	return 0
-}
-
 type integrationProcessIdentity struct {
-	PID        int
-	StartedAt  string
-	Executable string
+	PID               int
+	BirthToken        string
+	CreatedAtUnixNano int64
+	Executable        string
 }
 
 type integrationProcessLookup func(int) (integrationProcessIdentity, bool, error)
+
+type integrationProcessTreeEntry struct {
+	PID        int
+	ParentPID  int
+	Executable string
+}
+
+type integrationProcessTreeSnapshot struct {
+	CaptureStartedAtUnixNano int64
+	Entries                  map[int]integrationProcessTreeEntry
+}
+
+type integrationProcessSnapshotter func() (integrationProcessTreeSnapshot, error)
+
+type integrationManagedProcessReference struct {
+	Kind     string
+	Identity integrationProcessIdentity
+	Done     <-chan struct{}
+}
+
+func integrationManagedProcessReferences(
+	session *Session,
+) ([]integrationManagedProcessReference, error) {
+	session.registry.mu.Lock()
+	processes := make([]*managedProcess, 0, len(session.registry.processes))
+	for _, process := range session.registry.processes {
+		processes = append(processes, process)
+	}
+	session.registry.mu.Unlock()
+	if len(processes) < 2 {
+		return nil, fmt.Errorf(
+			"managed process registry contained %d children, want app and browser owner",
+			len(processes),
+		)
+	}
+	references := make([]integrationManagedProcessReference, 0, len(processes))
+	for _, process := range processes {
+		if integrationManagedProcessComplete(process.done) {
+			return nil, fmt.Errorf(
+				"managed %s PID %d completed before identity capture",
+				process.record.Kind,
+				process.record.ChildPID,
+			)
+		}
+		identity, found, err := integrationProcessIdentityByPID(process.record.ChildPID)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"capture managed %s PID %d identity: %w",
+				process.record.Kind,
+				process.record.ChildPID,
+				err,
+			)
+		}
+		if !found || identity.BirthToken == "" {
+			return nil, fmt.Errorf(
+				"managed %s PID %d identity is unavailable",
+				process.record.Kind,
+				process.record.ChildPID,
+			)
+		}
+		if integrationManagedProcessComplete(process.done) {
+			return nil, fmt.Errorf(
+				"managed %s PID %d completed during identity capture",
+				process.record.Kind,
+				process.record.ChildPID,
+			)
+		}
+		references = append(references, integrationManagedProcessReference{
+			Kind:     process.record.Kind,
+			Identity: identity,
+			Done:     process.done,
+		})
+	}
+	return references, nil
+}
+
+func integrationBrowserOwnerIdentity(
+	t *testing.T,
+	processes []integrationManagedProcessReference,
+) integrationProcessIdentity {
+	t.Helper()
+	for _, process := range processes {
+		if process.Kind == "browser" {
+			return process.Identity
+		}
+	}
+	t.Fatal("managed browser owner missing from captured process references")
+	return integrationProcessIdentity{}
+}
+
+func integrationManagedProcessComplete(done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
+}
 
 func integrationProcessStillAlive(
 	expected integrationProcessIdentity,
 	lookup integrationProcessLookup,
 ) (bool, error) {
+	if expected.BirthToken == "" {
+		return false, fmt.Errorf("process PID %d has empty birth token", expected.PID)
+	}
 	current, found, err := lookup(expected.PID)
 	if err != nil {
 		return false, err
 	}
-	return found && current == expected, nil
+	return found &&
+		current.PID == expected.PID &&
+		current.BirthToken == expected.BirthToken, nil
+}
+
+func integrationPinEnumeratedProcess(
+	initial integrationProcessTreeEntry,
+	captureStartedAtUnixNano int64,
+	lookup integrationProcessLookup,
+	snapshot integrationProcessSnapshotter,
+) (integrationProcessIdentity, bool, error) {
+	opened, found, err := lookup(initial.PID)
+	if err != nil {
+		return integrationProcessIdentity{}, false, err
+	}
+	if !found ||
+		opened.PID != initial.PID ||
+		opened.BirthToken == "" ||
+		!strings.EqualFold(opened.Executable, initial.Executable) ||
+		(opened.CreatedAtUnixNano > 0 &&
+			opened.CreatedAtUnixNano > captureStartedAtUnixNano) {
+		return integrationProcessIdentity{}, false, nil
+	}
+	currentSnapshot, err := snapshot()
+	if err != nil {
+		return integrationProcessIdentity{}, false, err
+	}
+	currentEntry, found := currentSnapshot.Entries[initial.PID]
+	if !found ||
+		currentEntry.ParentPID != initial.ParentPID ||
+		!strings.EqualFold(currentEntry.Executable, initial.Executable) {
+		return integrationProcessIdentity{}, false, nil
+	}
+	reopened, found, err := lookup(initial.PID)
+	if err != nil {
+		return integrationProcessIdentity{}, false, err
+	}
+	if !found ||
+		reopened.PID != opened.PID ||
+		reopened.BirthToken != opened.BirthToken ||
+		!strings.EqualFold(reopened.Executable, currentEntry.Executable) {
+		return integrationProcessIdentity{}, false, nil
+	}
+	return opened, true, nil
 }
 
 func TestUITestIntegrationProcessIdentityDoesNotTreatReusedPIDAsLeak(t *testing.T) {
 	expected := integrationProcessIdentity{
 		PID:        42,
-		StartedAt:  "100",
+		BirthToken: "kernel-birth-100.123456",
 		Executable: "chromium",
 	}
 	tests := []struct {
@@ -376,22 +511,23 @@ func TestUITestIntegrationProcessIdentityDoesNotTreatReusedPIDAsLeak(t *testing.
 			wantAlive: true,
 		},
 		{
-			name: "PID reused at a later start time",
+			name: "PID reused with another kernel birth token",
 			current: integrationProcessIdentity{
 				PID:        expected.PID,
-				StartedAt:  "200",
+				BirthToken: "kernel-birth-100.123457",
 				Executable: expected.Executable,
 			},
 			found: true,
 		},
 		{
-			name: "PID reused by another executable",
+			name: "same process changed executable diagnostic",
 			current: integrationProcessIdentity{
 				PID:        expected.PID,
-				StartedAt:  expected.StartedAt,
+				BirthToken: expected.BirthToken,
 				Executable: "unrelated",
 			},
-			found: true,
+			found:     true,
+			wantAlive: true,
 		},
 		{
 			name: "process exited",
@@ -415,6 +551,141 @@ func TestUITestIntegrationProcessIdentityDoesNotTreatReusedPIDAsLeak(t *testing.
 				t.Fatalf("same identity alive = %v, want %v", alive, test.wantAlive)
 			}
 		})
+	}
+}
+
+func TestUITestIntegrationCurrentProcessIdentityIsStable(t *testing.T) {
+	expected, found, err := integrationProcessIdentityByPID(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || expected.PID != os.Getpid() || expected.BirthToken == "" {
+		t.Fatalf("current process identity is unavailable: %#v", expected)
+	}
+	alive, err := integrationProcessStillAlive(
+		expected,
+		integrationProcessIdentityByPID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !alive {
+		t.Fatalf("current process identity changed during lookup: %#v", expected)
+	}
+}
+
+func TestUITestIntegrationRejectsPIDReusedBetweenSnapshotAndLookup(t *testing.T) {
+	initial := integrationProcessTreeEntry{
+		PID:        42,
+		ParentPID:  7,
+		Executable: "chrome.exe",
+	}
+	tests := []struct {
+		name       string
+		identities []integrationProcessIdentity
+		wantFound  bool
+	}{
+		{
+			name: "stable enumerated process",
+			identities: []integrationProcessIdentity{
+				{
+					PID: initial.PID, BirthToken: "old",
+					CreatedAtUnixNano: 50, Executable: initial.Executable,
+				},
+				{
+					PID: initial.PID, BirthToken: "old",
+					CreatedAtUnixNano: 50, Executable: initial.Executable,
+				},
+			},
+			wantFound: true,
+		},
+		{
+			name: "PID reused after enumeration before lookup",
+			identities: []integrationProcessIdentity{
+				{
+					PID: initial.PID, BirthToken: "new",
+					CreatedAtUnixNano: 150, Executable: initial.Executable,
+				},
+			},
+		},
+		{
+			name: "PID reused between lookup and revalidation",
+			identities: []integrationProcessIdentity{
+				{
+					PID: initial.PID, BirthToken: "old",
+					CreatedAtUnixNano: 50, Executable: initial.Executable,
+				},
+				{
+					PID: initial.PID, BirthToken: "new",
+					CreatedAtUnixNano: 150, Executable: initial.Executable,
+				},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			lookupCall := 0
+			identity, found, err := integrationPinEnumeratedProcess(
+				initial,
+				100,
+				func(pid int) (integrationProcessIdentity, bool, error) {
+					if pid != initial.PID {
+						t.Fatalf("lookup PID = %d, want %d", pid, initial.PID)
+					}
+					if lookupCall >= len(test.identities) {
+						t.Fatal("unexpected identity lookup")
+					}
+					identity := test.identities[lookupCall]
+					lookupCall++
+					return identity, true, nil
+				},
+				func() (integrationProcessTreeSnapshot, error) {
+					return integrationProcessTreeSnapshot{
+						Entries: map[int]integrationProcessTreeEntry{
+							initial.PID: initial,
+						},
+					}, nil
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if found != test.wantFound {
+				t.Fatalf("pinned process found = %v, want %v", found, test.wantFound)
+			}
+			if found && identity.BirthToken != "old" {
+				t.Fatalf("pinned birth token = %q, want old", identity.BirthToken)
+			}
+		})
+	}
+}
+
+func TestUITestIntegrationManagedCompletionIgnoresReusedPID(t *testing.T) {
+	done := make(chan struct{})
+	close(done)
+	if !integrationManagedProcessComplete(done) {
+		t.Fatal("completed managed process was reported running")
+	}
+	original := integrationProcessIdentity{PID: 42, BirthToken: "original"}
+	alive, err := integrationProcessStillAlive(
+		original,
+		func(pid int) (integrationProcessIdentity, bool, error) {
+			return integrationProcessIdentity{
+				PID:        pid,
+				BirthToken: "replacement",
+			}, true, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alive {
+		t.Fatal("replacement process with reused PID matched completed managed process")
+	}
+
+	running := make(chan struct{})
+	if integrationManagedProcessComplete(running) {
+		t.Fatal("running managed process was reported complete")
 	}
 }
 

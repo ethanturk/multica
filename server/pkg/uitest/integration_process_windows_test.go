@@ -7,28 +7,31 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-type integrationWindowsProcess struct {
-	parent int
-	name   string
-}
-
 func integrationChromiumDescendantProcesses(
-	rootPID int,
+	root integrationProcessIdentity,
 ) ([]integrationProcessIdentity, error) {
-	processes, err := integrationWindowsProcessSnapshot()
+	rootAlive, err := integrationProcessStillAlive(root, integrationProcessIdentityByPID)
 	if err != nil {
 		return nil, err
 	}
-	descendants := map[int]bool{rootPID: true}
+	if !rootAlive {
+		return nil, fmt.Errorf("browser owner PID %d changed before process snapshot", root.PID)
+	}
+	snapshot, err := integrationWindowsProcessSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	descendants := map[int]bool{root.PID: true}
 	for changed := true; changed; {
 		changed = false
-		for pid, process := range processes {
-			if !descendants[pid] && descendants[process.parent] {
+		for pid, process := range snapshot.Entries {
+			if !descendants[pid] && descendants[process.ParentPID] {
 				descendants[pid] = true
 				changed = true
 			}
@@ -36,20 +39,33 @@ func integrationChromiumDescendantProcesses(
 	}
 	var chromium []integrationProcessIdentity
 	for pid := range descendants {
-		if pid == rootPID {
+		if pid == root.PID {
 			continue
 		}
-		name := strings.ToLower(processes[pid].name)
+		entry := snapshot.Entries[pid]
+		name := strings.ToLower(entry.Executable)
 		if !strings.Contains(name, "chrome") && !strings.Contains(name, "chromium") {
 			continue
 		}
-		identity, found, identityErr := integrationProcessIdentityByPID(pid)
+		identity, found, identityErr := integrationPinEnumeratedProcess(
+			entry,
+			snapshot.CaptureStartedAtUnixNano,
+			integrationProcessIdentityByPID,
+			integrationWindowsProcessSnapshot,
+		)
 		if identityErr != nil {
 			return nil, fmt.Errorf("read Chromium process %d identity: %w", pid, identityErr)
 		}
 		if found {
 			chromium = append(chromium, identity)
 		}
+	}
+	rootAlive, err = integrationProcessStillAlive(root, integrationProcessIdentityByPID)
+	if err != nil {
+		return nil, err
+	}
+	if !rootAlive {
+		return nil, fmt.Errorf("browser owner PID %d changed during process snapshot", root.PID)
 	}
 	sort.Slice(chromium, func(i, j int) bool {
 		return chromium[i].PID < chromium[j].PID
@@ -102,36 +118,57 @@ func integrationProcessIdentityByPID(
 	); err != nil {
 		return integrationProcessIdentity{}, false, fmt.Errorf("read process executable: %w", err)
 	}
+	executableName := integrationWindowsExecutableName(
+		windows.UTF16ToString(executable[:size]),
+	)
 	return integrationProcessIdentity{
-		PID:        pid,
-		StartedAt:  fmt.Sprintf("%08x%08x", creation.HighDateTime, creation.LowDateTime),
-		Executable: windows.UTF16ToString(executable[:size]),
+		PID: pid,
+		BirthToken: fmt.Sprintf(
+			"windows:%08x%08x",
+			creation.HighDateTime,
+			creation.LowDateTime,
+		),
+		CreatedAtUnixNano: creation.Nanoseconds(),
+		Executable:        executableName,
 	}, true, nil
 }
 
-func integrationWindowsProcessSnapshot() (map[int]integrationWindowsProcess, error) {
+func integrationWindowsProcessSnapshot() (integrationProcessTreeSnapshot, error) {
+	captureStartedAtUnixNano := time.Now().UnixNano()
 	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
 	if err != nil {
-		return nil, fmt.Errorf("snapshot process tree: %w", err)
+		return integrationProcessTreeSnapshot{}, fmt.Errorf("snapshot process tree: %w", err)
 	}
 	defer windows.CloseHandle(snapshot)
 
-	processes := make(map[int]integrationWindowsProcess)
+	processes := make(map[int]integrationProcessTreeEntry)
 	entry := windows.ProcessEntry32{Size: uint32(unsafe.Sizeof(windows.ProcessEntry32{}))}
 	if err := windows.Process32First(snapshot, &entry); err != nil {
-		return nil, fmt.Errorf("enumerate process tree: %w", err)
+		return integrationProcessTreeSnapshot{}, fmt.Errorf("enumerate process tree: %w", err)
 	}
 	for {
-		processes[int(entry.ProcessID)] = integrationWindowsProcess{
-			parent: int(entry.ParentProcessID),
-			name:   windows.UTF16ToString(entry.ExeFile[:]),
+		pid := int(entry.ProcessID)
+		processes[pid] = integrationProcessTreeEntry{
+			PID:        pid,
+			ParentPID:  int(entry.ParentProcessID),
+			Executable: windows.UTF16ToString(entry.ExeFile[:]),
 		}
 		if err := windows.Process32Next(snapshot, &entry); err != nil {
 			if errors.Is(err, windows.ERROR_NO_MORE_FILES) {
 				break
 			}
-			return nil, fmt.Errorf("enumerate process tree: %w", err)
+			return integrationProcessTreeSnapshot{}, fmt.Errorf("enumerate process tree: %w", err)
 		}
 	}
-	return processes, nil
+	return integrationProcessTreeSnapshot{
+		CaptureStartedAtUnixNano: captureStartedAtUnixNano,
+		Entries:                  processes,
+	}, nil
+}
+
+func integrationWindowsExecutableName(path string) string {
+	if separator := strings.LastIndexAny(path, `\/`); separator >= 0 {
+		return path[separator+1:]
+	}
+	return path
 }
