@@ -610,7 +610,7 @@ func startUpstream(
 		return nil, runtimeFiles{}, fmt.Errorf("open Playwright MCP log: %w", err)
 	}
 	cmd := exec.Command(node, paths.MCPCLI, "--config", paths.Config, "--storage-state", paths.StorageState)
-	cmd.Dir = session.opts.WorkDir
+	cmd.Dir = session.opts.ArtifactDir
 	cmd.Env = replaceEnvironment(os.Environ(), map[string]string{
 		"PLAYWRIGHT_BROWSERS_PATH": paths.Browsers,
 	})

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -256,6 +257,77 @@ func TestUpstreamReaderAloneClosesNotificationStreamAfterFailure(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("notification stream did not close after reader exit")
+	}
+}
+
+func TestStartUpstreamRunsMCPInTaskArtifactDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake node wrapper uses a POSIX shell")
+	}
+	fixture := newRuntimeFixture(t)
+	workDir := t.TempDir()
+	config, err := loadManifest([]byte(`{
+		"start":"unused",
+		"url":"http://127.0.0.1:1",
+		"health":"/"
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := NewSession(SessionOptions{
+		WorkDir: workDir,
+		TaskID:  "artifact-cwd",
+		Runtime: fixture.runtime,
+		Config:  config,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Errorf("close session: %v", err)
+		}
+	})
+
+	cwdPath := filepath.Join(t.TempDir(), "cwd")
+	binDir := t.TempDir()
+	nodePath := filepath.Join(binDir, "node")
+	if err := os.WriteFile(nodePath, []byte(
+		"#!/bin/sh\npwd > \"$MULTICA_UI_TEST_FAKE_NODE_CWD\"\nexec /bin/sleep 60\n",
+	), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("MULTICA_UI_TEST_FAKE_NODE_CWD", cwdPath)
+
+	upstream, _, err := startUpstream(session, fixture.runtime, fixture.trustedRoot, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := upstream.Close(); err != nil {
+			t.Errorf("close upstream: %v", err)
+		}
+	})
+
+	deadline := time.Now().Add(time.Second)
+	var actual []byte
+	for time.Now().Before(deadline) {
+		actual, err = os.ReadFile(cwdPath)
+		if err == nil {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("read fake node cwd: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(session.opts.ArtifactDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(actual)); got != want {
+		t.Fatalf("Playwright MCP cwd = %q, want task artifact directory %q", got, want)
 	}
 }
 
