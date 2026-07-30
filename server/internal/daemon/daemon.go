@@ -28,6 +28,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/daemon/repocache"
 	"github.com/multica-ai/multica/server/internal/selfexec"
 	"github.com/multica-ai/multica/server/pkg/agent"
+	"github.com/multica-ai/multica/server/pkg/redact"
 	"github.com/multica-ai/multica/server/pkg/skillbundle"
 	"github.com/multica-ai/multica/server/pkg/taskfailure"
 	"github.com/multica-ai/multica/server/pkg/uitest"
@@ -157,6 +158,10 @@ type terminalTaskReport struct {
 	sessionID     string
 	workDir       string
 	failureReason string
+	// quickActionsPending is true when a direct-chat turn will be followed by a
+	// background quick-actions suggestion pass (MUL-5149); the server raises the
+	// client's pill placeholder on chat:done.
+	quickActionsPending bool
 	// sessionRolloutMissing is true when the daemon withheld this task's Codex
 	// session because its rollout was not in the store (MUL-5305). The server
 	// clears the resume pointer and flags the continuity gap for the next claim.
@@ -260,6 +265,10 @@ type Daemon struct {
 	mu           sync.Mutex
 	workspaces   map[string]*workspaceState
 	runtimeIndex map[string]Runtime // runtimeID -> Runtime for provider lookups
+	// chatSuggestCancels maps chat session id -> *chatSuggestHandle for the
+	// in-flight background suggestion pass, so a new turn on the same session
+	// can abort it (stale suggestions + no concurrent resume on one session).
+	chatSuggestCancels sync.Map
 	// profileLaunchSpecs maps a custom runtime profile_id -> the absolute
 	// executable path plus fixed launch args resolved for that profile
 	// (MUL-3284). Populated in registerRuntimesForWorkspace when a profile's
@@ -2943,13 +2952,18 @@ func (d *Daemon) handleModelList(ctx context.Context, rt Runtime, requestID stri
 	// Self-heal a pinned executable path an in-place upgrade deleted (MUL-4486).
 	entry, _ = d.resolveAgentEntry(ctx, rt.Provider, entry)
 
-	models, err := agent.ListModels(ctx, rt.Provider, entry.Path)
+	catalog, err := agent.ListModels(ctx, rt.Provider, entry.Path)
 	if err != nil {
 		d.reportModelListResult(ctx, rt, requestID, map[string]any{
 			"status": "failed",
 			"error":  err.Error(),
 		})
 		return
+	}
+	models := catalog.Models
+	if catalog.Fallback {
+		d.logger.Warn("model discovery fell back to a static catalog; reporting it as non-authoritative",
+			"runtime_id", rt.ID, "provider", rt.Provider, "path", entry.Path, "count", len(models))
 	}
 
 	// Wire format matches handler.ModelEntry. Use a struct (not
@@ -3014,6 +3028,10 @@ func (d *Daemon) handleModelList(ctx context.Context, rt Runtime, requestID stri
 		"status":    "completed",
 		"models":    wire,
 		"supported": agent.ModelSelectionSupported(rt.Provider),
+		// Additive field: the models are still worth rendering, but the server
+		// must not persist them as this runtime's real catalog (MUL-5549).
+		// Older servers ignore it and keep the previous behaviour.
+		"fallback": catalog.Fallback,
 	})
 }
 
@@ -3173,12 +3191,29 @@ func (d *Daemon) handleUpdate(ctx context.Context, runtimeID string, update *Pen
 		return
 	}
 
-	// Prevent concurrent update attempts.
-	if !d.updating.CompareAndSwap(false, true) {
-		d.logger.Warn("update already in progress, ignoring", "runtime_id", runtimeID, "update_id", update.ID)
+	switch d.tryBeginServerUpdate(ctx) {
+	case serverUpdateAlreadyRunning:
+		d.logger.Warn("update deferred: another update is already in progress", "runtime_id", runtimeID, "update_id", update.ID)
+		d.reportUpdateResult(ctx, runtimeID, update.ID, map[string]any{
+			"status": "failed",
+			"error":  "another runtime update is already in progress on this machine",
+		})
+		return
+	case serverUpdateRuntimeBusy:
+		d.logger.Info("update deferred: task or claim in progress", "runtime_id", runtimeID, "update_id", update.ID)
+		d.reportUpdateResult(ctx, runtimeID, update.ID, map[string]any{
+			"status": "failed",
+			"error":  "runtime update deferred because agent work is starting or still active; retry when the machine is idle",
+		})
 		return
 	}
-	defer d.updating.Store(false)
+	restarting := false
+	defer func() {
+		if !restarting {
+			d.releaseClaimBarrier()
+			d.updating.Store(false)
+		}
+	}()
 
 	d.logger.Info("CLI update requested", "runtime_id", runtimeID, "update_id", update.ID, "target_version", update.TargetVersion)
 
@@ -3205,6 +3240,59 @@ func (d *Daemon) handleUpdate(ctx context.Context, runtimeID string, update *Pen
 
 	// Trigger daemon restart with the new binary.
 	d.triggerRestart()
+	restarting = d.RestartBinary() != ""
+}
+
+type serverUpdateAcquireResult uint8
+
+const (
+	serverUpdateAcquired serverUpdateAcquireResult = iota
+	serverUpdateAlreadyRunning
+	serverUpdateRuntimeBusy
+)
+
+// tryBeginServerUpdate atomically claims update ownership, pauses new claims,
+// and lets any claim already in flight finish its handoff. An empty claim can
+// therefore never starve an update; a claim that returns work increments
+// activeTasks before exitClaim, so the final check still defers safely.
+func (d *Daemon) tryBeginServerUpdate(ctx context.Context) serverUpdateAcquireResult {
+	if !d.updating.CompareAndSwap(false, true) {
+		return serverUpdateAlreadyRunning
+	}
+
+	d.claimMu.Lock()
+	if d.pauseClaims || d.activeTasks.Load() > 0 {
+		d.claimMu.Unlock()
+		d.updating.Store(false)
+		return serverUpdateRuntimeBusy
+	}
+	d.pauseClaims = true
+	d.claimMu.Unlock()
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		d.claimMu.Lock()
+		if d.claimsInFlight == 0 {
+			if d.activeTasks.Load() == 0 {
+				d.claimMu.Unlock()
+				return serverUpdateAcquired
+			}
+			d.pauseClaims = false
+			d.claimMu.Unlock()
+			d.updating.Store(false)
+			return serverUpdateRuntimeBusy
+		}
+		d.claimMu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			d.releaseClaimBarrier()
+			d.updating.Store(false)
+			return serverUpdateRuntimeBusy
+		case <-ticker.C:
+		}
+	}
 }
 
 // runUpdate executes the brew-or-download upgrade against targetVersion and
@@ -4062,10 +4150,21 @@ func (d *Daemon) reportTaskResult(ctx context.Context, taskID string, result Tas
 			branchName:            result.BranchName,
 			sessionID:             result.SessionID,
 			workDir:               result.WorkDir,
+			quickActionsPending:   result.QuickActionsPending,
 			sessionRolloutMissing: result.SessionRolloutMissing,
 			retiredSessionID:      result.RetiredSessionID,
 		})
 		if err == nil {
+			// Completion landed: the assistant row exists, so the deferred
+			// suggestion pass can now run and supplement it. Deliberately
+			// detached from taskWG and the daemon root ctx: best-effort and
+			// bounded (~20s pass + 30s report), it must not hold up slot
+			// release or graceful shutdown — a shutdown mid-pass just means
+			// this turn's supplement never arrives and the client skeleton
+			// times out.
+			if result.QuickActionsSuggest != nil {
+				go result.QuickActionsSuggest()
+			}
 			return
 		}
 		// CompleteTask retries transient errors internally. A transient
@@ -4151,7 +4250,7 @@ func (d *Daemon) reportTerminalTask(parentCtx context.Context, report terminalTa
 
 	switch report.kind {
 	case terminalTaskReportComplete:
-		return d.client.CompleteTask(ctx, report.taskID, report.output, report.branchName, report.sessionID, report.workDir, report.sessionRolloutMissing, report.retiredSessionID)
+		return d.client.CompleteTask(ctx, report.taskID, report.output, report.branchName, report.sessionID, report.workDir, report.quickActionsPending, report.sessionRolloutMissing, report.retiredSessionID)
 	case terminalTaskReportFail:
 		return d.client.FailTask(ctx, report.taskID, report.errorMessage, report.sessionID, report.workDir, report.failureReason, report.sessionRolloutMissing, report.retiredSessionID)
 	default:
@@ -4666,6 +4765,12 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// multiple workspaces share a host.
 	if task.WorkspaceID == "" {
 		return TaskResult{}, fmt.Errorf("refusing to spawn agent: task has no workspace_id (task_id=%s)", task.ID)
+	}
+
+	// A new turn on a chat session supersedes any background suggestion pass
+	// still running for the previous turn (see chat_suggest.go).
+	if task.ChatSessionID != "" {
+		d.cancelPendingChatSuggest(task.ChatSessionID)
 	}
 
 	prepareTimeout := d.effectiveTaskPrepareTimeout()
@@ -5382,6 +5487,15 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		execOpts.SystemPrompt = runtimeBrief
 	}
 
+	// Quick-actions refresh (MUL-5149): this task carries no user turn — it only
+	// re-runs the suggestion pass for an existing assistant reply and supplements
+	// that reply's row. Resume pointer, backend, and workdir are already prepared
+	// above, so diverge here, before the main provider turn, and never write a
+	// reply.
+	if task.RegenerateQuickActionsFor != "" {
+		return d.runChatQuickActionsRegenerate(ctx, task, backend, execOpts, provider, taskLog)
+	}
+
 	taskLog.Debug("invoking backend",
 		"provider", provider,
 		"model", model,
@@ -5482,6 +5596,23 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		"agent_error", result.Error,
 	)
 
+	// Follow-up suggestion pass for direct (non-channel) chat turns: one extra
+	// resumed provider turn whose only job is emitting the quick-actions JSON.
+	// Deferred: the completed return below carries the job, and
+	// reportTaskResult starts it only after the completion callback succeeds —
+	// the user's turn ends immediately, suggestions arrive as a supplement.
+	// Skipped for channel-backed sessions (no pill surface), empty replies
+	// (the no_response contract owns those), and poisoned outputs (blocked
+	// path handles those).
+	suggestEligible := result.Status == "completed" && task.ChatSessionID != "" &&
+		task.ChatChannelType == "" && !task.QuickActionsDisabled &&
+		result.SessionID != "" && strings.TrimSpace(result.Output) != ""
+	if suggestEligible {
+		if _, poisoned := classifyPoisonedOutput(result.Output); poisoned {
+			suggestEligible = false
+		}
+	}
+
 	// Convert agent usage map to task usage entries.
 	var usageEntries []TaskUsageEntry
 	for model, u := range result.Usage {
@@ -5559,14 +5690,19 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 				FailureReason: reason,
 			}, nil
 		}
-		return TaskResult{
-			Status:    "completed",
-			Comment:   result.Output,
-			SessionID: result.SessionID,
-			WorkDir:   env.WorkDir,
-			EnvRoot:   env.RootDir,
-			Usage:     usageEntries,
-		}, nil
+		taskResult = TaskResult{
+			Status:              "completed",
+			Comment:             result.Output,
+			SessionID:           result.SessionID,
+			WorkDir:             env.WorkDir,
+			EnvRoot:             env.RootDir,
+			Usage:               usageEntries,
+			QuickActionsPending: suggestEligible,
+		}
+		if suggestEligible {
+			taskResult.QuickActionsSuggest = d.chatSuggestJob(task, backend, execOpts, result.SessionID, result.Usage, provider, taskLog)
+		}
+		return taskResult, nil
 	case "timeout":
 		// Surface session_id/work_dir so the chat resume pointer is kept
 		// in sync even when the agent times out after building a session.
@@ -6023,10 +6159,19 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 					s := msgSeq.Add(1)
 					mu.Lock()
 					batch = append(batch, TaskMessageData{
-						Seq:   int(s),
-						Type:  "tool_use",
-						Tool:  msg.Tool,
-						Input: msg.Input,
+						Seq:  int(s),
+						Type: "tool_use",
+						Tool: msg.Tool,
+						// Redact before the payload leaves this process, not
+						// only on arrival. The server redacts again in its
+						// ingest handler, but that is the *remote* side: a
+						// daemon that self-updated ahead of the server — or one
+						// talking to a server mid-rollout — would otherwise ship
+						// whole-file edit contents (a deleted .env, a patched
+						// credential) to a peer that does not scrub nested
+						// values yet. Deployment order is not a control we
+						// have, so this side has to be safe on its own.
+						Input: redact.InputMap(msg.Input),
 					})
 					mu.Unlock()
 				case agent.MessageToolResult:

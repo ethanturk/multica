@@ -537,9 +537,9 @@ export function AgentCreatePanel({
 
         {/* Header */}
         <div className="flex items-center justify-between px-5 pt-3 pb-2 shrink-0">
-          <div className="flex items-center gap-1.5 text-xs">
+          <div className="flex items-center gap-1.5 text-caption">
             <span className="text-muted-foreground">{workspaceName}</span>
-            <ChevronRight className="size-3 text-muted-foreground/50" />
+            <ChevronRight className="size-3 text-faint-foreground" />
             <span className="font-medium">{t(($) => $.create_issue.agent_breadcrumb)}</span>
           </div>
           {/* Native `title` instead of Base UI Tooltip — Tooltip opens on
@@ -588,6 +588,18 @@ export function AgentCreatePanel({
           />
         </div>
 
+        {selectedAgent && versionBlocked && (
+          <div className="mx-5 mb-2 shrink-0 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-caption text-amber-700 dark:text-amber-300">
+            {fieldVersionCheck.state === "missing"
+              ? t(($) => $.create_issue.agent.version_missing, { min: fieldVersionCheck.min })
+              : t(($) => $.create_issue.agent.version_below, {
+                  current: fieldVersionCheck.current,
+                  min: fieldVersionCheck.min,
+                })}
+          </div>
+        )}
+
+
         {/* Prompt — same rich editor Advanced uses, so paste/drop images,
             mentions, and formatting all work. The dropZone wrapper enables
             drag-and-drop file uploads alongside paste. */}
@@ -618,7 +630,7 @@ export function AgentCreatePanel({
 
 
         {error && (
-          <div className="px-5 pb-2 text-xs text-destructive">{error}</div>
+          <div className="px-5 pb-2 text-caption text-destructive">{error}</div>
         )}
 
         {/* Property toolbar — the project is visible by default; priority and
@@ -721,7 +733,7 @@ export function AgentCreatePanel({
           {parentIssueId && (
             <span
               data-testid="agent-sub-issue-chip"
-              className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground"
+              className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-caption text-muted-foreground"
               title={t(($) => $.create_issue.agent.sub_issue_of, {
                 identifier: parentIssueIdentifier ?? "",
               })}
@@ -745,7 +757,7 @@ export function AgentCreatePanel({
               onSelect={(file) => editorRef.current?.uploadFile(file)}
             />
             {keepOpen && sentCount > 0 && (
-              <span className="text-xs text-emerald-600 dark:text-emerald-400">
+              <span className="text-caption text-emerald-600 dark:text-emerald-400">
                 {t(($) => $.create_issue.agent.sent_count, { count: sentCount })}
               </span>
             )}
@@ -758,12 +770,12 @@ export function AgentCreatePanel({
               aria-disabled={gate.uploading || undefined}
               aria-busy={gate.uploading || undefined}
               title={t(($) => $.create_issue.switch_to_manual_tooltip)}
-              className="flex shrink-0 items-center gap-1.5 text-xs px-2 py-1 rounded-sm text-muted-foreground hover:text-foreground hover:bg-accent/60 transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+              className="flex shrink-0 items-center gap-1.5 text-caption px-2 py-1 rounded-sm text-muted-foreground hover:text-foreground hover:bg-accent/60 transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
             >
               <ArrowLeftRight className="size-3.5" />
               {t(($) => $.create_issue.switch_to_manual)}
             </button>
-            <label className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
+            <label className="flex shrink-0 items-center gap-1.5 text-caption text-muted-foreground cursor-pointer select-none">
               <Switch
                 size="sm"
                 checked={keepOpen}
@@ -864,7 +876,7 @@ function ActorPicker({
       searchPlaceholder={t(($) => $.create_issue.agent.search_placeholder)}
       onSearchChange={setFilter}
       trigger={
-        <span className="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors">
+        <span className="flex items-center gap-2 text-caption text-muted-foreground hover:text-foreground transition-colors">
           <span>{t(($) => $.create_issue.agent.created_by)}</span>
           {displayActor && displayLabel ? (
             <span className="flex items-center gap-1.5 text-foreground">
@@ -885,7 +897,7 @@ function ActorPicker({
         query ? (
           <PickerEmpty />
         ) : (
-          <div className="px-2 py-1.5 text-xs text-muted-foreground">
+          <div className="px-2 py-1.5 text-caption text-muted-foreground">
             {t(($) => $.create_issue.agent.no_agents)}
           </div>
         )

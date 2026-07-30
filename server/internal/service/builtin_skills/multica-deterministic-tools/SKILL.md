@@ -1,6 +1,6 @@
 ---
 name: multica-deterministic-tools
-description: "Use when deciding whether a Multica skill's behavior should become a deterministic Go tool in the dettools plane, or when adding/changing a tool under server/pkg/dettools. Covers the skill-vs-deterministic-code decision framework (advisory guidance stays a skill; correctness-sensitive, mechanical, gateable behavior becomes a Go tool), the Result envelope and stable error codes, how to register a tool and set its allowlist, the read-only/path-scoped security rules, daemon-side MCP injection, per-agent tool profiles, and the rule that converting a skill means updating its SKILL.md and source-map in the same change."
+description: "Use when deciding whether a skill's behavior should become a deterministic Go tool in the dettools plane, or when adding/changing a tool under server/pkg/dettools. Covers the skill-vs-code decision, the Result envelope, tool registration/allowlisting, and read-only/path-scoped security."
 user-invocable: true
 allowed-tools: Bash(go *), Bash(make *)
 ---

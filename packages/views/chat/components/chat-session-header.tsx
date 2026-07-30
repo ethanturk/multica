@@ -105,7 +105,14 @@ export function ChatSessionHeader({
   return (
     <div className="flex h-12 shrink-0 items-center gap-3 border-b px-4">
       {agent ? (
-        <ActorAvatar actorType="agent" actorId={agent.id} size="lg" enableHoverCard showStatusDot />
+        <ActorAvatar
+          actorType="agent"
+          actorId={agent.id}
+          size="lg"
+          enableHoverCard
+          showStatusDot
+          showRuntimeBadge
+        />
       ) : (
         <span className="size-[30px] shrink-0" />
       )}
@@ -128,20 +135,20 @@ export function ChatSessionHeader({
                 setEditing(false);
               }
             }}
-            className="w-full rounded-sm bg-background px-1 py-0.5 text-sm font-semibold outline-none ring-1 ring-border focus-visible:ring-brand"
+            className="w-full rounded-sm bg-background px-1 py-0.5 text-body font-semibold outline-none ring-1 ring-border focus-visible:ring-brand"
           />
         ) : (
           <button
             type="button"
             onClick={startRename}
             title={t(($) => $.header.rename)}
-            className="block max-w-full truncate text-left text-sm font-semibold text-foreground outline-none hover:text-foreground/80 focus-visible:text-foreground/80"
+            className="block max-w-full truncate text-left text-body font-semibold text-foreground outline-none hover:text-foreground/80 focus-visible:text-foreground/80"
           >
             {title}
           </button>
         )}
         {agent && (
-          <div className="truncate text-xs text-muted-foreground">
+          <div className="truncate text-caption text-muted-foreground">
             {agent.name}
             {agent.description ? ` · ${agent.description}` : ""}
           </div>
