@@ -1184,7 +1184,7 @@ func TestDirgeModelCatalogEmptyButSupported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListModels(dirge): %v", err)
 	}
-	if len(models) != 0 {
+	if len(models.Models) != 0 {
 		t.Fatalf("ListModels(dirge) = %#v, want empty catalog", models)
 	}
 	if !ModelSelectionSupported("dirge") {
