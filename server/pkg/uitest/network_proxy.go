@@ -308,20 +308,24 @@ func (p *loopbackForwardProxy) Close() error {
 			connections = append(connections, connection)
 		}
 		p.mu.Unlock()
-		listenerErr := p.listener.Close()
-		if errors.Is(listenerErr, net.ErrClosed) {
-			listenerErr = nil
-		}
-		serverErr := p.server.Close()
+		listenerErr := ignoreClosedNetworkError(p.listener.Close())
+		serverErr := ignoreClosedNetworkError(p.server.Close())
 		var connectionErr error
 		for _, connection := range connections {
-			if err := connection.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			if err := ignoreClosedNetworkError(connection.Close()); err != nil {
 				connectionErr = errors.Join(connectionErr, err)
 			}
 		}
 		p.closeErr = errors.Join(listenerErr, serverErr, connectionErr)
 	})
 	return p.closeErr
+}
+
+func ignoreClosedNetworkError(err error) error {
+	if errors.Is(err, net.ErrClosed) {
+		return nil
+	}
+	return err
 }
 
 type trackingListener struct {

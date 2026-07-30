@@ -270,6 +270,22 @@ func TestLoopbackProxyCloseTerminatesActiveTunnel(t *testing.T) {
 	}
 }
 
+func TestIgnoreClosedNetworkErrorPreservesOnlyRealFailures(t *testing.T) {
+	wrappedClosed := &net.OpError{
+		Op:  "close",
+		Net: "tcp",
+		Err: net.ErrClosed,
+	}
+	if err := ignoreClosedNetworkError(wrappedClosed); err != nil {
+		t.Fatalf("wrapped closed error = %v, want nil", err)
+	}
+
+	realFailure := errors.New("injected close failure")
+	if err := ignoreClosedNetworkError(realFailure); !errors.Is(err, realFailure) {
+		t.Fatalf("real close error = %v, want preserved failure", err)
+	}
+}
+
 func sendProxyRequest(t *testing.T, proxyURL, request string) *http.Response {
 	t.Helper()
 	connection := dialProxy(t, proxyURL)
