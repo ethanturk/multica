@@ -60,6 +60,9 @@ func (m *Manager) Status() CapabilityStatus {
 		}
 		return brokenStatus(err)
 	}
+	if _, err := trustedUIRoot(m.root); err != nil {
+		return brokenStatus(err)
+	}
 
 	lockPath := filepath.Join(m.root, "install.lock")
 	if data, err := readFileShared(lockPath); err == nil {
@@ -79,17 +82,17 @@ func (m *Manager) Status() CapabilityStatus {
 		return brokenStatus(fmt.Errorf("read install marker: %w", err))
 	}
 
-	return inspectRuntime(filepath.Join(m.root, "runtimes", PlaywrightMCPVersion))
+	return inspectRuntime(filepath.Join(m.root, "runtimes", PlaywrightMCPVersion), m.root)
 }
 
-func inspectRuntime(runtimeDir string) CapabilityStatus {
+func inspectRuntime(runtimeDir, trustedRoot string) CapabilityStatus {
 	if _, err := os.Stat(runtimeDir); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return CapabilityStatus{Status: StatusUnavailable}
 		}
 		return brokenStatus(fmt.Errorf("inspect runtime directory: %w", err))
 	}
-	if _, err := verifyRuntimeDirectory(runtimeDir); err != nil {
+	if _, err := verifyRuntimeDirectory(runtimeDir, trustedRoot); err != nil {
 		return brokenStatus(err)
 	}
 	return CapabilityStatus{Status: StatusReady, Version: PlaywrightMCPVersion}

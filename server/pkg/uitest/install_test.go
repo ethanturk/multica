@@ -639,9 +639,13 @@ func TestUIRuntimePromotionRejectsCorruptedCandidate(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	candidateRoot := filepath.Join(t.TempDir(), "candidate-root")
-	writeReadyRuntime(t, candidateRoot, PlaywrightMCPVersion, AxeCoreVersion)
-	candidate := filepath.Join(candidateRoot, "runtimes", PlaywrightMCPVersion)
+	writeReadyRuntime(t, root, PlaywrightMCPVersion, AxeCoreVersion)
+	manager := testManager(root, time.Now(), nil)
+	target = filepath.Join(manager.root, "runtimes", PlaywrightMCPVersion)
+	candidate := filepath.Join(manager.root, "runtimes", ".candidate")
+	if err := os.Rename(target, candidate); err != nil {
+		t.Fatal(err)
+	}
 	writeTestRuntimeFile(
 		t,
 		candidate,
@@ -649,13 +653,55 @@ func TestUIRuntimePromotionRejectsCorruptedCandidate(t *testing.T) {
 		`{"version":"4.12.0"}`,
 	)
 
-	manager := testManager(root, time.Now(), nil)
 	if err := manager.promote(candidate, target); err == nil ||
 		!strings.Contains(err.Error(), "Axe package") {
 		t.Fatalf("promote() error = %v, want corrupted package rejection", err)
 	}
 	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("corrupted candidate promoted: %v", err)
+	}
+}
+
+func TestUIRuntimePromotionRejectsCandidateOutsideTrustedRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "ui-test")
+	target := filepath.Join(root, "runtimes", PlaywrightMCPVersion)
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	candidateRoot := filepath.Join(t.TempDir(), "candidate-root")
+	writeReadyRuntime(t, candidateRoot, PlaywrightMCPVersion, AxeCoreVersion)
+	candidate := filepath.Join(candidateRoot, "runtimes", PlaywrightMCPVersion)
+
+	manager := testManager(root, time.Now(), nil)
+	if err := manager.promote(candidate, target); err == nil ||
+		!strings.Contains(err.Error(), "trusted UI test root") {
+		t.Fatalf("promote() error = %v, want outside candidate rejection", err)
+	}
+	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("outside candidate promoted: %v", err)
+	}
+}
+
+func TestUIRuntimePromotionRequiresPinnedTargetInsideTrustedRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "ui-test")
+	writeReadyRuntime(t, root, PlaywrightMCPVersion, AxeCoreVersion)
+	manager := testManager(root, time.Now(), nil)
+	pinned := filepath.Join(manager.root, "runtimes", PlaywrightMCPVersion)
+	candidate := filepath.Join(manager.root, "runtimes", ".candidate")
+	if err := os.Rename(pinned, candidate); err != nil {
+		t.Fatal(err)
+	}
+	outsideTarget := filepath.Join(t.TempDir(), PlaywrightMCPVersion)
+
+	if err := manager.promote(candidate, outsideTarget); err == nil ||
+		!strings.Contains(err.Error(), "not pinned version") {
+		t.Fatalf("promote() error = %v, want outside target rejection", err)
+	}
+	if _, err := os.Stat(outsideTarget); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("runtime promoted outside trusted root: %v", err)
+	}
+	if _, err := os.Stat(candidate); err != nil {
+		t.Fatalf("candidate changed after rejected target: %v", err)
 	}
 }
 
@@ -701,6 +747,27 @@ func TestUIRuntimeInstallRestoresBrokenRuntimeWhenPromotionFails(t *testing.T) {
 }
 
 func TestUIRuntimeStatusRejectsSymlinkEscapeButAllowsInternalBinSymlink(t *testing.T) {
+	t.Run("runtime ancestor", func(t *testing.T) {
+		base := canonicalTestRoot(t.TempDir())
+		root := filepath.Join(base, "ui-test")
+		externalRoot := filepath.Join(base, "external-ui-test")
+		writeReadyRuntime(t, externalRoot, PlaywrightMCPVersion, AxeCoreVersion)
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(
+			filepath.Join(externalRoot, "runtimes"),
+			filepath.Join(root, "runtimes"),
+		); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+
+		got := testManager(root, time.Now(), nil).Status()
+		if got.Status != StatusBroken {
+			t.Fatalf("Status() = %+v, want symlinked runtime ancestor broken", got)
+		}
+	})
+
 	t.Run("external target", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "ui-test")
 		writeReadyRuntime(t, root, PlaywrightMCPVersion, AxeCoreVersion)
@@ -746,6 +813,61 @@ func TestUIRuntimeStatusRejectsSymlinkEscapeButAllowsInternalBinSymlink(t *testi
 			t.Fatalf("Status() = %+v, want internal .bin symlink ready", got)
 		}
 	})
+}
+
+func TestUIRuntimeStatusAndInstallRejectSymlinkedTrustedRoot(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		linkRoot func(t *testing.T, base, actualRoot string) string
+	}{
+		{
+			name: "root",
+			linkRoot: func(t *testing.T, base, actualRoot string) string {
+				t.Helper()
+				linkedRoot := filepath.Join(base, "linked-ui-test")
+				if err := os.Symlink(actualRoot, linkedRoot); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+				return linkedRoot
+			},
+		},
+		{
+			name: "profile ancestor",
+			linkRoot: func(t *testing.T, base, actualRoot string) string {
+				t.Helper()
+				actualProfile := filepath.Dir(actualRoot)
+				linkedProfile := filepath.Join(base, "linked-profile")
+				if err := os.Symlink(actualProfile, linkedProfile); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+				return filepath.Join(linkedProfile, filepath.Base(actualRoot))
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			actualRoot := filepath.Join(base, "actual-profile", "ui-test")
+			writeReadyRuntime(t, actualRoot, PlaywrightMCPVersion, AxeCoreVersion)
+			linkedRoot := test.linkRoot(t, base, actualRoot)
+			commands := 0
+			manager := testManager(linkedRoot, time.Now(), func(context.Context, Command) (CommandResult, error) {
+				commands++
+				return CommandResult{}, errors.New("runner must not execute through symlinked root")
+			})
+			manager.root = linkedRoot
+
+			if got := manager.Status(); got.Status != StatusBroken {
+				t.Fatalf("Status() = %+v, want symlinked trusted root broken", got)
+			}
+			if _, err := manager.Install(context.Background()); err == nil ||
+				!strings.Contains(err.Error(), "symlink") {
+				t.Fatalf("Install() error = %v, want symlinked trusted root rejection", err)
+			}
+			if commands != 0 {
+				t.Fatalf("install commands = %d, want none", commands)
+			}
+		})
+	}
 }
 
 func TestUIRuntimeFutureInstallMarkerIsBrokenAndReplaceable(t *testing.T) {
@@ -796,7 +918,7 @@ func testManager(root string, now time.Time, runner CommandRunner) *Manager {
 		}
 	}
 	return &Manager{
-		root: root,
+		root: canonicalTestRoot(root),
 		now:  func() time.Time { return now },
 		lookPath: func(name string) (string, error) {
 			switch name {
@@ -813,6 +935,28 @@ func testManager(root string, now time.Time, runner CommandRunner) *Manager {
 		unlockFile:    unlockExclusiveFile,
 		publishMarker: publishInstallMarker,
 		pid:           123,
+	}
+}
+
+func canonicalTestRoot(path string) string {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+	current := absolute
+	for {
+		if canonical, evalErr := filepath.EvalSymlinks(current); evalErr == nil {
+			relative, relErr := filepath.Rel(current, absolute)
+			if relErr == nil {
+				return filepath.Join(canonical, relative)
+			}
+			return absolute
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return absolute
+		}
+		current = parent
 	}
 }
 

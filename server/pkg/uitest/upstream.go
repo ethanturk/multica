@@ -341,18 +341,25 @@ func resolveRuntimeFiles(runtime ReadyRuntime, trustedRoot string) (runtimeFiles
 	if err != nil {
 		return runtimeFiles{}, err
 	}
-	return verifyRuntimeDirectory(canonical)
+	return verifyRuntimeDirectory(canonical, trustedRoot)
 }
 
-func verifyRuntimeDirectory(runtimeDirectory string) (runtimeFiles, error) {
+func verifyRuntimeDirectory(runtimeDirectory, trustedRoot string) (runtimeFiles, error) {
 	if runtimeDirectory == "" {
 		return runtimeFiles{}, fmt.Errorf("runtime directory is required")
+	}
+	root, err := trustedUIRoot(trustedRoot)
+	if err != nil {
+		return runtimeFiles{}, err
 	}
 	absolute, err := filepath.Abs(runtimeDirectory)
 	if err != nil {
 		return runtimeFiles{}, fmt.Errorf("resolve runtime directory: %w", err)
 	}
 	absolute = filepath.Clean(absolute)
+	if filepath.Dir(absolute) != filepath.Join(root, "runtimes") {
+		return runtimeFiles{}, fmt.Errorf("runtime is outside trusted UI test root")
+	}
 	info, err := os.Lstat(absolute)
 	if err != nil {
 		return runtimeFiles{}, fmt.Errorf("inspect runtime directory: %w", err)
@@ -363,6 +370,9 @@ func verifyRuntimeDirectory(runtimeDirectory string) (runtimeFiles, error) {
 	canonical, err := filepath.EvalSymlinks(absolute)
 	if err != nil {
 		return runtimeFiles{}, fmt.Errorf("resolve runtime directory: %w", err)
+	}
+	if canonical != absolute {
+		return runtimeFiles{}, fmt.Errorf("managed runtime directory contains a symlink")
 	}
 	ready, err := openRegularManagedFile(filepath.Join(canonical, "ready.json"))
 	if err != nil {
@@ -479,17 +489,24 @@ func exactTrustedRuntimeDirectory(runtimeDirectory, trustedRoot string) (string,
 	if runtimeDirectory == "" || trustedRoot == "" {
 		return "", fmt.Errorf("ready runtime and trusted UI test root are required")
 	}
-	root, err := filepath.Abs(trustedRoot)
+	expected, err := pinnedRuntimeDirectory(runtimeDirectory, trustedRoot)
 	if err != nil {
-		return "", fmt.Errorf("resolve trusted UI test root: %w", err)
+		return "", err
 	}
-	root = filepath.Clean(root)
-	canonicalRoot, err := filepath.EvalSymlinks(root)
+	canonical, err := filepath.EvalSymlinks(expected)
 	if err != nil {
-		return "", fmt.Errorf("resolve trusted UI test root: %w", err)
+		return "", fmt.Errorf("resolve UI test runtime directory: %w", err)
 	}
-	if canonicalRoot != root {
-		return "", fmt.Errorf("trusted UI test root contains a symlink")
+	if canonical != expected {
+		return "", fmt.Errorf("managed runtime directory contains a symlink")
+	}
+	return canonical, nil
+}
+
+func pinnedRuntimeDirectory(runtimeDirectory, trustedRoot string) (string, error) {
+	root, err := trustedUIRoot(trustedRoot)
+	if err != nil {
+		return "", err
 	}
 	expected := filepath.Join(root, "runtimes", PlaywrightMCPVersion)
 	supplied, err := filepath.Abs(runtimeDirectory)
@@ -500,14 +517,26 @@ func exactTrustedRuntimeDirectory(runtimeDirectory, trustedRoot string) (string,
 	if supplied != expected {
 		return "", fmt.Errorf("runtime is outside trusted UI test root or not pinned version %s", PlaywrightMCPVersion)
 	}
-	canonical, err := filepath.EvalSymlinks(supplied)
+	return expected, nil
+}
+
+func trustedUIRoot(trustedRoot string) (string, error) {
+	if trustedRoot == "" {
+		return "", fmt.Errorf("trusted UI test root is required")
+	}
+	root, err := filepath.Abs(trustedRoot)
 	if err != nil {
-		return "", fmt.Errorf("resolve UI test runtime directory: %w", err)
+		return "", fmt.Errorf("resolve trusted UI test root: %w", err)
 	}
-	if canonical != expected {
-		return "", fmt.Errorf("managed runtime directory contains a symlink")
+	root = filepath.Clean(root)
+	canonical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve trusted UI test root: %w", err)
 	}
-	return canonical, nil
+	if canonical != root {
+		return "", fmt.Errorf("trusted UI test root contains a symlink")
+	}
+	return root, nil
 }
 
 func verifyManagedPackageVersion(path, want string) error {

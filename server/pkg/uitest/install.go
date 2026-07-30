@@ -65,6 +65,9 @@ func (m *Manager) Install(ctx context.Context) (CapabilityStatus, error) {
 	if err := os.MkdirAll(m.root, 0o755); err != nil {
 		return CapabilityStatus{}, fmt.Errorf("create UI test root: %w", err)
 	}
+	if _, err := trustedUIRoot(m.root); err != nil {
+		return CapabilityStatus{}, err
+	}
 	unlock, err := m.acquireLock()
 	if err != nil {
 		return CapabilityStatus{}, err
@@ -72,7 +75,7 @@ func (m *Manager) Install(ctx context.Context) (CapabilityStatus, error) {
 	defer unlock()
 
 	target := filepath.Join(m.root, "runtimes", PlaywrightMCPVersion)
-	if status := inspectRuntime(target); status.Status == StatusReady {
+	if status := inspectRuntime(target, m.root); status.Status == StatusReady {
 		return status, nil
 	}
 
@@ -148,7 +151,7 @@ func (m *Manager) Install(ctx context.Context) (CapabilityStatus, error) {
 	if err := m.promote(temp, target); err != nil {
 		return CapabilityStatus{}, err
 	}
-	return inspectRuntime(target), nil
+	return inspectRuntime(target, m.root), nil
 }
 
 func (m *Manager) acquireLock() (func(), error) {
@@ -384,10 +387,13 @@ func readyManifestForInstall(browserRelative string, installedAt time.Time) read
 }
 
 func (m *Manager) promote(temp, target string) error {
-	if _, err := verifyRuntimeDirectory(temp); err != nil {
+	if _, err := pinnedRuntimeDirectory(target, m.root); err != nil {
+		return fmt.Errorf("verify runtime promotion target: %w", err)
+	}
+	if _, err := verifyRuntimeDirectory(temp, m.root); err != nil {
 		return fmt.Errorf("verify runtime before promotion: %w", err)
 	}
-	if status := inspectRuntime(target); status.Status == StatusReady {
+	if status := inspectRuntime(target, m.root); status.Status == StatusReady {
 		return nil
 	}
 
@@ -395,20 +401,20 @@ func (m *Manager) promote(temp, target string) error {
 	if _, err := os.Stat(target); err == nil {
 		quarantine = fmt.Sprintf("%s.broken-%d", target, m.now().UnixNano())
 		if err := m.rename(target, quarantine); err != nil {
-			if status := inspectRuntime(target); status.Status == StatusReady {
+			if status := inspectRuntime(target, m.root); status.Status == StatusReady {
 				return nil
 			}
 			return fmt.Errorf("quarantine broken runtime: %w", err)
 		}
-		if status := inspectRuntime(quarantine); status.Status == StatusReady {
-			if status := inspectRuntime(target); status.Status == StatusReady {
+		if status := inspectRuntime(quarantine, m.root); status.Status == StatusReady {
+			if status := inspectRuntime(target, m.root); status.Status == StatusReady {
 				if err := os.RemoveAll(quarantine); err != nil {
 					return fmt.Errorf("remove duplicate claimed runtime: %w", err)
 				}
 				return nil
 			}
 			if err := m.rename(quarantine, target); err != nil {
-				if status := inspectRuntime(target); status.Status == StatusReady {
+				if status := inspectRuntime(target, m.root); status.Status == StatusReady {
 					if removeErr := os.RemoveAll(quarantine); removeErr != nil {
 						return fmt.Errorf("restore claimed ready runtime: %w; remove duplicate: %v", err, removeErr)
 					}
@@ -423,7 +429,7 @@ func (m *Manager) promote(temp, target string) error {
 	}
 
 	if err := m.rename(temp, target); err != nil {
-		if status := inspectRuntime(target); status.Status == StatusReady {
+		if status := inspectRuntime(target, m.root); status.Status == StatusReady {
 			if quarantine != "" {
 				if removeErr := os.RemoveAll(quarantine); removeErr != nil {
 					return fmt.Errorf("preserve concurrent ready runtime: remove quarantine: %w", removeErr)
