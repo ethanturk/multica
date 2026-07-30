@@ -21,10 +21,14 @@ var toolNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 // reservedToolNames are the built-in compiled tools; a workspace tool may not
 // shadow one (the per-task registry refuses the collision anyway, but rejecting
 // at author time gives a clear error).
-var reservedToolNames = map[string]bool{
-	"repo_facts": true, "policy_check": true, "build_probe": true,
-	"test_gate": true, "dotnet_test_gate": true, "diff_summarize": true, "artifact_emit": true,
-}
+var reservedToolNames = func() map[string]bool {
+	names := dettools.AllToolNames()
+	reserved := make(map[string]bool, len(names))
+	for _, name := range names {
+		reserved[name] = true
+	}
+	return reserved
+}()
 
 // DeterministicToolResponse is the API shape for a workspace-authored tool.
 type DeterministicToolResponse struct {

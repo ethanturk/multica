@@ -64,3 +64,20 @@ func TestDeterministicToolHandler_MalformedBodyIs400(t *testing.T) {
 		t.Fatalf("status = %d, want 400 for malformed body", w.Code)
 	}
 }
+
+func TestReservedToolNamesMatchBuiltInCatalog(t *testing.T) {
+	t.Parallel()
+
+	builtIns := make(map[string]bool)
+	for _, name := range dettools.AllToolNames() {
+		builtIns[name] = true
+		if got := validateToolName(name); got != "name collides with a built-in tool" {
+			t.Errorf("validateToolName(%q) = %q, want built-in collision", name, got)
+		}
+	}
+	for name := range reservedToolNames {
+		if !builtIns[name] {
+			t.Errorf("reserved name %q is not a built-in tool", name)
+		}
+	}
+}

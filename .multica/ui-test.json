@@ -1,0 +1,10 @@
+{
+  "start": "make start",
+  "url": "http://127.0.0.1:3000",
+  "health": "/login",
+  "setup": "pnpm ui-test:setup",
+  "viewport": {
+    "width": 1440,
+    "height": 900
+  }
+}

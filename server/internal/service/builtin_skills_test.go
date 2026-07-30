@@ -1,6 +1,9 @@
 package service
 
 import (
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -518,6 +521,316 @@ func TestProjectsAndResourcesSkillCoversDurableContext(t *testing.T) {
 	}
 }
 
+func TestBuiltinSkillsUITestContract(t *testing.T) {
+	skill, ok := findSkill(t, "multica-ui-testing")
+	if !ok {
+		return
+	}
+
+	fm, body, ok := splitFrontmatter(skill.Content)
+	if !ok {
+		t.Fatal("UI-testing skill frontmatter is missing")
+	}
+	strict := strictFrontmatter(t, skill.Content)
+	if got := fm["name"]; got != "multica-ui-testing" {
+		t.Errorf("name = %q, want multica-ui-testing", got)
+	}
+	if got := fm["user-invocable"]; got != "false" {
+		t.Errorf("user-invocable = %q, want false", got)
+	}
+	if got, ok := strict["name"].(string); !ok || got != "multica-ui-testing" {
+		t.Errorf("strict YAML name = %#v, want multica-ui-testing", strict["name"])
+	}
+	if got, ok := strict["user-invocable"].(bool); !ok || got {
+		t.Errorf("strict YAML user-invocable = %#v, want false", strict["user-invocable"])
+	}
+	const wantDescription = "Use when an ordinary Multica issue requests a web UI audit, UX review, accessibility check, browser interaction, or Playwright regression coverage."
+	if description := fm["description"]; description != wantDescription {
+		t.Errorf("description = %q, want trigger-only contract %q", description, wantDescription)
+	}
+
+	requireHeadingOrder(t, body,
+		"Required tools",
+		"Modes",
+		"Workflow",
+		"Classification",
+		"Execution outcomes",
+		"Safety and retries",
+		"Publication",
+		"Source map",
+	)
+
+	wantSteps := []string{
+		"classify_request",
+		"record_baseline",
+		"preflight",
+		"declare_journeys",
+		"navigate_safely",
+		"capture_evidence",
+		"scan_accessibility",
+		"classify_results",
+		"write_regression",
+		"seal_report",
+		"publish",
+		"verify_audit",
+	}
+	if got := markdownNumberedIDs(markdownSection(t, body, "Workflow")); !equalStrings(got, wantSteps) {
+		t.Errorf("workflow step IDs = %v, want %v", got, wantSteps)
+	}
+
+	tools := markdownTableByKey(t, body, "Required tools", "Role")
+	wantTools := map[string]map[string]string{
+		"managed_browser": {"Name": "multica-ui-test"},
+		"reporter":        {"Name": "ui_test_report", "Input rule": "omit_verdict"},
+		"baseline":        {"Name": "repo_facts,diff_summarize"},
+		"regression_gate": {"Name": "test_gate"},
+	}
+	requireTableCases(t, tools, wantTools)
+
+	if !skillHasFile(skill, "references/ui-testing-source-map.md") {
+		t.Error("UI-testing skill missing references/ui-testing-source-map.md")
+	}
+}
+
+func TestBuiltinSkillsUITestScenariosFollowStructuredPolicy(t *testing.T) {
+	skill, ok := findSkill(t, "multica-ui-testing")
+	if !ok {
+		return
+	}
+	_, body, _ := splitFrontmatter(skill.Content)
+
+	modes := markdownTableByKey(t, body, "Modes", "Mode")
+	requireTableCases(t, modes, map[string]map[string]string{
+		"audit": {
+			"Tracked source":   "forbidden",
+			"Persistent tests": "none",
+			"Required gate":    "diff_summarize",
+		},
+		"regression": {
+			"Tracked source":   "focused_playwright_only",
+			"Persistent tests": "required",
+			"Required gate":    "test_gate",
+		},
+		"both": {
+			"Tracked source":   "focused_playwright_only",
+			"Persistent tests": "required",
+			"Required gate":    "test_gate",
+		},
+	})
+
+	classifications := markdownTableByKey(t, body, "Classification", "Observation")
+	requireTableCases(t, classifications, map[string]map[string]string{
+		"assertion_failed": {"Channel": "objective", "Status": "failed"},
+		"relevant_first_party_uncaught_console_error":                  {"Channel": "objective", "Status": "failed"},
+		"relevant_first_party_request_failure_breaks_or_corrupts_flow": {"Channel": "objective", "Status": "failed"},
+		"axe_critical_serious":                                         {"Channel": "objective", "Status": "failed"},
+		"regression_test_gate_nonzero":                                 {"Channel": "objective", "Status": "failed"},
+		"ux_hierarchy_copy_spacing_discoverability":                    {"Channel": "advisory", "Status": "record"},
+		"axe_moderate_minor":                                           {"Channel": "advisory", "Status": "record"},
+		"irrelevant_third_party_noise":                                 {"Channel": "advisory_or_omit", "Status": "record_or_omit"},
+		"infrastructure_failure":                                       {"Channel": "execution", "Status": "not_run"},
+	})
+
+	safety := markdownTableByKey(t, body, "Safety and retries", "Situation")
+	requireTableCases(t, safety, map[string]map[string]string{
+		"external_navigation": {
+			"Action": "prohibit",
+		},
+		"arbitrary_page_evaluation": {
+			"Action": "prohibit",
+		},
+		"browser_startup_before_interaction": {
+			"Action": "bounded_retry",
+		},
+		"flow_after_product_interaction": {
+			"Action":    "no_retry",
+			"Condition": "unless_issue_explicitly_idempotent",
+		},
+	})
+
+	publication := markdownTableByKey(t, body, "Publication", "Outcome")
+	requireTableCases(t, publication, map[string]map[string]string{
+		"success": {
+			"Task response":     "published",
+			"Regenerate report": "never",
+			"Local artifacts":   "retain",
+		},
+		"upload_failure": {
+			"Task response":     "degraded",
+			"Regenerate report": "never",
+			"Local artifacts":   "retain",
+		},
+	})
+}
+
+func TestBuiltinSkillsUITestBlockedExecutionPrecedesObjectiveFailure(t *testing.T) {
+	skill, ok := findSkill(t, "multica-ui-testing")
+	if !ok {
+		return
+	}
+	_, body, _ := splitFrontmatter(skill.Content)
+
+	classifications := markdownTableByKey(t, body, "Classification", "Observation")
+	if got := classifications["assertion_failed"]; got["Channel"] != "objective" || got["Status"] != "failed" {
+		t.Fatalf("assertion failure policy = %v, want objective/failed", got)
+	}
+	safety := markdownTableByKey(t, body, "Safety and retries", "Situation")
+	if got := safety["external_navigation"]; got["Action"] != "prohibit" {
+		t.Fatalf("external navigation policy = %v, want prohibit", got)
+	}
+
+	outcomes := markdownTableByKey(t, body, "Execution outcomes", "Case")
+	requireTableCases(t, outcomes, map[string]map[string]string{
+		"completed_failed": {
+			"Execution status":   "completed",
+			"Objective failures": "one_or_more",
+			"Verdict":            "fail",
+		},
+		"completed_passed": {
+			"Execution status":   "completed",
+			"Objective failures": "none",
+			"Verdict":            "pass",
+		},
+		"infrastructure_error": {
+			"Execution status":   "infrastructure_error",
+			"Objective failures": "ignored",
+			"Verdict":            "not_run",
+		},
+		"blocked": {
+			"Execution status":   "blocked",
+			"Objective failures": "ignored",
+			"Verdict":            "not_run",
+		},
+	})
+
+	// Scenario: an assertion failed, then external navigation hit the policy
+	// boundary. The terminal blocked execution status overrides the earlier
+	// objective failure when selecting the report verdict.
+	if got := uiTestVerdictFromPolicy(t, outcomes, "blocked", true); got != "not_run" {
+		t.Errorf("blocked execution with prior objective failure = %q, want not_run", got)
+	}
+}
+
+func TestBuiltinSkillsUITestPublicationCommandShape(t *testing.T) {
+	skill, ok := findSkill(t, "multica-ui-testing")
+	if !ok {
+		return
+	}
+	_, body, _ := splitFrontmatter(skill.Content)
+	command := markdownFencedBlock(t, markdownSection(t, body, "Publication"), "bash")
+	command = strings.ReplaceAll(command, "\\\n", " ")
+	command = strings.NewReplacer(`"`, "", `'`, "").Replace(command)
+	fields := strings.Fields(command)
+
+	start := stringIndex(fields, "multica")
+	if start < 0 {
+		t.Fatal("publication block has no multica command")
+	}
+	fields = fields[start:]
+	wantPrefix := []string{"multica", "issue", "comment", "add", "$ISSUE_ID"}
+	if len(fields) < len(wantPrefix) || !equalStrings(fields[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("publication command prefix = %v, want %v", fields, wantPrefix)
+	}
+	if got := commandFlagValues(fields, "--content-file"); !equalStrings(got, []string{
+		".multica/artifacts/ui-test/$MULTICA_TASK_ID/comment.md",
+	}) {
+		t.Errorf("--content-file values = %v", got)
+	}
+	if got := commandFlagValues(fields, "--attachment"); !equalStrings(got, []string{
+		".multica/artifacts/ui-test/$MULTICA_TASK_ID/report.json",
+		".multica/artifacts/ui-test/$MULTICA_TASK_ID/report.md",
+		".multica/artifacts/ui-test/$MULTICA_TASK_ID/artifact-manifest.json",
+	}) {
+		t.Errorf("--attachment values = %v", got)
+	}
+
+	attachments := markdownTableByKey(t, body, "Publication attachments", "Artifact")
+	requireTableCases(t, attachments, map[string]map[string]string{
+		"comment.md":             {"Flag": "--content-file", "Policy": "required"},
+		"report.json":            {"Flag": "--attachment", "Policy": "required"},
+		"report.md":              {"Flag": "--attachment", "Policy": "required"},
+		"artifact-manifest.json": {"Flag": "--attachment", "Policy": "required"},
+		"sealed_png_text_json":   {"Flag": "--attachment", "Policy": "relevant_only"},
+		"trace_zip":              {"Flag": "none", "Policy": "rejected_v1"},
+	})
+}
+
+func TestBuiltinSkillsUITestSourceMapLinksResolve(t *testing.T) {
+	skill, ok := findSkill(t, "multica-ui-testing")
+	if !ok {
+		return
+	}
+	sourceMap := skillFileContent(t, skill, "references/ui-testing-source-map.md")
+	sources := markdownTableByKey(t, sourceMap, "Sources", "Contract")
+	requireTableCases(t, sources, map[string]map[string]string{
+		"managed_runtime":          {"Target": "server/pkg/uitest/"},
+		"browser_launch_policy":    {"Target": "server/pkg/uitest/upstream.go"},
+		"browser_network_boundary": {"Target": "server/pkg/uitest/network_proxy.go"},
+		"daemon_injection":         {"Target": "server/internal/daemon/ui_test_inject.go"},
+		"deterministic_report":     {"Target": "server/pkg/dettools/tool_ui_test_report.go"},
+		"ui_test_cli":              {"Target": "server/cmd/multica/cmd_uitest.go"},
+		"issue_publication":        {"Target": "server/cmd/multica/cmd_issue.go"},
+		"repository_manifest":      {"Target": ".multica/ui-test.json"},
+		"playwright_regression":    {"Target": "playwright.config.ts"},
+	})
+
+	root := repositoryRoot(t)
+	sourceMapPath := filepath.Join(root,
+		"server/internal/service/builtin_skills/multica-ui-testing/references/ui-testing-source-map.md")
+	for _, target := range markdownLinkTargets(sourceMap) {
+		if strings.Contains(target, "://") || strings.HasPrefix(target, "#") {
+			continue
+		}
+		resolved := filepath.Clean(filepath.Join(filepath.Dir(sourceMapPath), filepath.FromSlash(target)))
+		if _, err := os.Stat(resolved); err != nil {
+			t.Errorf("source-map link %q resolves to missing path %q: %v", target, resolved, err)
+		}
+	}
+}
+
+func TestBuiltinSkillsUITestDocumentationStructure(t *testing.T) {
+	root := repositoryRoot(t)
+	data, err := os.ReadFile(filepath.Join(root, "docs/ui-testing.md"))
+	if err != nil {
+		t.Fatalf("read docs/ui-testing.md: %v", err)
+	}
+	doc := string(data)
+	requireHeadingOrder(t, doc,
+		"Install and check status",
+		"Repository contract",
+		"Ordinary issue examples",
+		"Verdicts and findings",
+		"Artifacts and publication",
+		"Security limits",
+		"Readiness and troubleshooting",
+	)
+
+	examples := markdownTableByKey(t, doc, "Ordinary issue examples", "Mode")
+	requireTableCases(t, examples, map[string]map[string]string{
+		"audit":      {"Source changes": "none"},
+		"regression": {"Source changes": "focused_playwright"},
+		"both":       {"Source changes": "focused_playwright"},
+	})
+	verdicts := markdownTableByKey(t, doc, "Verdicts and findings", "Result")
+	requireTableCases(t, verdicts, map[string]map[string]string{
+		"objective_failure":    {"Verdict effect": "fail"},
+		"advisory_finding":     {"Verdict effect": "none"},
+		"infrastructure_error": {"Verdict effect": "not_run"},
+		"blocked":              {"Verdict effect": "not_run"},
+	})
+	evidence := markdownTableByKey(t, doc, "Evidence compatibility", "Evidence")
+	requireTableCases(t, evidence, map[string]map[string]string{
+		"png":       {"V1 report input": "accepted"},
+		"text_json": {"V1 report input": "accepted"},
+		"trace_zip": {"V1 report input": "rejected"},
+	})
+	boundaries := markdownTableByKey(t, doc, "Security limits", "Layer")
+	requireTableCases(t, boundaries, map[string]map[string]string{
+		"launch_proxy":    {"Role": "security_boundary"},
+		"allowed_origins": {"Role": "defense_in_depth"},
+	})
+}
+
 func findSkill(t *testing.T, name string) (AgentSkillData, bool) {
 	t.Helper()
 	for _, s := range loadBuiltinSkills() {
@@ -536,6 +849,279 @@ func skillHasFile(skill AgentSkillData, path string) bool {
 		}
 	}
 	return false
+}
+
+func skillFileContent(t *testing.T, skill AgentSkillData, path string) string {
+	t.Helper()
+	for _, file := range skill.Files {
+		if file.Path == path {
+			return file.Content
+		}
+	}
+	t.Fatalf("skill %q missing supporting file %q", skill.Name, path)
+	return ""
+}
+
+func strictFrontmatter(t *testing.T, content string) map[string]any {
+	t.Helper()
+	if !strings.HasPrefix(content, "---\n") {
+		t.Fatal("SKILL.md must lead with YAML frontmatter")
+	}
+	rest := content[len("---\n"):]
+	end := strings.Index(rest, "\n---")
+	if end < 0 {
+		t.Fatal("SKILL.md frontmatter has no closing delimiter")
+	}
+	var frontmatter map[string]any
+	if err := yaml.Unmarshal([]byte(rest[:end]), &frontmatter); err != nil {
+		t.Fatalf("SKILL.md frontmatter is not strict YAML: %v", err)
+	}
+	return frontmatter
+}
+
+func repositoryRoot(t *testing.T) string {
+	t.Helper()
+	current, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(current, "CLAUDE.md")); err == nil {
+			return current
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			t.Fatal("repository root not found")
+		}
+		current = parent
+	}
+}
+
+func requireHeadingOrder(t *testing.T, markdown string, headings ...string) {
+	t.Helper()
+	offset := 0
+	for _, heading := range headings {
+		needle := "## " + heading
+		next := strings.Index(markdown[offset:], needle)
+		if next < 0 {
+			t.Errorf("missing ordered heading %q", heading)
+			continue
+		}
+		offset += next + len(needle)
+	}
+}
+
+func markdownSection(t *testing.T, markdown, heading string) string {
+	t.Helper()
+	needle := "## " + heading
+	start := strings.Index(markdown, needle)
+	if start < 0 {
+		t.Fatalf("missing heading %q", heading)
+	}
+	start += len(needle)
+	rest := markdown[start:]
+	if end := strings.Index(rest, "\n## "); end >= 0 {
+		rest = rest[:end]
+	}
+	return rest
+}
+
+func markdownNumberedIDs(section string) []string {
+	pattern := regexp.MustCompile(`(?m)^\d+\.\s+` + "`" + `([a-z0-9_]+)` + "`")
+	matches := pattern.FindAllStringSubmatch(section, -1)
+	ids := make([]string, 0, len(matches))
+	for _, match := range matches {
+		ids = append(ids, match[1])
+	}
+	return ids
+}
+
+func markdownTableByKey(t *testing.T, markdown, heading, key string) map[string]map[string]string {
+	t.Helper()
+	section := markdownSection(t, markdown, heading)
+	lines := strings.Split(section, "\n")
+	for index := 0; index+1 < len(lines); index++ {
+		if !strings.HasPrefix(strings.TrimSpace(lines[index]), "|") ||
+			!strings.HasPrefix(strings.TrimSpace(lines[index+1]), "|") {
+			continue
+		}
+		headers := markdownRow(lines[index])
+		if !isMarkdownSeparator(markdownRow(lines[index+1])) {
+			continue
+		}
+		headerSet := make(map[string]bool, len(headers))
+		for _, header := range headers {
+			if header == "" || headerSet[header] {
+				t.Fatalf("table %q has blank or duplicate header %q", heading, header)
+			}
+			headerSet[header] = true
+		}
+		if !headerSet[key] {
+			t.Fatalf("table %q is missing key column %q", heading, key)
+		}
+		rows := make(map[string]map[string]string)
+		for _, line := range lines[index+2:] {
+			if !strings.HasPrefix(strings.TrimSpace(line), "|") {
+				break
+			}
+			values := markdownRow(line)
+			if len(values) != len(headers) {
+				t.Fatalf("table %q row has %d columns, want %d: %q", heading, len(values), len(headers), line)
+			}
+			row := make(map[string]string, len(headers))
+			for column := range headers {
+				row[headers[column]] = values[column]
+			}
+			rowKey := row[key]
+			if rowKey == "" {
+				t.Fatalf("table %q has an empty %q key", heading, key)
+			}
+			if _, exists := rows[rowKey]; exists {
+				t.Fatalf("table %q has duplicate %q key %q", heading, key, rowKey)
+			}
+			rows[rowKey] = row
+		}
+		if len(rows) == 0 {
+			t.Fatalf("table %q has no data rows", heading)
+		}
+		return rows
+	}
+	t.Fatalf("heading %q has no Markdown table", heading)
+	return nil
+}
+
+func markdownRow(line string) []string {
+	line = strings.TrimSpace(line)
+	line = strings.TrimPrefix(line, "|")
+	line = strings.TrimSuffix(line, "|")
+	cells := strings.Split(line, "|")
+	for index := range cells {
+		cells[index] = strings.Trim(strings.TrimSpace(cells[index]), "`")
+	}
+	return cells
+}
+
+func isMarkdownSeparator(cells []string) bool {
+	if len(cells) == 0 {
+		return false
+	}
+	for _, cell := range cells {
+		cell = strings.Trim(strings.TrimSpace(cell), ":")
+		if len(cell) < 3 || strings.Trim(cell, "-") != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func requireTableCases(t *testing.T, rows, cases map[string]map[string]string) {
+	t.Helper()
+	for key, expected := range cases {
+		row, ok := rows[key]
+		if !ok {
+			t.Errorf("table row %q is missing", key)
+			continue
+		}
+		for column, want := range expected {
+			if got := row[column]; got != want {
+				t.Errorf("table[%q][%q] = %q, want %q", key, column, got, want)
+			}
+		}
+	}
+}
+
+func uiTestVerdictFromPolicy(
+	t *testing.T,
+	outcomes map[string]map[string]string,
+	executionStatus string,
+	hasObjectiveFailure bool,
+) string {
+	t.Helper()
+	key := executionStatus
+	if executionStatus == "completed" {
+		if hasObjectiveFailure {
+			key = "completed_failed"
+		} else {
+			key = "completed_passed"
+		}
+	}
+	row, ok := outcomes[key]
+	if !ok {
+		t.Fatalf("execution outcome %q is missing", key)
+	}
+	if got := row["Execution status"]; got != executionStatus {
+		t.Fatalf("execution outcome %q status = %q, want %q", key, got, executionStatus)
+	}
+	switch objectiveRule := row["Objective failures"]; objectiveRule {
+	case "none":
+		if hasObjectiveFailure {
+			t.Fatalf("execution outcome %q requires no objective failures", key)
+		}
+	case "one_or_more":
+		if !hasObjectiveFailure {
+			t.Fatalf("execution outcome %q requires an objective failure", key)
+		}
+	case "ignored":
+	default:
+		t.Fatalf("execution outcome %q has unknown objective rule %q", key, objectiveRule)
+	}
+	return row["Verdict"]
+}
+
+func markdownFencedBlock(t *testing.T, section, language string) string {
+	t.Helper()
+	startMarker := "```" + language + "\n"
+	start := strings.Index(section, startMarker)
+	if start < 0 {
+		t.Fatalf("missing %s fenced block", language)
+	}
+	rest := section[start+len(startMarker):]
+	end := strings.Index(rest, "\n```")
+	if end < 0 {
+		t.Fatalf("unterminated %s fenced block", language)
+	}
+	return rest[:end]
+}
+
+func markdownLinkTargets(markdown string) []string {
+	pattern := regexp.MustCompile(`\[[^\]]+\]\(([^)]+)\)`)
+	matches := pattern.FindAllStringSubmatch(markdown, -1)
+	targets := make([]string, 0, len(matches))
+	for _, match := range matches {
+		targets = append(targets, match[1])
+	}
+	return targets
+}
+
+func commandFlagValues(fields []string, flag string) []string {
+	var values []string
+	for index := 0; index+1 < len(fields); index++ {
+		if fields[index] == flag {
+			values = append(values, fields[index+1])
+		}
+	}
+	return values
+}
+
+func stringIndex(values []string, target string) int {
+	for index, value := range values {
+		if value == target {
+			return index
+		}
+	}
+	return -1
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 // splitFrontmatter returns the top-level scalar keys of a leading YAML

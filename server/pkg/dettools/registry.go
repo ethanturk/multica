@@ -12,6 +12,7 @@ import (
 // stderr logger.
 type ToolEnv struct {
 	WorkDir      string
+	TaskID       string
 	AllowNetwork bool
 	Timeout      time.Duration
 	ArtifactDir  string
@@ -53,6 +54,7 @@ func allTools() []Tool {
 		diffSummarizeTool(),
 		artifactEmitTool(),
 		agentImprovementEvaluateTool(),
+		uiTestReportTool(),
 	}
 }
 

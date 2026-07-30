@@ -23,17 +23,30 @@ type detToolsStepFile struct {
 // server with the same name is left untouched (the merge stays additive).
 const dettoolsServerName = "multica-tools"
 
-// dettoolsExecOptionsProviders lists the providers that receive the
-// deterministic tool server through ExecOptions.McpConfig. They all consume the
-// same Claude-style {"mcpServers":{name:{command,args,env}}} shape and support a
-// stdio command server:
+func detToolsRuntimeGuidance() string {
+	return "\n\n## Deterministic Tools (MCP)\n\n" +
+		"The `multica-tools` MCP server provides typed, verifiable tools that must be used instead of shell commands for correctness-sensitive operations. Each tool returns an auditable Result with stable error codes.\n\n" +
+		"- **repo_facts** — current branch, changed files, package managers. USE over raw git commands.\n" +
+		"- **policy_check** — branch naming, forbidden paths, required files. USE instead of manual grep/git checks.\n" +
+		"- **build_probe** — toolchain detection with version. USE instead of raw `make`/`npm`/`cargo` probes.\n" +
+		"- **test_gate** — run test suites, normalize outcomes to pass/fail. USE instead of raw test runners.\n" +
+		"- **diff_summarize** — stable machine-readable diff. USE instead of `git diff`.\n" +
+		"- **artifact_emit** — write structured artifacts. USE instead of `echo > file`.\n" +
+		"- **ui_test_report** — validate UI-test evidence and publish deterministic report artifacts. USE for the final UI-test report instead of hand-written files.\n\n" +
+		"When a skill or workflow tells you to use one of these tools, call it through MCP. Do NOT replicate its behavior with shell commands — shell output lacks audit logging, policy enforcement, and typed results.\n"
+}
+
+// managedMCPExecOptionsProviders lists the providers that receive
+// daemon-managed MCP servers through ExecOptions.McpConfig. They all consume
+// the same Claude-style {"mcpServers":{name:{command,args,env}}} shape and
+// support a stdio command server:
 //   - claude:        temp file via --mcp-config
 //   - codex:         daemon-managed [mcp_servers.*] block in config.toml
 //   - dirge:         daemon-managed mcp_servers block in config.json
 //   - opencode:      translated into OPENCODE_CONFIG_CONTENT (type:"local")
 //   - hermes/kimi/kiro: translated into the ACP session mcpServers array
 //     (stdio entries always pass the runtime's transport-capability filter)
-var dettoolsExecOptionsProviders = map[string]bool{
+var managedMCPExecOptionsProviders = map[string]bool{
 	"claude":   true,
 	"codex":    true,
 	"dirge":    true,
@@ -56,10 +69,10 @@ type agentDetToolsProfile struct {
 // task working directory, pinned into the server env. steps are the workspace's
 // authored tools to expose alongside the built-ins.
 func (d *Daemon) injectExecOptionsTools(agentCfg json.RawMessage, provider, workDir string, runtimeConfig json.RawMessage, steps []DeterministicToolData, logger *slog.Logger) json.RawMessage {
-	if !d.cfg.DetTools.Enabled || !dettoolsExecOptionsProviders[provider] {
+	if !d.cfg.DetTools.Enabled || !managedMCPExecOptionsProviders[provider] {
 		return agentCfg
 	}
-	return d.mergeDetTools(agentCfg, provider, workDir, runtimeConfig, steps, logger)
+	return d.mergeDetTools(agentCfg, provider, nil, workDir, runtimeConfig, steps, logger)
 }
 
 // injectExecenvTools merges the deterministic tool server into agentCfg for
@@ -68,16 +81,26 @@ func (d *Daemon) injectExecOptionsTools(agentCfg json.RawMessage, provider, work
 // empty: the tool server falls back to the cwd OpenClaw spawns it with, which is
 // the pinned task workspace.
 func (d *Daemon) injectExecenvTools(agentCfg json.RawMessage, provider string, runtimeConfig json.RawMessage, steps []DeterministicToolData, logger *slog.Logger) json.RawMessage {
+	return d.injectExecenvToolsWithBin(agentCfg, provider, "", runtimeConfig, steps, logger)
+}
+
+func (d *Daemon) injectExecenvToolsWithBin(agentCfg json.RawMessage, provider, openclawBin string, runtimeConfig json.RawMessage, steps []DeterministicToolData, logger *slog.Logger) json.RawMessage {
+	return d.injectExecenvToolsWithResolver(
+		agentCfg, provider, d.newOpenClawMCPBaseResolver(openclawBin), runtimeConfig, steps, logger,
+	)
+}
+
+func (d *Daemon) injectExecenvToolsWithResolver(agentCfg json.RawMessage, provider string, resolveBase openClawMCPBaseResolver, runtimeConfig json.RawMessage, steps []DeterministicToolData, logger *slog.Logger) json.RawMessage {
 	if !d.cfg.DetTools.Enabled || provider != "openclaw" {
 		return agentCfg
 	}
-	return d.mergeDetTools(agentCfg, provider, "", runtimeConfig, steps, logger)
+	return d.mergeDetTools(agentCfg, provider, resolveBase, "", runtimeConfig, steps, logger)
 }
 
 // mergeDetTools computes the effective tool allowlist for the agent and merges
 // the deterministic server into agentCfg. Fail-open: any error logs and returns
 // the original config so a tool-plane problem never blocks a task launch.
-func (d *Daemon) mergeDetTools(agentCfg json.RawMessage, provider, workDir string, runtimeConfig json.RawMessage, steps []DeterministicToolData, logger *slog.Logger) json.RawMessage {
+func (d *Daemon) mergeDetTools(agentCfg json.RawMessage, provider string, resolveBase openClawMCPBaseResolver, workDir string, runtimeConfig json.RawMessage, steps []DeterministicToolData, logger *slog.Logger) json.RawMessage {
 	effective := computeEffectiveAllowed(d.cfg.DetTools, runtimeConfig)
 	profile := parseAgentDetToolsProfile(runtimeConfig)
 	allowedSteps := filterStepsByProfile(steps, profile, d.cfg.DetTools.DeniedTools)
@@ -105,6 +128,14 @@ func (d *Daemon) mergeDetTools(agentCfg json.RawMessage, provider, workDir strin
 		}
 	}
 
+	if provider == "openclaw" {
+		baseConfig, err := resolveBase(agentCfg)
+		if err != nil {
+			logger.Warn("dettools: native MCP merge failed; launching without tool plane", "error", err)
+			return agentCfg
+		}
+		agentCfg = baseConfig
+	}
 	merged, err := buildEffectiveMcpConfig(agentCfg, selfBin, workDir, stepsFile, d.cfg.DetTools, effective)
 	if err != nil {
 		logger.Warn("dettools: merge failed; launching without tool plane", "error", err)
@@ -236,12 +267,17 @@ func buildEffectiveMcpConfig(agentCfg json.RawMessage, selfBin, workDir, stepsFi
 			return nil, fmt.Errorf("parse agent mcp_config: %w", err)
 		}
 	}
-
+	if root == nil {
+		root = map[string]json.RawMessage{}
+	}
 	servers := map[string]json.RawMessage{}
 	if raw, ok := root["mcpServers"]; ok && len(strings.TrimSpace(string(raw))) > 0 {
 		if err := json.Unmarshal(raw, &servers); err != nil {
 			return nil, fmt.Errorf("parse mcpServers: %w", err)
 		}
+	}
+	if servers == nil {
+		servers = map[string]json.RawMessage{}
 	}
 	if _, exists := servers[dettoolsServerName]; exists {
 		return agentCfg, nil

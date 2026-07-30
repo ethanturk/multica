@@ -30,6 +30,7 @@ import (
 	"github.com/multica-ai/multica/server/pkg/agent"
 	"github.com/multica-ai/multica/server/pkg/skillbundle"
 	"github.com/multica-ai/multica/server/pkg/taskfailure"
+	"github.com/multica-ai/multica/server/pkg/uitest"
 )
 
 // ErrRepoNotConfigured is returned by ensureRepoReady when the requested repo
@@ -417,6 +418,11 @@ type Daemon struct {
 	// New() and overridable in tests so the auto-update poller can be exercised
 	// without touching the real network or the brew CLI.
 	runUpdateFn func(targetVersion string) (string, error)
+
+	uiTestHomeDir       func() (string, error)
+	uiTestStatus        func(string) uitest.CapabilityStatus
+	uiTestExecutable    func() (string, error)
+	openclawMCPResolver func(string) (map[string]json.RawMessage, error)
 }
 
 type profileLaunchSpec struct {
@@ -4858,9 +4864,17 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	}
 
 	// OpenClaw materializes mcp.servers from this config during execenv.Prepare,
-	// so the deterministic tool server must be merged in before Prepare/Reuse.
-	// No-op for every other provider.
-	agentMcpConfig = d.injectExecenvTools(agentMcpConfig, provider, agentRuntimeConfig, task.DeterministicTools, d.logger)
+	// so daemon-managed servers must be merged in before Prepare/Reuse. No-op
+	// for every other provider.
+	effectiveMcpConfig, uiTestInjected := d.injectExecenvOpenClawOverlays(
+		effectiveMcpConfig,
+		provider,
+		openclawBin,
+		agentRuntimeConfig,
+		task.DeterministicTools,
+		task.ID,
+		d.logger,
+	)
 
 	var agentEnvOverrides map[string]string
 	var agentCustomArgs []string
@@ -4970,6 +4984,11 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			return TaskResult{}, fmt.Errorf("prepare execution environment: %w", err)
 		}
 	}
+	defer func() {
+		if err := uitest.CleanupTask(env.WorkDir, task.ID, taskLog); err != nil {
+			taskLog.Warn("ui-test: task cleanup failed", "error", err)
+		}
+	}()
 	// Belt-and-suspenders: also mark whatever root we ended up with, in case
 	// future changes diverge from PredictRootDir.
 	if env.RootDir != predictedRoot && env.RootDir != "" {
@@ -5218,6 +5237,12 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		execAgentRuntimeConfig = task.Agent.RuntimeConfig
 	}
 	mcpConfig = d.injectExecOptionsTools(mcpConfig, provider, env.WorkDir, execAgentRuntimeConfig, task.DeterministicTools, taskLog)
+	var execOptionsUITestInjected bool
+	mcpConfig, execOptionsUITestInjected = d.injectExecOptionsUITest(mcpConfig, provider, env.WorkDir, task.ID, taskLog)
+	uiTestInjected = uiTestInjected || execOptionsUITestInjected
+	if uiTestInjected {
+		runtimeBrief += uiTestRuntimeBrief
+	}
 	// Deterministic tools guidance: when the tool plane is enabled and MCP
 	// servers were injected, append instructions telling the agent to prefer
 	// deterministic tools over shell commands. Without this, agents silently
@@ -5225,15 +5250,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// because shell commands are more familiar and the tools are never
 	// mentioned in the runtime brief.
 	if d.cfg.DetTools.Enabled && len(mcpConfig) > 0 {
-		runtimeBrief += "\n\n## Deterministic Tools (MCP)\n\n"
-		runtimeBrief += "The `multica-tools` MCP server provides typed, verifiable tools that must be used instead of shell commands for correctness-sensitive operations. Each tool returns an auditable Result with stable error codes.\n\n"
-		runtimeBrief += "- **repo_facts** — current branch, changed files, package managers. USE over raw git commands.\n"
-		runtimeBrief += "- **policy_check** — branch naming, forbidden paths, required files. USE instead of manual grep/git checks.\n"
-		runtimeBrief += "- **build_probe** — toolchain detection with version. USE instead of raw `make`/`npm`/`cargo` probes.\n"
-		runtimeBrief += "- **test_gate** — run test suites, normalize outcomes to pass/fail. USE instead of raw test runners.\n"
-		runtimeBrief += "- **diff_summarize** — stable machine-readable diff. USE instead of `git diff`.\n"
-		runtimeBrief += "- **artifact_emit** — write structured artifacts. USE instead of `echo > file`.\n\n"
-		runtimeBrief += "When a skill or workflow tells you to use one of these tools, call it through MCP. Do NOT replicate its behavior with shell commands — shell output lacks audit logging, policy enforcement, and typed results.\n"
+		runtimeBrief += detToolsRuntimeGuidance()
 	}
 	if provider == "hermes" {
 		customArgs = hermesLaunchArgs(customArgs, env != nil && env.HermesHome != "")
@@ -5424,6 +5441,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			taskLog.Warn("execenv: re-inject cold runtime config for fresh retry failed (non-fatal)", "error", briefErr)
 		} else {
 			runtimeBrief = freshBrief
+			if uiTestInjected {
+				runtimeBrief += uiTestRuntimeBrief
+			}
 			if providerNeedsInlineSystemPrompt(provider) {
 				execOpts.SystemPrompt = runtimeBrief
 			}

@@ -93,6 +93,7 @@ var DefaultDetToolsAllowed = []string{
 	"diff_summarize",
 	"artifact_emit",
 	"agent_improvement_evaluate",
+	"ui_test_report",
 }
 
 // DefaultGCArtifactPatterns lists basename matches that the GC loop treats as

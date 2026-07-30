@@ -684,6 +684,44 @@ func openclawResolvedFullConfig(bin string, timeout time.Duration) (map[string]a
 	return cfg, nil
 }
 
+// ResolveOpenclawNativeMCPServers returns the active OpenClaw config's fully
+// resolved mcp.servers map. It deliberately uses the same CLI-backed active
+// path and full-config pipeline as task launch so JSON5, $include, environment
+// substitution, and modern config-path selection stay OpenClaw-owned.
+func ResolveOpenclawNativeMCPServers(openclawBin string) (map[string]json.RawMessage, error) {
+	if openclawBin == "" {
+		openclawBin = "openclaw"
+	}
+	_, exists, err := openclawActiveConfigPath(openclawBin, openclawCLITimeout)
+	if err != nil {
+		return nil, fmt.Errorf("locate openclaw active config: %w", err)
+	}
+	if !exists {
+		return map[string]json.RawMessage{}, nil
+	}
+	resolved, err := openclawResolvedFullConfig(openclawBin, openclawCLITimeout)
+	if err != nil {
+		return nil, fmt.Errorf("read openclaw resolved config: %w", err)
+	}
+	mcp, ok := resolved["mcp"].(map[string]any)
+	if !ok {
+		return map[string]json.RawMessage{}, nil
+	}
+	native, ok := mcp["servers"].(map[string]any)
+	if !ok {
+		return map[string]json.RawMessage{}, nil
+	}
+	servers := make(map[string]json.RawMessage, len(native))
+	for name, entry := range native {
+		raw, err := json.Marshal(entry)
+		if err != nil {
+			return nil, fmt.Errorf("marshal openclaw mcp.servers.%s: %w", name, err)
+		}
+		servers[name] = raw
+	}
+	return servers, nil
+}
+
 // openclawResolvedAgentsList fetches the user's resolved per-agent list and
 // reports which schema produced it. The schema matters downstream: a config-
 // sourced list is itself valid `agents.list[]` config and may be written back
