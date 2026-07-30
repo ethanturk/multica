@@ -23,17 +23,17 @@ type detToolsStepFile struct {
 // server with the same name is left untouched (the merge stays additive).
 const dettoolsServerName = "multica-tools"
 
-// dettoolsExecOptionsProviders lists the providers that receive the
-// deterministic tool server through ExecOptions.McpConfig. They all consume the
-// same Claude-style {"mcpServers":{name:{command,args,env}}} shape and support a
-// stdio command server:
+// managedMCPExecOptionsProviders lists the providers that receive
+// daemon-managed MCP servers through ExecOptions.McpConfig. They all consume
+// the same Claude-style {"mcpServers":{name:{command,args,env}}} shape and
+// support a stdio command server:
 //   - claude:        temp file via --mcp-config
 //   - codex:         daemon-managed [mcp_servers.*] block in config.toml
 //   - dirge:         daemon-managed mcp_servers block in config.json
 //   - opencode:      translated into OPENCODE_CONFIG_CONTENT (type:"local")
 //   - hermes/kimi/kiro: translated into the ACP session mcpServers array
 //     (stdio entries always pass the runtime's transport-capability filter)
-var dettoolsExecOptionsProviders = map[string]bool{
+var managedMCPExecOptionsProviders = map[string]bool{
 	"claude":   true,
 	"codex":    true,
 	"dirge":    true,
@@ -56,7 +56,7 @@ type agentDetToolsProfile struct {
 // task working directory, pinned into the server env. steps are the workspace's
 // authored tools to expose alongside the built-ins.
 func (d *Daemon) injectExecOptionsTools(agentCfg json.RawMessage, provider, workDir string, runtimeConfig json.RawMessage, steps []DeterministicToolData, logger *slog.Logger) json.RawMessage {
-	if !d.cfg.DetTools.Enabled || !dettoolsExecOptionsProviders[provider] {
+	if !d.cfg.DetTools.Enabled || !managedMCPExecOptionsProviders[provider] {
 		return agentCfg
 	}
 	return d.mergeDetTools(agentCfg, provider, workDir, runtimeConfig, steps, logger)

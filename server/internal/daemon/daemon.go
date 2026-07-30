@@ -30,6 +30,7 @@ import (
 	"github.com/multica-ai/multica/server/pkg/agent"
 	"github.com/multica-ai/multica/server/pkg/skillbundle"
 	"github.com/multica-ai/multica/server/pkg/taskfailure"
+	"github.com/multica-ai/multica/server/pkg/uitest"
 )
 
 // ErrRepoNotConfigured is returned by ensureRepoReady when the requested repo
@@ -417,6 +418,10 @@ type Daemon struct {
 	// New() and overridable in tests so the auto-update poller can be exercised
 	// without touching the real network or the brew CLI.
 	runUpdateFn func(targetVersion string) (string, error)
+
+	uiTestHomeDir    func() (string, error)
+	uiTestStatus     func(string) uitest.CapabilityStatus
+	uiTestExecutable func() (string, error)
 }
 
 type profileLaunchSpec struct {
@@ -4858,9 +4863,11 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	}
 
 	// OpenClaw materializes mcp.servers from this config during execenv.Prepare,
-	// so the deterministic tool server must be merged in before Prepare/Reuse.
-	// No-op for every other provider.
-	agentMcpConfig = d.injectExecenvTools(agentMcpConfig, provider, agentRuntimeConfig, task.DeterministicTools, d.logger)
+	// so daemon-managed servers must be merged in before Prepare/Reuse. No-op
+	// for every other provider.
+	effectiveMcpConfig = d.injectExecenvTools(effectiveMcpConfig, provider, agentRuntimeConfig, task.DeterministicTools, d.logger)
+	var uiTestInjected bool
+	effectiveMcpConfig, uiTestInjected = d.injectExecenvUITest(effectiveMcpConfig, provider, task.ID, d.logger)
 
 	var agentEnvOverrides map[string]string
 	var agentCustomArgs []string
@@ -4970,6 +4977,11 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			return TaskResult{}, fmt.Errorf("prepare execution environment: %w", err)
 		}
 	}
+	defer func() {
+		if err := uitest.CleanupTask(env.WorkDir, task.ID, taskLog); err != nil {
+			taskLog.Warn("ui-test: task cleanup failed", "error", err)
+		}
+	}()
 	// Belt-and-suspenders: also mark whatever root we ended up with, in case
 	// future changes diverge from PredictRootDir.
 	if env.RootDir != predictedRoot && env.RootDir != "" {
@@ -5218,6 +5230,12 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		execAgentRuntimeConfig = task.Agent.RuntimeConfig
 	}
 	mcpConfig = d.injectExecOptionsTools(mcpConfig, provider, env.WorkDir, execAgentRuntimeConfig, task.DeterministicTools, taskLog)
+	var execOptionsUITestInjected bool
+	mcpConfig, execOptionsUITestInjected = d.injectExecOptionsUITest(mcpConfig, provider, env.WorkDir, task.ID, taskLog)
+	uiTestInjected = uiTestInjected || execOptionsUITestInjected
+	if uiTestInjected {
+		runtimeBrief += uiTestRuntimeBrief
+	}
 	// Deterministic tools guidance: when the tool plane is enabled and MCP
 	// servers were injected, append instructions telling the agent to prefer
 	// deterministic tools over shell commands. Without this, agents silently
@@ -5424,6 +5442,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			taskLog.Warn("execenv: re-inject cold runtime config for fresh retry failed (non-fatal)", "error", briefErr)
 		} else {
 			runtimeBrief = freshBrief
+			if uiTestInjected {
+				runtimeBrief += uiTestRuntimeBrief
+			}
 			if providerNeedsInlineSystemPrompt(provider) {
 				execOpts.SystemPrompt = runtimeBrief
 			}
