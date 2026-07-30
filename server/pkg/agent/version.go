@@ -18,14 +18,9 @@ var MinVersions = map[string]string{
 	"qwen":    "0.20.0",  // stream-json protocol captured and verified against Qwen Code 0.20.0
 }
 
-// MinQuickCreateCLIVersion gates the agent-create (quick-create) flow against
-// the multica CLI version reported by the daemon at registration time. The
-// quick-create prompt that the agent runs depends on CLI behavior introduced
-// after this version (attachment URL handling, quick-create attachment
-// binding, no-retry semantics on `multica issue create` failure — see PR
-// #1851); older daemons would either double-create issues or mishandle pasted
-// screenshot URLs. Treated as a hard requirement: missing / unparsable / below
-// this threshold all fail closed.
+// MinQuickCreateCLIVersion is retained for compatibility in API responses and
+// shared tests, but agent-mode issue creation no longer rejects daemon-reported
+// CLI versions based on this threshold.
 const MinQuickCreateCLIVersion = "0.2.21"
 
 // MinQuickCreateFieldsCLIVersion is the first daemon release that carries
@@ -66,8 +61,8 @@ func HandoffSupported(cliVersion string) bool {
 	return !parsed.lessThan(min)
 }
 
-// Errors returned by CheckMinCLIVersion. Callers branch on these to surface
-// "needs upgrade" vs "version not reported" with the right user message.
+// Errors retained for compatibility with older callers/tests; quick-create no
+// longer returns them from CheckMinCLIVersion.
 var (
 	ErrCLIVersionMissing = errors.New("multica CLI version not reported by daemon")
 	ErrCLIVersionTooOld  = errors.New("multica CLI version is below required minimum")
@@ -75,22 +70,16 @@ var (
 
 // devDescribeRe matches the `git describe --tags --always --dirty` output for
 // a build past the latest tag, e.g. `v0.2.15-235-gdaf0e935` (optionally with a
-// trailing `-dirty`). Daemons built from source (Makefile `make build` / `make
-// daemon`) report this shape; tagged releases are bare semver. Treating dev-
-// described daemons as OK keeps `make daemon` unblocked without weakening the
-// gate for staging or production users running stale stable releases.
+// trailing `-dirty`). HandoffSupported treats this shape as supported so forked
+// or source-built daemons are not rejected just because they are not exact tags.
 var devDescribeRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+-\d+-g[0-9a-fA-F]+`)
 
-// CheckMinCLIVersion returns nil when `detected` parses as ≥ minimum. Returns
-// ErrCLIVersionMissing for empty or unparsable input, and ErrCLIVersionTooOld
-// when parsable but below the minimum. The caller can check for these
-// sentinel errors with errors.Is to drive the response shape.
-//
-// Dev-built daemons (git-describe shape) always pass — the version string
-// itself is the shared signal, so the modal pre-check and this server gate
-// agree by construction without needing to compare separate env flags.
+// CheckMinCLIVersion no longer gates quick-create issue creation on daemon CLI
+// version strings. It accepts tagged releases, dev builds, missing values, and
+// unparsable values alike so agent-mode issue creation depends on runtime
+// capability rather than version metadata.
 func CheckMinCLIVersion(detected string) error {
-	return CheckMinCLIVersionFor(detected, MinQuickCreateCLIVersion)
+	return nil
 }
 
 // CheckMinCLIVersionFor applies the quick-create version policy against a

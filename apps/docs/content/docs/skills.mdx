@@ -47,6 +47,8 @@ Every skill contains a main file, `SKILL.md`. Spell out:
 - what form the result should take;
 - when to stop and check with a member.
 
+After attaching, the agent picks up its skills the next time it starts a task — each AI coding tool has its own skill discovery path (Claude Code uses `.claude/skills/`, Cursor uses `.cursor/skills/`, Antigravity uses `.agents/skills/`, etc.), and Multica drops files in the right place automatically. **However, two tools (Hermes, OpenClaw) currently use the generic fallback path `.agent_context/skills/` — whether these tools actually read skills from that path depends on the tool itself.** Full path mapping and the native-discovery vs. fallback distinction is in [AI coding tools comparison → Where skill files go](/providers#where-skill-files-go).
+
 You can also add supporting files, for example:
 
 ```text

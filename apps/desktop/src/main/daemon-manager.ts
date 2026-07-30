@@ -20,6 +20,7 @@ import type {
   DaemonStatus,
   DaemonPrefs,
   LocalRuntimeProbe,
+  UITestCapabilityStatus,
 } from "../shared/daemon-types";
 import { daemonStatusAlive } from "../shared/daemon-types";
 import { ensureManagedCli, managedCliPath } from "./cli-bootstrap";
@@ -34,6 +35,10 @@ import {
   isAuthStatusError,
   type AuthProbeResult,
 } from "./daemon-auth-probe";
+import {
+  createUITestCapabilityOperations,
+  parseUITestCapabilityStatus,
+} from "./ui-test-status";
 
 const DEFAULT_HEALTH_PORT = 19514;
 const POLL_INTERVAL_MS = 5_000;
@@ -180,6 +185,8 @@ interface HealthPayload {
   active_task_count?: number;
   agents?: string[];
   workspaces?: unknown[];
+  /** Absent on daemons older than managed UI testing support. */
+  ui_test?: unknown;
 }
 
 async function fetchHealthAtPort(
@@ -392,6 +399,7 @@ async function fetchHealth(): Promise<DaemonStatus> {
     profile: active.name,
     serverUrl: data.server_url,
     externallyManaged,
+    uiTest: parseUITestCapabilityStatus(data.ui_test, { optional: true }),
   };
 }
 
@@ -540,6 +548,27 @@ async function resolveCliBinary(): Promise<string | null> {
     cliResolvePromise = null;
   }
 }
+
+async function runUITestCLI(args: readonly string[]): Promise<string> {
+  const bin = await resolveCliBinary();
+  if (!bin) throw new Error("Multica CLI unavailable");
+  return await new Promise<string>((resolve, reject) => {
+    execFile(
+      bin,
+      [...args],
+      { timeout: 10 * 60_000 },
+      (error, stdout) => {
+        if (error) reject(error);
+        else resolve(stdout);
+      },
+    );
+  });
+}
+
+const uiTestCapability = createUITestCapabilityOperations(
+  runUITestCLI,
+  async () => (await ensureActiveProfile()).name,
+);
 
 /**
  * Reads the version of the currently resolved CLI binary. Cached for the
@@ -1168,6 +1197,14 @@ export function setupDaemonManager(
   ipcMain.handle("daemon:stop", () => withGuard(() => stopDaemon()));
   ipcMain.handle("daemon:restart", () => withGuard(() => restartDaemon()));
   ipcMain.handle("daemon:get-status", () => fetchHealth());
+  ipcMain.handle(
+    "daemon:get-ui-test-status",
+    (): Promise<UITestCapabilityStatus> => uiTestCapability.status(),
+  );
+  ipcMain.handle(
+    "daemon:install-ui-test",
+    (): Promise<UITestCapabilityStatus> => uiTestCapability.install(),
+  );
   ipcMain.handle("daemon:probe-runtimes", () => probeLocalRuntimes());
   // The host's OS name, available regardless of daemon state. The Runtimes
   // page uses it as a fallback identity for "this machine" when no

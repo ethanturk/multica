@@ -27,6 +27,7 @@ import { AUTH_SESSION_STATE_CHANNEL } from "../shared/auth-session";
 import type {
   DaemonStatus,
   LocalRuntimeProbe,
+  UITestCapabilityStatus,
 } from "../shared/daemon-types";
 import {
   MAIN_RENDERER_CHANNEL_STATE_CHANNEL,
@@ -247,6 +248,10 @@ const daemonAPI = {
     ipcRenderer.invoke("daemon:restart"),
   getStatus: (): Promise<DaemonStatus> =>
     ipcRenderer.invoke("daemon:get-status"),
+  getUITestStatus: (): Promise<UITestCapabilityStatus> =>
+    ipcRenderer.invoke("daemon:get-ui-test-status"),
+  installUITest: (): Promise<UITestCapabilityStatus> =>
+    ipcRenderer.invoke("daemon:install-ui-test"),
   probeRuntimes: (): Promise<LocalRuntimeProbe> =>
     ipcRenderer.invoke("daemon:probe-runtimes"),
   getHostName: (): Promise<string> =>

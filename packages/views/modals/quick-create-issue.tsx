@@ -43,7 +43,6 @@ import { useIssueDraftStore, type IssueCreateDraft } from "@multica/core/issues/
 import { useCreateModeStore } from "@multica/core/issues/stores/create-mode-store";
 import {
   runtimeListOptions,
-  checkQuickCreateCliVersion,
   checkQuickCreateFieldsCliVersion,
   readRuntimeCliVersion,
 } from "@multica/core/runtimes";
@@ -303,8 +302,10 @@ export function AgentCreatePanel({
     setActiveMode("agent");
   }, [setActiveMode]);
 
-  // Daemon CLI version gate. The agent-create flow needs the runtime's
-  // bundled multica CLI to be ≥ MIN_QUICK_CREATE_CLI_VERSION; older
+  // Daemon CLI version gate for priority/due-date fields. These fields need a
+  // daemon new enough to carry them into the generated issue-create prompt;
+  // basic quick-create remains ungated. The agent-create flow also needs the
+  // runtime's bundled multica CLI to be ≥ MIN_QUICK_CREATE_CLI_VERSION; older
   // daemons handle attachments and partial-failure retries incorrectly
   // (see PR #1851 / MUL-1496). Pre-check on the picker so the user gets
   // immediate feedback instead of waiting for the inbox failure; the
@@ -321,19 +322,12 @@ export function AgentCreatePanel({
     [runtimes, selectedAgent?.runtime_id],
   );
   const runtimeCliVersion = readRuntimeCliVersion(selectedRuntime?.metadata);
-  const baseVersionCheck = useMemo(
-    () => checkQuickCreateCliVersion(runtimeCliVersion),
-    [runtimeCliVersion],
-  );
   const fieldVersionCheck = useMemo(
     () => checkQuickCreateFieldsCliVersion(runtimeCliVersion),
     [runtimeCliVersion],
   );
   const usesExplicitFields = priority !== "none" || dueDate !== null;
-  const versionCheck = usesExplicitFields ? fieldVersionCheck : baseVersionCheck;
-  const versionBlocked =
-    baseVersionCheck.state !== "ok" ||
-    (usesExplicitFields && fieldVersionCheck.state !== "ok");
+  const versionBlocked = usesExplicitFields && fieldVersionCheck.state !== "ok";
 
   const initialPrompt = draft.agent.prompt || (data?.prompt as string) || "";
   // The editor is uncontrolled — we read the latest markdown via the ref at
@@ -446,7 +440,7 @@ export function AgentCreatePanel({
             setError(
               t(($) => $.create_issue.agent.error_daemon_version, {
                 current: cur,
-                min: body.min_version || versionCheck.min,
+                min: body.min_version || fieldVersionCheck.min,
               }),
             );
             return false;
@@ -596,14 +590,15 @@ export function AgentCreatePanel({
 
         {selectedAgent && versionBlocked && (
           <div className="mx-5 mb-2 shrink-0 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-caption text-amber-700 dark:text-amber-300">
-            {versionCheck.state === "missing"
-              ? t(($) => $.create_issue.agent.version_missing, { min: versionCheck.min })
+            {fieldVersionCheck.state === "missing"
+              ? t(($) => $.create_issue.agent.version_missing, { min: fieldVersionCheck.min })
               : t(($) => $.create_issue.agent.version_below, {
-                  current: versionCheck.current,
-                  min: versionCheck.min,
+                  current: fieldVersionCheck.current,
+                  min: fieldVersionCheck.min,
                 })}
           </div>
         )}
+
 
         {/* Prompt — same rich editor Advanced uses, so paste/drop images,
             mentions, and formatting all work. The dropZone wrapper enables
@@ -797,7 +792,9 @@ export function AgentCreatePanel({
               aria-busy={gate.uploading || submitting || undefined}
               title={
                 versionBlocked
-                  ? t(($) => $.create_issue.agent.version_blocked_tooltip, { min: versionCheck.min })
+                  ? t(($) => $.create_issue.agent.version_blocked_tooltip, {
+                      min: fieldVersionCheck.min,
+                    })
                   : undefined
               }
               className={justSent ? "min-w-28 !bg-emerald-600 !text-white" : "min-w-28"}
