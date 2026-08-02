@@ -1,6 +1,9 @@
 package step
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 const (
 	markerNotStarted             = "not_started"
@@ -241,9 +244,9 @@ func decorateRecovery(decision map[string]any, comments []any, markerIndex int) 
 	if markerIndex < 0 || markerIndex+1 >= len(comments) {
 		return
 	}
-	mention := "mention://agent/" + nextID
+	mention := regexp.MustCompile(`\[@?.+?\]\(mention://agent/` + regexp.QuoteMeta(nextID) + `\)`)
 	for _, raw := range comments[markerIndex+1:] {
-		if strings.Contains(commentBody(raw), mention) {
+		if mention.MatchString(commentBody(raw)) {
 			rk := str(decision["route_kind"])
 			if !strings.Contains(rk, "duplicate_or_recovery") {
 				decision["route_kind"] = rk + "_duplicate_or_recovery"

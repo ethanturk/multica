@@ -356,6 +356,29 @@ func TestCodingHandoffDecide_DuplicateRecoverySuffix(t *testing.T) {
 	}
 }
 
+func TestCodingHandoffDecide_MalformedMentionDoesNotSuppressRecovery(t *testing.T) {
+	res := runDecision(t, map[string]any{
+		"current_role":  "test_writer",
+		"task_issue_id": "task-13b",
+		"task_comments": []any{
+			comment("## Tests Written"),
+			comment("@Coding Team Reviewer (mention://agent/rev-1), handoff to you is stalled."),
+		},
+		"agent_ids": agentIDsForTest(),
+	})
+	if res.Status != dettools.StatusOK {
+		t.Fatalf("status=%q summary=%q", res.Status, res.Summary)
+	}
+	dec := decisionData(res)
+	if got := dec["route_kind"]; got != "normal" {
+		t.Fatalf("route_kind=%v, want normal", got)
+	}
+	const wantComment = "[@Coding Team Reviewer](mention://agent/rev-1)\n\nTests are written. Please review."
+	if got := dec["comment_content"]; got != wantComment {
+		t.Fatalf("comment_content=%q, want %q", got, wantComment)
+	}
+}
+
 func TestCodingHandoffDecide_MalformedCommentPayloadsAllowRecoverySuffix(t *testing.T) {
 	res := runDecision(t, map[string]any{
 		"current_role":  "implementer",
