@@ -379,6 +379,25 @@ func TestCodingHandoffDecide_MalformedMentionDoesNotSuppressRecovery(t *testing.
 	}
 }
 
+func TestCodingHandoffDecide_MarkdownMentionWithoutAtMarksRecovery(t *testing.T) {
+	res := runDecision(t, map[string]any{
+		"current_role":  "test_writer",
+		"task_issue_id": "task-13c",
+		"task_comments": []any{
+			comment("## Tests Written"),
+			comment("[Coding Team Reviewer](mention://agent/rev-1) is already handling review."),
+		},
+		"agent_ids": agentIDsForTest(),
+	})
+	if res.Status != dettools.StatusOK {
+		t.Fatalf("status=%q summary=%q", res.Status, res.Summary)
+	}
+	dec := decisionData(res)
+	if got := dec["route_kind"]; got != "normal_duplicate_or_recovery" {
+		t.Fatalf("route_kind=%v, want normal_duplicate_or_recovery", got)
+	}
+}
+
 func TestCodingHandoffDecide_MalformedCommentPayloadsAllowRecoverySuffix(t *testing.T) {
 	res := runDecision(t, map[string]any{
 		"current_role":  "implementer",
