@@ -102,6 +102,7 @@ These are hard requirements for every new or modified database design and produc
 
 - Do not add database foreign keys (`FOREIGN KEY` / `REFERENCES`), cascading deletes, or cascading updates. Resolve relationships, validation, and dependent cleanup explicitly in application code. Use an application transaction when cleanup and the parent operation must commit or roll back atomically.
 - Every index created by a migration must use `CREATE INDEX CONCURRENTLY` or `CREATE UNIQUE INDEX CONCURRENTLY`, including indexes on newly created tables. PostgreSQL rejects concurrent index creation inside a transaction or a multi-command string, so keep each concurrent index build in its own single-statement migration file. The repository migration runner executes migration files outside an explicit transaction to support this.
+- **Fork-only migrations use the reserved `900+` prefix band.** This fork tracks `multica-ai/multica`, which keeps appending migrations in the low numbers; a fork migration placed there collides on the next upstream sync and has to be renumbered by hand (prefix uniqueness is enforced by `TestMigrationNumericPrefixesStayUniqueAfterLegacySet`). Numbering fork work from `900` upward keeps it permanently out of upstream's path. Existing fork migrations below `900` predate this rule and stay where they are — the migration runner keys `schema_migrations` on the full filename stem, so renaming an already-applied migration re-runs it.
 
 ## Coding Rules
 
@@ -227,7 +228,9 @@ make check
 
 Do not claim verification passed unless you ran it. If you skip checks because the change is docs-only or the user asked not to run them, say so.
 
-## Commits and Releases
+**Automatic releases (this fork):** `auto-release.yml` cuts a release on every merge to `main` once **CI passes** — it picks the next version, tags the commit, runs GoReleaser to publish a GitHub Release (CLI binaries for every OS/arch), and calls the reusable `docker-images.yml` to build + push the backend/web images to GHCR (`ghcr.io/<owner>/multica-backend`, `-web`, multi-arch). The version bump defaults to **patch**; label the merged PR `minor` or `major` to bump that segment instead, or run the workflow manually (`workflow_dispatch`) with an explicit `version`. The tag is pushed with the default `GITHUB_TOKEN`, which deliberately does not re-trigger `release.yml`, so there is no double release. Use a `[skip release]` marker in the merge commit to opt out. Homebrew publishing requires the `HOMEBREW_TAP_GITHUB_TOKEN` secret; without it that step is skipped and the GitHub Release still ships.
+
+## Multi-tenancy
 
 - Commits should be atomic and use conventional prefixes: `feat(scope)`, `fix(scope)`, `refactor(scope)`, `docs`, `test(scope)`, `chore(scope)`.
 - A production deployment requires a CLI release tag on `main`: create `v0.x.x`, push it, and let `release.yml` publish binaries and the Homebrew tap.

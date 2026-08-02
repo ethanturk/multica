@@ -8,6 +8,7 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"math/rand"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,6 +31,7 @@ import (
 	"github.com/multica-ai/multica/server/pkg/redact"
 	"github.com/multica-ai/multica/server/pkg/skillbundle"
 	"github.com/multica-ai/multica/server/pkg/taskfailure"
+	"github.com/multica-ai/multica/server/pkg/uitest"
 )
 
 // ErrRepoNotConfigured is returned by ensureRepoReady when the requested repo
@@ -417,6 +419,11 @@ type Daemon struct {
 	// New() and overridable in tests so the auto-update poller can be exercised
 	// without touching the real network or the brew CLI.
 	runUpdateFn func(targetVersion string) (string, error)
+
+	uiTestHomeDir       func() (string, error)
+	uiTestStatus        func(string) uitest.CapabilityStatus
+	uiTestExecutable    func() (string, error)
+	openclawMCPResolver func(string) (map[string]json.RawMessage, error)
 }
 
 type profileLaunchSpec struct {
@@ -1881,12 +1888,25 @@ func newWorkspaceState(workspaceID string, runtimeIDs []string, reposVersion str
 func repoAllowlist(repos []RepoData) map[string]struct{} {
 	allowed := make(map[string]struct{}, len(repos))
 	for _, repo := range repos {
-		if repo.URL == "" {
+		key := repoAuthorizationKey(repo.URL)
+		if key == "" {
 			continue
 		}
-		allowed[repo.URL] = struct{}{}
+		allowed[key] = struct{}{}
 	}
 	return allowed
+}
+
+// repoAuthorizationKey compares repository identity without HTTPS credentials.
+// Agents may supply a task-scoped PAT in userinfo while workspace settings keep
+// the same URL credential-free.
+func repoAuthorizationKey(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if parsed, err := url.Parse(rawURL); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		parsed.User = nil
+		return strings.TrimRight(parsed.String(), "/")
+	}
+	return strings.TrimRight(rawURL, "/")
 }
 
 func (d *Daemon) setWorkspaceRepoSyncError(workspaceID, syncErr string) {
@@ -1904,10 +1924,11 @@ func (d *Daemon) workspaceRepoAllowed(workspaceID, repoURL string) bool {
 	if !ok {
 		return false
 	}
-	if _, allowed := ws.allowedRepoURLs[repoURL]; allowed {
+	key := repoAuthorizationKey(repoURL)
+	if _, allowed := ws.allowedRepoURLs[key]; allowed {
 		return true
 	}
-	if _, allowed := ws.taskRepoURLs[repoURL]; allowed {
+	if _, allowed := ws.taskRepoURLs[key]; allowed {
 		return true
 	}
 	return false
@@ -1990,17 +2011,18 @@ func (d *Daemon) registerTaskRepos(workspaceID, taskID string, repos []RepoData)
 		if url == "" {
 			continue
 		}
+		key := repoAuthorizationKey(url)
 		// Don't re-sync if the URL is already tracked (workspace or task-scoped)
 		// AND the cache already has it.
-		_, inWorkspace := ws.allowedRepoURLs[url]
-		_, inTask := ws.taskRepoURLs[url]
-		ws.taskRepoURLs[url] = struct{}{}
+		_, inWorkspace := ws.allowedRepoURLs[key]
+		_, inTask := ws.taskRepoURLs[key]
+		ws.taskRepoURLs[key] = struct{}{}
 		if taskID != "" {
 			if ws.taskRepoRefs[taskID] == nil {
 				ws.taskRepoRefs[taskID] = make(map[string]string, len(repos))
 			}
-			if _, exists := ws.taskRepoRefs[taskID][url]; !exists {
-				ws.taskRepoRefs[taskID][url] = strings.TrimSpace(repo.Ref)
+			if _, exists := ws.taskRepoRefs[taskID][key]; !exists {
+				ws.taskRepoRefs[taskID][key] = strings.TrimSpace(repo.Ref)
 			}
 		}
 		candidates = append(candidates, repoCandidate{
@@ -2043,7 +2065,7 @@ func (d *Daemon) taskRepoDefaultRef(workspaceID, taskID, repoURL string) string 
 	if !ok || ws.taskRepoRefs == nil {
 		return ""
 	}
-	return strings.TrimSpace(ws.taskRepoRefs[taskID][repoURL])
+	return strings.TrimSpace(ws.taskRepoRefs[taskID][repoAuthorizationKey(repoURL)])
 }
 
 func (d *Daemon) clearTaskRepoRefs(workspaceID, taskID string) {
@@ -4893,10 +4915,12 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// before allowing reuse, so a pre-fix leader session recorded against
 	// local_directory still fails closed.
 	var agentMcpConfig json.RawMessage
+	var agentRuntimeConfig json.RawMessage
 	var effectiveMcpConfig json.RawMessage
 	var cursorMcpAuthSource string
 	if task.Agent != nil {
 		agentMcpConfig = task.Agent.McpConfig
+		agentRuntimeConfig = task.Agent.RuntimeConfig
 		effectiveMcpConfig = agentMcpConfig
 		if merged, mergeErr := mergeRuntimeAndAgentMcpConfig(provider, agentMcpConfig); mergeErr != nil {
 			taskLog.Warn("mcp_config: runtime merge failed; using agent configuration only",
@@ -4919,6 +4943,20 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if task.Agent != nil && provider == "openclaw" {
 		openclawMode, openclawGateway = decodeOpenclawRuntimeConfig(task.Agent.RuntimeConfig, d.logger)
 	}
+
+	// OpenClaw materializes mcp.servers from this config during execenv.Prepare,
+	// so daemon-managed servers must be merged in before Prepare/Reuse. No-op
+	// for every other provider.
+	effectiveMcpConfig, uiTestInjected := d.injectExecenvOpenClawOverlays(
+		effectiveMcpConfig,
+		provider,
+		openclawBin,
+		agentRuntimeConfig,
+		task.DeterministicTools,
+		task.ID,
+		d.logger,
+	)
+
 	var agentEnvOverrides map[string]string
 	var agentCustomArgs []string
 	if task.Agent != nil {
@@ -5027,6 +5065,11 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			return TaskResult{}, fmt.Errorf("prepare execution environment: %w", err)
 		}
 	}
+	defer func() {
+		if err := uitest.CleanupTask(env.WorkDir, task.ID, taskLog); err != nil {
+			taskLog.Warn("ui-test: task cleanup failed", "error", err)
+		}
+	}()
 	// Belt-and-suspenders: also mark whatever root we ended up with, in case
 	// future changes diverge from PredictRootDir.
 	if env.RootDir != predictedRoot && env.RootDir != "" {
@@ -5212,6 +5255,13 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if task.Agent != nil {
 		agentCustomEnv = task.Agent.CustomEnv
 	}
+	// Pi reaches the deterministic tool plane through pi-mcp-adapter (opt-in,
+	// experimental): the daemon writes a project-local .pi/mcp.json the adapter
+	// auto-discovers. No-op for every other provider and when disabled. The
+	// cleanup restores the user's file on local_directory tasks.
+	piCleanup := d.preparePiToolPlane(provider, env.WorkDir, env.LocalDirectory, agentMcpConfig, agentRuntimeConfig, task.DeterministicTools, agentEnv, d.logger)
+	defer piCleanup()
+
 	layerCustomEnvAndHermesHome(agentEnv, agentCustomEnv, env.HermesHome, d.logger)
 	if err := configureCodexTaskShellEnvironment(provider, env.CodexHome, os.Environ(), agentEnv, agentCustomEnv, d.logger); err != nil {
 		return TaskResult{}, err
@@ -5251,6 +5301,29 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if task.Agent != nil {
 		customArgs = task.Agent.CustomArgs
 		mcpConfig = effectiveMcpConfig
+	}
+	// Merge the daemon-managed deterministic tool server into the agent's MCP
+	// config when the tool plane is enabled and the provider consumes MCP via
+	// ExecOptions. Additive and fail-open: returns mcpConfig unchanged otherwise.
+	var execAgentRuntimeConfig json.RawMessage
+	if task.Agent != nil {
+		execAgentRuntimeConfig = task.Agent.RuntimeConfig
+	}
+	mcpConfig = d.injectExecOptionsTools(mcpConfig, provider, env.WorkDir, execAgentRuntimeConfig, task.DeterministicTools, taskLog)
+	var execOptionsUITestInjected bool
+	mcpConfig, execOptionsUITestInjected = d.injectExecOptionsUITest(mcpConfig, provider, env.WorkDir, task.ID, taskLog)
+	uiTestInjected = uiTestInjected || execOptionsUITestInjected
+	if uiTestInjected {
+		runtimeBrief += uiTestRuntimeBrief
+	}
+	// Deterministic tools guidance: when the tool plane is enabled and MCP
+	// servers were injected, append instructions telling the agent to prefer
+	// deterministic tools over shell commands. Without this, agents silently
+	// fall through to Bash/exec_command even when MCP tools are available,
+	// because shell commands are more familiar and the tools are never
+	// mentioned in the runtime brief.
+	if d.cfg.DetTools.Enabled && len(mcpConfig) > 0 {
+		runtimeBrief += detToolsRuntimeGuidance()
 	}
 	if provider == "hermes" {
 		customArgs = hermesLaunchArgs(customArgs, env != nil && env.HermesHome != "")
@@ -5456,6 +5529,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			taskLog.Warn("execenv: re-inject cold runtime config for fresh retry failed (non-fatal)", "error", briefErr)
 		} else {
 			runtimeBrief = freshBrief
+			if uiTestInjected {
+				runtimeBrief += uiTestRuntimeBrief
+			}
 			if providerNeedsInlineSystemPrompt(provider) {
 				execOpts.SystemPrompt = runtimeBrief
 			}

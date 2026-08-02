@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/multica-ai/multica/server/internal/daemon/repocache"
+	"github.com/multica-ai/multica/server/pkg/uitest"
 )
 
 func TestHealthHandlerReportsCLIVersionAndActiveTaskCount(t *testing.T) {
@@ -110,6 +112,59 @@ func TestHealthHandlerReportsStartingUntilReady(t *testing.T) {
 
 	if got := readStatus(); got != "running" {
 		t.Fatalf("status after ready: got %q, want \"running\"", got)
+	}
+}
+
+func TestHealthHandlerReportsAllUITestStatusesReadOnly(t *testing.T) {
+	for _, test := range []struct {
+		status  string
+		version string
+		errText string
+	}{
+		{status: uitest.StatusUnavailable},
+		{status: uitest.StatusInstalling},
+		{status: uitest.StatusReady, version: uitest.PlaywrightMCPVersion},
+		{status: uitest.StatusBroken, errText: "runtime incomplete"},
+	} {
+		t.Run(test.status, func(t *testing.T) {
+			statusCalls := 0
+			d := &Daemon{
+				cfg:        Config{Profile: "team"},
+				workspaces: map[string]*workspaceState{},
+				logger:     slog.Default(),
+				uiTestHomeDir: func() (string, error) {
+					return "/home/tester", nil
+				},
+				uiTestStatus: func(root string) uitest.CapabilityStatus {
+					statusCalls++
+					wantRoot := filepath.Join("/home/tester", ".multica", "profiles", "team", "ui-test")
+					if root != wantRoot {
+						t.Fatalf("status root = %q, want %q", root, wantRoot)
+					}
+					return uitest.CapabilityStatus{
+						Status: test.status, Version: test.version, Error: test.errText,
+					}
+				},
+			}
+
+			rec := httptest.NewRecorder()
+			d.healthHandler(time.Now()).ServeHTTP(
+				rec,
+				httptest.NewRequest(http.MethodGet, "/health", nil),
+			)
+
+			if statusCalls != 1 {
+				t.Fatalf("read-only status probe calls = %d, want 1", statusCalls)
+			}
+			var resp HealthResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			want := UITestHealth{Status: test.status, Version: test.version, Error: test.errText}
+			if resp.UITest != want {
+				t.Fatalf("ui_test = %#v, want %#v", resp.UITest, want)
+			}
+		})
 	}
 }
 
@@ -233,19 +288,24 @@ func TestRepoCheckoutUsesTaskScopedProjectRefByDefault(t *testing.T) {
 
 	const workspaceID = "ws-checkout"
 	const repoURL = "https://github.com/org/repo.git"
+	const checkoutURL = "https://anything:secret@github.com/org/repo.git"
 	cache := &recordingRepoCache{lookupPath: "/cache/org/repo.git"}
 	d := newRepoCheckoutTestDaemon(t, workspaceID, repoURL, cache)
 	d.registerTaskRepos(workspaceID, "task-1", []RepoData{{URL: repoURL, Ref: "release/v2"}})
 
 	rec := httptest.NewRecorder()
-	body := strings.NewReader(`{"url":"` + repoURL + `","workspace_id":"` + workspaceID + `","workdir":"/tmp/work","task_id":"task-1"}`)
+	body := strings.NewReader(`{"url":"` + checkoutURL + `","workspace_id":"` + workspaceID + `","workdir":"/tmp/work","task_id":"task-1"}`)
 	d.repoCheckoutHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/repo/checkout", body))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if got := cache.lastCreateParams().Ref; got != "release/v2" {
+	params := cache.lastCreateParams()
+	if got := params.Ref; got != "release/v2" {
 		t.Fatalf("CreateWorktree Ref = %q, want release/v2", got)
+	}
+	if params.RepoURL != repoURL {
+		t.Fatalf("CreateWorktree RepoURL = %q, want credentials stripped", params.RepoURL)
 	}
 }
 
