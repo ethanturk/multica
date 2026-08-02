@@ -300,6 +300,12 @@
     "activity_section": "动态",
     "subscribe": "订阅",
     "unsubscribe": "取消订阅",
+    "delegated_subscription_badge": "由智能体代你关注",
+    "delegated_subscription_hint": "你的智能体代你创建了这个 issue，因此你在关注它。待评审、完成或受阻时会通知你。",
+    "unsubscribe_this": "取消订阅此 issue",
+    "unsubscribe_subtree": "取消订阅此 issue 及其子 issue",
+    "unsubscribe_subtree_failed": "取消订阅子 issue 失败，请重试。",
+    "unsubscribe_subtree_unsupported": "当前服务端还不支持取消订阅子 issue，请在下次更新后再试。",
     "no_subscribers_results": "未找到结果",
     "change_subscribers_placeholder": "更改订阅者...",
     "members_group": "成员",
@@ -429,11 +435,17 @@
     "status_running": "正在工作",
     "status_queued": "排队中",
     "empty_hover": "当前没有智能体在工作",
+    "unknown_hover": "工作中的智能体：尚未加载",
     "filter_active_label": "正在查看有智能体在工作的 issue",
     "tasks_count_other": "{{count}} 个 task",
     "chip_agents_working_other": "{{count}} 个智能体工作中",
     "issues_count_other": "{{count}} 个 issue",
     "chip_agents_working_unknown": "工作中的智能体：—"
+  },
+  "filtered_empty": {
+    "title": "没有符合筛选条件的 issue",
+    "hint": "调整或清除筛选条件，就能看到这个视图里的 issue。",
+    "clear_button": "清除筛选"
   },
   "agent_live": {
     "is_working": "{{name}} 在工作",

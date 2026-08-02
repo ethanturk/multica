@@ -19,6 +19,7 @@ ALTER TABLE runtime_profile ADD CONSTRAINT runtime_profile_protocol_family_check
         'kiro',
         'antigravity',
         'qoder',
+        'qoderclicn',
         'traecli',
         'deveco',
         'grok',

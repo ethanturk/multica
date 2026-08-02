@@ -28,8 +28,8 @@ import (
 //     skip sections they have no use for (Mentions, Comment Formatting,
 //     Issue Metadata, Sub-issue, ...).
 //  2. Per-section prose compression — Available Commands, Issue
-//     Metadata, Mentions, Sub-issue Creation, Comment Formatting,
-//     Always Use CLI, Background Task Safety, Task Initiator,
+//     Body Formatting, Metadata, Mentions, Sub-issue Creation,
+//     Comment Formatting, Always Use CLI, Background Task Safety, Task Initiator,
 //     Repositories, Output are all tightened. Every test-asserted phrase
 //     stays.
 //
@@ -280,6 +280,15 @@ func writeAvailableCommandsQuickCreate(b *strings.Builder) {
 	b.WriteString("**Use `--output json` for structured data.** For anything beyond `issue create`, run `multica --help` or `multica <command> --help`.\n\n")
 	b.WriteString("### Core\n")
 	b.WriteString("- `multica issue create --title \"...\" [--description \"...\" | --description-file <path> | --description-stdin] [--priority X] [--status X] [--assignee X | --assignee-id <uuid>] [--parent <issue-id>] [--stage N] [--project <project-id>] [--due-date <RFC3339>] [--attachment <path>]` — Create a new issue; `--attachment` may be repeated. For agent-authored long descriptions, prefer `--description-file <path>` over `--description-stdin` (flags after a HEREDOC terminator can be silently swallowed, #4182). Write that file inside your working directory (e.g. `./description.md`), never `/tmp` or shared paths, and treat a failed write as fatal — the CLI rejects a path outside the workdir so a stale file from another run can't leak in (MUL-4252).\n\n")
+}
+
+// writeIssueBodyFormatting emits the default Markdown hierarchy for issue
+// descriptions. It is shared by every task kind because issue creation and
+// updates can be requested from issue, chat, autopilot, and quick-create
+// surfaces.
+func writeIssueBodyFormatting(b *strings.Builder) {
+	b.WriteString("## Issue Body Formatting\n\n")
+	b.WriteString("An issue title already serves as its H1. By default, do not add a Markdown H1 (`# ...`) to an issue body or description; start with prose or `##` subheadings instead. Only add an H1 when the user specifically requests one.\n\n")
 }
 
 // writeCommentFormatting emits the cross-platform file-first guardrail.
@@ -539,28 +548,32 @@ func writeSubIssueCreation(b *strings.Builder) {
 	b.WriteString("**Ordering with stages.** For phased plans, group children with `--stage <N>` (N ≥ 1) instead of hand-promoting the backlog chain — stage members run together, and the parent wakes once per stage. Use `--stage k --status backlog` for later stages, then `multica issue children <id>` to inspect groupings before promoting. Reach for stages whenever a plan has more than one step or a step must wait for a group.\n\n")
 }
 
-// writeSkills emits the Skills section listing skill names + descriptions.
-func writeSkills(b *strings.Builder, provider string, ctx TaskContextForEnv) {
+// writeSkills emits the Skills section: an index of invocable skill names.
+//
+// Names only, deliberately. Every runtime CLI discovers the SKILL.md files the
+// daemon writes and builds its own listing from their frontmatter, so repeating
+// the descriptions here bought a second, more expensive copy of what the model
+// already had — measured at ~3,100 tokens per brief on a real task, 40% of the
+// whole brief — and no extra routing signal (MUL-5529).
+//
+// The index itself stays because it is the one skill listing Multica controls.
+// Each CLI's own listing is theirs: its format, and whether it exists at all,
+// can change with any release.
+//
+// There is no per-provider branch. The old fallback told providers outside a
+// hardcoded list to read `.agent_context/skills/`, which was the wrong path for
+// every provider that actually reached it — grok and traecli write to
+// `.grok/skills` and `.traecli/skills` — while both discover natively and never
+// needed the pointer.
+func writeSkills(b *strings.Builder, ctx TaskContextForEnv) {
 	skills := modelVisibleSkills(ctx.AgentSkills)
 	if len(skills) == 0 {
 		return
 	}
 	b.WriteString("## Skills\n\n")
-	switch provider {
-	case "claude", "codebuddy", "codex", "copilot", "opencode", "deveco", "openclaw", "hermes", "pi", "cursor", "kimi", "kiro", "qoder", "antigravity", "qwen":
-		// Hermes discovers these from its per-task HERMES_HOME/skills (seeded by
-		// the daemon), so it needs the same "discovered automatically" framing
-		// as the other native-discovery runtimes rather than a path pointer.
-		b.WriteString("You have the following skills installed (discovered automatically):\n\n")
-	default:
-		b.WriteString("Detailed skill instructions are in `.agent_context/skills/`. Each subdirectory contains a `SKILL.md`.\n\n")
-	}
+	b.WriteString("You have the following skills installed (discovered automatically):\n\n")
 	for _, skill := range skills {
-		if desc := strings.TrimSpace(skill.Description); desc != "" {
-			fmt.Fprintf(b, "- **%s** — %s\n", skill.Name, desc)
-		} else {
-			fmt.Fprintf(b, "- **%s**\n", skill.Name)
-		}
+		fmt.Fprintf(b, "- **%s**\n", skill.Name)
 	}
 	b.WriteString("\n")
 }
@@ -570,6 +583,10 @@ func writeMentions(b *strings.Builder) {
 	b.WriteString("## Mentions\n\n")
 	b.WriteString("Mention links are **side-effecting actions**:\n\n")
 	b.WriteString("- `[MUL-123](mention://issue/<issue-id>)` — clickable link (no side effect)\n")
+	// Projects have no `MUL-123`-style identifier to autolink, so unless the
+	// agent writes this form (or pastes the project URL, which the reader's
+	// client unfurls into the same chip) a project reference stays dead text.
+	b.WriteString("- `[Project Name](mention://project/<project-id>)` — clickable link (no side effect)\n")
 	b.WriteString("- `[@Name](mention://member/<user-id>)` — **notifies a human**\n")
 	b.WriteString("- `[@Name](mention://agent/<agent-id>)` — **enqueues a new run for that agent**\n\n")
 	b.WriteString("### When NOT to use a mention link\n\n")
@@ -669,13 +686,14 @@ func writeOutput(b *strings.Builder, kind taskKind, ctx TaskContextForEnv) {
 //	Section               | comment | assign | autopilot | quick_create | chat
 //	----------------------+---------+--------+-----------+--------------+------
 //	Available Commands    |   full  |  full  |   full    |   minimal    | full
+//	Issue Body Formatting |    ✓    |   ✓    |     ✓     |      ✓       |  ✓
 //	Comment Formatting    |    ✓    |   ✓    |     —     |      —       |  —
 //	Repositories          |    △    |   △    |     △     |      —       |  △
 //	Project Context       |    △    |   △    |     △     |      △       |  △
 //	Issue Metadata        |    ✓    |   ✓    |     —     |      —       |  —
 //	Instruction Precedence|    —    |   ✓    |     —     |      —       |  —
 //	Sub-issue Creation    |    ✓    |   ✓    |     —     |      —       |  —
-//	Skills                |    ✓    |   ✓    |     ✓    |      —       |  ✓
+//	Skills                |    ✓    |   ✓    |     ✓    |      ✓       |  ✓
 //	Mentions              |    ✓    |   ✓    |     —     |      —       |  —
 //	Attachments           |    ✓    |   ✓    |     —     |      —       |  —
 //
@@ -703,6 +721,7 @@ func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 	default:
 		writeAvailableCommands(&b)
 	}
+	writeIssueBodyFormatting(&b)
 
 	if kind == kindIssue {
 		writeCommentFormatting(&b)
@@ -738,9 +757,10 @@ func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 		writeSubIssueCreation(&b)
 	}
 
-	if kind != kindQuickCreate {
-		writeSkills(&b, provider, ctx)
-	}
+	// Every kind, quick-create included. Quick-create used to be skipped here
+	// and carried its own copy in issue_context.md instead; now that both are
+	// the same names-only index, the brief is the one that survives.
+	writeSkills(&b, ctx)
 
 	if kind == kindIssue {
 		writeMentions(&b)

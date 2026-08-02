@@ -15,4 +15,5 @@ opencode
 pi
 qwen
 qodercli
+qoderclicn
 traecli

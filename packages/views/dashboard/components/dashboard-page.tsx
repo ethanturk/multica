@@ -284,6 +284,13 @@ export function DashboardPage() {
   const dailyQuery = useQuery(
     dashboardUsageDailyOptions(wsId, chartFetchDays, projectId, viewTZ),
   );
+  // The three per-agent rollups carry no date, so `dailyCutoffIso` below
+  // cannot trim them — their window is closed server-side at exactly `days`
+  // calendar buckets (parseExactSinceParamInTZ). Anything derived from these
+  // three is therefore already on the same span as the trimmed daily series;
+  // do NOT put a per-agent rollup back on the N+1 cutoff, or the leaderboard
+  // and the Run time / Tasks KPIs silently widen by one day while the chart
+  // and the Cost / Tokens KPIs beside them do not (MUL-5551).
   const byAgentQuery = useQuery(
     dashboardUsageByAgentOptions(wsId, days, projectId, viewTZ),
   );

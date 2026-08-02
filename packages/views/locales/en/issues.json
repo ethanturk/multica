@@ -303,6 +303,12 @@
     "activity_section": "Activity",
     "subscribe": "Subscribe",
     "unsubscribe": "Unsubscribe",
+    "delegated_subscription_badge": "Watching via agent",
+    "delegated_subscription_hint": "Your agent created this issue on your behalf, so you're subscribed to it. You'll get notified when it needs review, finishes, or gets stuck.",
+    "unsubscribe_this": "Unsubscribe from this issue",
+    "unsubscribe_subtree": "Unsubscribe from this issue and its sub-issues",
+    "unsubscribe_subtree_failed": "Could not unsubscribe from the sub-issues. Please try again.",
+    "unsubscribe_subtree_unsupported": "This workspace's server does not support unsubscribing from sub-issues yet. Try again after the next update.",
     "no_subscribers_results": "No results found",
     "change_subscribers_placeholder": "Change subscribers...",
     "members_group": "Members",
@@ -445,6 +451,7 @@
     "status_running": "Working",
     "status_queued": "Queued",
     "empty_hover": "No agents working right now",
+    "unknown_hover": "Agents working: not loaded yet",
     "filter_active_label": "Viewing issues with agents working",
     "tasks_count_one": "{{count}} task",
     "tasks_count_other": "{{count}} tasks",
@@ -453,6 +460,11 @@
     "issues_count_one": "{{count}} issue",
     "issues_count_other": "{{count}} issues",
     "chip_agents_working_unknown": "Agents working: —"
+  },
+  "filtered_empty": {
+    "title": "No issues match these filters",
+    "hint": "Adjust or clear the filters to see the issues in this view.",
+    "clear_button": "Clear filters"
   },
   "agent_live": {
     "is_working": "{{name}} is working",

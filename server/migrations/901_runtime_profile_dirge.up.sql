@@ -19,6 +19,7 @@ ALTER TABLE runtime_profile
         'kiro',
         'antigravity',
         'qoder',
+        'qoderclicn',
         'traecli',
         'deveco',
         'grok',

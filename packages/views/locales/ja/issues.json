@@ -300,6 +300,12 @@
     "activity_section": "アクティビティ",
     "subscribe": "購読",
     "unsubscribe": "購読解除",
+    "delegated_subscription_badge": "エージェント経由で購読中",
+    "delegated_subscription_hint": "エージェントがあなたに代わってこの課題を作成したため、購読しています。レビュー待ち・完了・ブロック時に通知されます。",
+    "unsubscribe_this": "この課題の購読を解除",
+    "unsubscribe_subtree": "この課題とサブ課題の購読を解除",
+    "unsubscribe_subtree_failed": "サブ課題の購読解除に失敗しました。もう一度お試しください。",
+    "unsubscribe_subtree_unsupported": "現在のサーバーはサブ課題の購読解除にまだ対応していません。次回の更新後にお試しください。",
     "no_subscribers_results": "結果が見つかりません",
     "change_subscribers_placeholder": "購読者を変更...",
     "members_group": "メンバー",
@@ -429,11 +435,17 @@
     "status_running": "作業中",
     "status_queued": "待機中",
     "empty_hover": "現在作業中のエージェントはありません",
+    "unknown_hover": "作業中のエージェント: まだ読み込まれていません",
     "filter_active_label": "エージェントが作業中の issue を表示中",
     "tasks_count_other": "task {{count}} 件",
     "chip_agents_working_other": "作業中のエージェント {{count}} 件",
     "issues_count_other": "issue {{count}} 件",
     "chip_agents_working_unknown": "作業中のエージェント: —"
+  },
+  "filtered_empty": {
+    "title": "フィルター条件に一致する issue がありません",
+    "hint": "フィルターを変更または解除すると、このビューの issue が表示されます。",
+    "clear_button": "フィルターを解除"
   },
   "agent_live": {
     "is_working": "{{name}} が作業中",

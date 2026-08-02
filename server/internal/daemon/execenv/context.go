@@ -130,7 +130,7 @@ func writeWorkspacesRootMarkerAtomic(path string, data []byte) error {
 // Cursor:      skills → {workDir}/.cursor/skills/{name}/SKILL.md  (native discovery)
 // Kimi:        skills → {workDir}/.kimi/skills/{name}/SKILL.md  (native discovery)
 // Kiro:        skills → {workDir}/.kiro/skills/{name}/SKILL.md  (native discovery)
-// Qoder:       skills → {workDir}/.qoder/skills/{name}/SKILL.md  (project-level; see docs.qoder.com/cli/Skills.md)
+// Qoder/Qoder CN: skills → {workDir}/.qoder/skills/{name}/SKILL.md  (project-level; see the provider docs)
 // Qwen Code:    skills → {workDir}/.qwen/skills/{name}/SKILL.md  (native project-level discovery)
 // Antigravity: skills → {workDir}/.agents/skills/{name}/SKILL.md  (native discovery — see https://antigravity.google/docs/gcli-migration "Workspace skills")
 // Dirge:       skills → {workDir}/.dirge/skills/{name}/SKILL.md  (native discovery)
@@ -386,9 +386,10 @@ func skillsDirPath(workDir, provider string) string {
 		// Kiro CLI auto-discovers project-level skills from .kiro/skills/
 		// in the workdir.
 		return filepath.Join(workDir, ".kiro", "skills")
-	case "qoder":
-		// Qoder CLI discovers project-level skills under .qoder/skills/.
-		// See https://docs.qoder.com/cli/Skills.md
+	case "qoder", "qoderclicn":
+		// Both Qoder CLI editions discover project-level skills under
+		// .qoder/skills/. Their user-level roots differ, which is handled by
+		// listRuntimeLocalSkills.
 		return filepath.Join(workDir, ".qoder", "skills")
 	case "qwen":
 		// Qwen Code discovers project-level skills from .qwen/skills/ in the workdir.
@@ -1012,23 +1013,14 @@ func renderIssueContext(provider string, ctx TaskContextForEnv) string {
 	b.WriteString("## Quick Start\n\n")
 	fmt.Fprintf(&b, "Run `multica issue get %s --output json` to fetch the full issue details.\n\n", ctx.IssueID)
 
-	skills := modelVisibleSkills(ctx.AgentSkills)
-	if len(skills) > 0 {
-		b.WriteString("## Agent Skills\n\n")
-		b.WriteString("The following skills are available to you:\n\n")
-		for _, skill := range skills {
-			fmt.Fprintf(&b, "- **%s**\n", skill.Name)
-		}
-		b.WriteString("\n")
-	}
-
 	return b.String()
 }
 
 // renderQuickCreateContext renders issue_context.md for quick-create tasks.
-// This file carries only task data (user input, skills). Behavioral rules
-// and guardrails live in AGENTS.md (runtime config) and the per-turn prompt
-// to avoid redundancy and conflicting instructions.
+// This file carries only task data (the user input). Behavioral rules and
+// guardrails live in AGENTS.md (runtime config) and the per-turn prompt to
+// avoid redundancy and conflicting instructions; the skill index lives in the
+// runtime brief like every other kind (MUL-5529).
 func renderQuickCreateContext(ctx TaskContextForEnv) string {
 	var b strings.Builder
 	b.WriteString("# Quick Create\n\n")
@@ -1037,14 +1029,6 @@ func renderQuickCreateContext(ctx TaskContextForEnv) string {
 	b.WriteString("> ")
 	b.WriteString(ctx.QuickCreatePrompt)
 	b.WriteString("\n\n")
-	skills := modelVisibleSkills(ctx.AgentSkills)
-	if len(skills) > 0 {
-		b.WriteString("## Agent Skills\n\n")
-		for _, skill := range skills {
-			fmt.Fprintf(&b, "- **%s**\n", skill.Name)
-		}
-		b.WriteString("\n")
-	}
 	return b.String()
 }
 
@@ -1075,16 +1059,6 @@ func renderAutopilotContext(ctx TaskContextForEnv) string {
 		b.WriteString("## Autopilot Instructions\n\n")
 		b.WriteString(ctx.AutopilotDescription)
 		b.WriteString("\n\n")
-	}
-
-	skills := modelVisibleSkills(ctx.AgentSkills)
-	if len(skills) > 0 {
-		b.WriteString("## Agent Skills\n\n")
-		b.WriteString("The following skills are available to you:\n\n")
-		for _, skill := range skills {
-			fmt.Fprintf(&b, "- **%s**\n", skill.Name)
-		}
-		b.WriteString("\n")
 	}
 
 	return b.String()
