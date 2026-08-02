@@ -3,8 +3,9 @@
 ## Problem
 
 `coding_handoff_decide` currently treats any comment containing the target
-agent's raw `mention://agent/<id>` URI as an existing handoff. Multica only
-recognizes the canonical Markdown form `[@Label](mention://agent/<id>)`.
+agent's raw `mention://agent/<id>` URI as an existing handoff. Multica
+recognizes Markdown forms `[@Label](mention://agent/<id>)` and
+`[Label](mention://agent/<id>)`; brackets and link are mandatory.
 Near-misses such as `@Label (mention://agent/<id>)` therefore suppress recovery
 even though they never trigger the target agent.
 
