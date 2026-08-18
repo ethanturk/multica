@@ -1,4 +1,10 @@
-import { useState, useEffect, useCallback, type ReactNode } from "react";
+import {
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  type ReactNode,
+} from "react";
 import { AlertCircle, Info, LogIn } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
 import { Switch } from "@multica/ui/components/ui/switch";
@@ -11,11 +17,18 @@ import {
   SettingsTab,
 } from "@multica/views/settings";
 import { reauthenticateDaemon } from "../platform/daemon-reauth";
-import type { DaemonPrefs, DaemonStatus } from "../../../shared/daemon-types";
+import type {
+  DaemonPrefs,
+  DaemonStatus,
+  UITestCapabilityStatus,
+} from "../../../shared/daemon-types";
 import {
   DAEMON_STATE_COLORS,
   DAEMON_STATE_LABELS,
+  createUITestStatusObserver,
   formatUptime,
+  getUITestCapabilityAction,
+  getUITestCapabilityPresentation,
 } from "../../../shared/daemon-types";
 
 // One row inside the diagnostics block. Values that are likely to be
@@ -50,14 +63,34 @@ export function DaemonSettingsTab() {
   const [cliInstalled, setCliInstalled] = useState<boolean | null>(null);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<DaemonStatus>({ state: "stopped" });
+  const [uiTest, setUITest] = useState<UITestCapabilityStatus | null>(null);
   const [reauthLoading, setReauthLoading] = useState(false);
+  const uiTestObserver = useMemo(
+    () =>
+      createUITestStatusObserver(
+        () => window.daemonAPI.getUITestStatus(),
+        setUITest,
+      ),
+    [],
+  );
 
   useEffect(() => {
     window.daemonAPI.getPrefs().then(setPrefs);
     window.daemonAPI.isCliInstalled().then(setCliInstalled);
-    window.daemonAPI.getStatus().then(setStatus);
-    return window.daemonAPI.onStatusChange(setStatus);
-  }, []);
+    let cancelled = false;
+    const handleStatus = (nextStatus: DaemonStatus) => {
+      if (cancelled) return;
+      setStatus(nextStatus);
+      uiTestObserver.observe(nextStatus);
+    };
+    window.daemonAPI.getStatus().then(handleStatus);
+    const unsubscribe = window.daemonAPI.onStatusChange(handleStatus);
+    return () => {
+      cancelled = true;
+      unsubscribe();
+      uiTestObserver.dispose();
+    };
+  }, [uiTestObserver]);
 
   const handleReauth = useCallback(async () => {
     setReauthLoading(true);
@@ -83,11 +116,39 @@ export function DaemonSettingsTab() {
     [],
   );
 
+  const installUITest = useCallback(async () => {
+    setUITest({ status: "installing" });
+    try {
+      const nextStatus = await window.daemonAPI.installUITest();
+      setUITest(nextStatus);
+      if (nextStatus.status === "ready") {
+        toast.success("UI testing is ready");
+      } else {
+        toast.error(
+          nextStatus.error ?? "UI testing installation did not complete",
+        );
+      }
+    } catch {
+      const failed = {
+        status: "broken",
+        error: "UI testing installation failed.",
+      } as const;
+      setUITest(failed);
+      toast.error(failed.error);
+    }
+  }, []);
+
   // The daemon runs somewhere the app can't drive (e.g. inside WSL2 behind a
   // Windows desktop): /health is reachable but the lifecycle CLI can't reach
   // its process. Auto-start/auto-stop can't work, so disable them and say why
   // rather than letting the toggles silently no-op. See #3916.
   const externallyManaged = status.externallyManaged === true;
+  const uiTestPresentation = uiTest
+    ? getUITestCapabilityPresentation(uiTest)
+    : null;
+  const uiTestAction = uiTest
+    ? getUITestCapabilityAction(uiTest, cliInstalled === true)
+    : null;
 
   return (
     <SettingsTab
@@ -179,6 +240,43 @@ export function DaemonSettingsTab() {
             </Button>
           )}
           {cliInstalled !== false && <span />}
+        </SettingsRow>
+
+        <SettingsRow
+          label="UI testing"
+          description={
+            uiTestPresentation
+              ? `${uiTestPresentation.description}${
+                  uiTest?.status === "ready" && uiTest.version
+                    ? ` Version ${uiTest.version}.`
+                    : ""
+                }`
+              : "Checking…"
+          }
+        >
+          <div className="flex items-center gap-3">
+            {uiTestPresentation && (
+              <span className="inline-flex items-center gap-1.5 text-body">
+                <span
+                  className={cn(
+                    "size-1.5 rounded-full",
+                    uiTestPresentation.color,
+                  )}
+                />
+                {uiTestPresentation.label}
+              </span>
+            )}
+            {uiTestAction && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={installUITest}
+                disabled={uiTestAction.disabled}
+              >
+                {uiTestAction.label}
+              </Button>
+            )}
+          </div>
         </SettingsRow>
       </SettingsCard>
 

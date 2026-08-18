@@ -18,7 +18,7 @@
  * first is still dismissing — the callback runs after dismissal completes.
  */
 import { useCallback, useState } from "react";
-import { ActionSheetIOS, Alert } from "react-native";
+import { Alert } from "react-native";
 import { router } from "expo-router";
 import * as Clipboard from "expo-clipboard";
 import * as Haptics from "expo-haptics";
@@ -33,6 +33,7 @@ import {
   useResolveComment,
   useToggleCommentReaction,
 } from "@/data/mutations/issues";
+import { showPlatformActionSheet } from "@/lib/action-sheet";
 import { QUICK_EMOJIS } from "@/lib/quick-emojis";
 
 const QUICK_ROW_SIZE = 5;
@@ -62,62 +63,11 @@ export function useCommentLongPress(
     Haptics.selectionAsync().catch(() => {});
     setIsPressed(true);
 
-    type Action =
-      | { kind: "reply" }
-      | { kind: "react" }
-      | { kind: "copy" }
-      | { kind: "select" }
-      | { kind: "copyLink" }
-      | { kind: "resolve" }
-      | { kind: "delete" }
-      | { kind: "cancel" };
-
-    const options: string[] = [];
-    const actions: Action[] = [];
-    const push = (label: string, action: Action) => {
-      options.push(label);
-      actions.push(action);
-    };
-
-    push("Reply", { kind: "reply" });
-    push("React…", { kind: "react" });
-    if (hasContent) {
-      push("Copy", { kind: "copy" });
-      push("Select Text", { kind: "select" });
-    }
-    if (canCopyLink) push("Copy Link", { kind: "copyLink" });
-    if (isRoot) {
-      push(resolved ? "Unresolve Thread" : "Resolve Thread", {
-        kind: "resolve",
-      });
-    }
-    if (isOwn) push("Delete", { kind: "delete" });
-    push("Cancel", { kind: "cancel" });
-
-    const cancelButtonIndex = options.length - 1;
-    const destructiveButtonIndex = isOwn
-      ? actions.findIndex((a) => a.kind === "delete")
-      : undefined;
-
-    ActionSheetIOS.showActionSheetWithOptions(
-      {
-        options,
-        cancelButtonIndex,
-        ...(destructiveButtonIndex !== undefined &&
-        destructiveButtonIndex >= 0
-          ? { destructiveButtonIndex }
-          : {}),
-      },
-      (i) => {
-        setIsPressed(false);
-        const action = actions[i];
-        if (!action || action.kind === "cancel") return;
-
-        switch (action.kind) {
-          case "reply": {
-            // Set the reply target — the InlineCommentComposer subscribes
-            // to this store, auto-expands, and threads the next submit
-            // under entry.id via useCreateComment's `parentId`.
+    showPlatformActionSheet({
+      options: [
+        {
+          label: "Reply",
+          onPress: () => {
             const actorName = getName(
               entry.actor_type as "member" | "agent" | null | undefined,
               entry.actor_id,
@@ -127,11 +77,11 @@ export function useCommentLongPress(
               actorName: actorName || "comment",
               preview: entry.content ?? "",
             });
-            return;
-          }
-          case "react":
-            // Present the nested React sheet from inside this completion
-            // callback — see file header for why.
+          },
+        },
+        {
+          label: "React…",
+          onPress: () => {
             presentReactSheet({
               entry,
               reactions,
@@ -145,56 +95,89 @@ export function useCommentLongPress(
                   existing,
                 }),
             });
-            return;
-          case "copy":
-            if (entry.content) {
-              Clipboard.setStringAsync(entry.content);
-              Haptics.notificationAsync(
-                Haptics.NotificationFeedbackType.Success,
-              ).catch(() => {});
-            }
-            return;
-          case "select":
-            useCommentSelectStore.getState().setSelecting(entry.id);
-            return;
-          case "copyLink": {
-            if (!canCopyLink) return;
-            const url = `${webUrl}/${wsSlug}/issue/${issueIdentifier}#comment-${entry.id}`;
-            Clipboard.setStringAsync(url);
-            Haptics.notificationAsync(
-              Haptics.NotificationFeedbackType.Success,
-            ).catch(() => {});
-            return;
-          }
-          case "resolve":
-            resolveComment.mutate({
-              commentId: entry.id,
-              resolved: !entry.resolved_at,
-            });
-            return;
-          case "delete":
-            Alert.alert(
-              "Delete comment?",
-              "This comment will be permanently deleted. Replies in the thread will also be removed. This cannot be undone.",
-              [
-                { text: "Cancel", style: "cancel" },
-                {
-                  text: "Delete",
-                  style: "destructive",
-                  onPress: () => deleteComment.mutate(entry.id),
+          },
+        },
+        ...(hasContent
+          ? [
+              {
+                label: "Copy",
+                onPress: () => {
+                  if (entry.content) {
+                    Clipboard.setStringAsync(entry.content);
+                    Haptics.notificationAsync(
+                      Haptics.NotificationFeedbackType.Success,
+                    ).catch(() => {});
+                  }
                 },
-              ],
-            );
-            return;
-        }
-      },
-    );
+              },
+              {
+                label: "Select Text",
+                onPress: () => {
+                  useCommentSelectStore.getState().setSelecting(entry.id);
+                },
+              },
+            ]
+          : []),
+        ...(canCopyLink
+          ? [
+              {
+                label: "Copy Link",
+                onPress: () => {
+                  const url = `${webUrl}/${wsSlug}/issue/${issueIdentifier}#comment-${entry.id}`;
+                  Clipboard.setStringAsync(url);
+                  Haptics.notificationAsync(
+                    Haptics.NotificationFeedbackType.Success,
+                  ).catch(() => {});
+                },
+              },
+            ]
+          : []),
+        ...(isRoot
+          ? [
+              {
+                label: resolved ? "Unresolve Thread" : "Resolve Thread",
+                onPress: () => {
+                  resolveComment.mutate({
+                    commentId: entry.id,
+                    resolved: !entry.resolved_at,
+                  });
+                },
+              },
+            ]
+          : []),
+        ...(isOwn
+          ? [
+              {
+                label: "Delete",
+                style: "destructive" as const,
+                onPress: () => {
+                  Alert.alert(
+                    "Delete comment?",
+                    "This comment will be permanently deleted. Replies in the thread will also be removed. This cannot be undone.",
+                    [
+                      { text: "Cancel", style: "cancel" },
+                      {
+                        text: "Delete",
+                        style: "destructive",
+                        onPress: () => deleteComment.mutate(entry.id),
+                      },
+                    ],
+                  );
+                },
+              },
+            ]
+          : []),
+        { label: "Cancel", style: "cancel" },
+      ],
+      onDismiss: () => setIsPressed(false),
+    });
   }, [
     entry,
     issueId,
     issueIdentifier,
     userId,
     wsSlug,
+    getName,
     toggleReaction,
     deleteComment,
     resolveComment,
@@ -213,35 +196,36 @@ function presentReactSheet(args: {
 }) {
   const { entry, reactions, userId, wsSlug, issueId, toggle } = args;
   const emojis = QUICK_EMOJIS.slice(0, QUICK_ROW_SIZE);
-  const options = [...emojis, "More reactions…", "Cancel"];
-  const cancelButtonIndex = options.length - 1;
-
-  ActionSheetIOS.showActionSheetWithOptions(
-    { options, cancelButtonIndex },
-    (i) => {
-      if (i === cancelButtonIndex) return;
-      if (i === emojis.length) {
-        if (!wsSlug) return;
-        router.push({
-          pathname:
-            "/[workspace]/issue/[id]/comment/[commentId]/emoji-picker",
-          params: {
-            workspace: wsSlug,
-            id: issueId,
-            commentId: entry.id,
-          },
-        });
-        return;
-      }
-      const emoji = emojis[i];
-      if (!emoji) return;
-      const existing = reactions.find(
-        (r) =>
-          r.emoji === emoji &&
-          r.actor_type === "member" &&
-          r.actor_id === userId,
-      );
-      toggle(emoji, existing);
-    },
-  );
+  showPlatformActionSheet({
+    options: [
+      ...emojis.map((emoji) => ({
+        label: emoji,
+        onPress: () => {
+          const existing = reactions.find(
+            (reaction) =>
+              reaction.emoji === emoji &&
+              reaction.actor_type === "member" &&
+              reaction.actor_id === userId,
+          );
+          toggle(emoji, existing);
+        },
+      })),
+      {
+        label: "More reactions…",
+        onPress: () => {
+          if (!wsSlug) return;
+          router.push({
+            pathname:
+              "/[workspace]/issue/[id]/comment/[commentId]/emoji-picker",
+            params: {
+              workspace: wsSlug,
+              id: issueId,
+              commentId: entry.id,
+            },
+          });
+        },
+      },
+      { label: "Cancel", style: "cancel" },
+    ],
+  });
 }

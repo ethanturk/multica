@@ -24,6 +24,7 @@ type batchClaimResponse struct {
 			IssueIdentifier string `json:"issue_identifier"`
 			Status          string `json:"status"`
 		} `json:"active_sibling_runs"`
+		DeterministicTools []DeterministicToolData `json:"deterministic_tools"`
 	} `json:"tasks"`
 }
 
@@ -150,6 +151,45 @@ func TestClaimTasksByRuntime_IncludesActiveSiblingRun(t *testing.T) {
 	sibling := resp.Tasks[0].ActiveSiblingRuns[0]
 	if sibling.IssueID != sourceIssueID || sibling.Status != "running" || sibling.IssueIdentifier == "" {
 		t.Fatalf("wrong sibling payload: %+v", sibling)
+	}
+}
+
+func TestClaimTasksByRuntime_IncludesWorkspaceDeterministicTools(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+
+	var toolID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO deterministic_tool (workspace_id, name, description, source, enabled, created_by)
+		VALUES ($1, 'batch_claim_tool', 'batch claim regression tool', 'package step', TRUE, $2)
+		RETURNING id
+	`, testWorkspaceID, testUserID).Scan(&toolID); err != nil {
+		t.Fatalf("seed deterministic tool: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(ctx, `DELETE FROM deterministic_tool WHERE id = $1`, toolID) })
+
+	rt := createClaimReclaimRuntime(t, ctx, "Batch tools rt")
+	agentID, issueID := createClaimReclaimAgentAndIssue(t, ctx, rt, "Batch tools agent")
+	seedQueuedIssueTask(t, ctx, agentID, rt, issueID)
+
+	w := postBatchClaim(t, testWorkspaceID, []string{rt}, 1)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp batchClaimResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Tasks) != 1 {
+		t.Fatalf("claimed %d tasks, want 1: %s", len(resp.Tasks), w.Body.String())
+	}
+	if len(resp.Tasks[0].DeterministicTools) != 1 {
+		t.Fatalf("deterministic tools = %+v, want one workspace tool", resp.Tasks[0].DeterministicTools)
+	}
+	if got := resp.Tasks[0].DeterministicTools[0]; got.Name != "batch_claim_tool" || got.Source != "package step" {
+		t.Fatalf("deterministic tool = %+v, want batch_claim_tool source", got)
 	}
 }
 

@@ -13,7 +13,14 @@ import (
 	"time"
 
 	"github.com/multica-ai/multica/server/internal/daemon/repocache"
+	"github.com/multica-ai/multica/server/pkg/uitest"
 )
+
+type UITestHealth struct {
+	Status  string `json:"status"`
+	Version string `json:"version,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
 
 // HealthResponse is returned by the daemon's local health endpoint.
 type HealthResponse struct {
@@ -75,6 +82,7 @@ type HealthResponse struct {
 	// older consumers see no change. Diagnostic only: nothing keys off it.
 	ReloadPendingReason string            `json:"reload_pending_reason,omitempty"`
 	Workspaces          []healthWorkspace `json:"workspaces"`
+	UITest              UITestHealth      `json:"ui_test"`
 }
 
 type healthWorkspace struct {
@@ -143,6 +151,13 @@ func (d *Daemon) healthHandler(startedAt time.Time) http.HandlerFunc {
 		if d.ready.Load() {
 			status = "running"
 		}
+		uiTestStatus, _, uiTestErr := d.probeUITestCapability()
+		if uiTestErr != nil {
+			uiTestStatus = uitest.CapabilityStatus{
+				Status: uitest.StatusBroken,
+				Error:  uiTestErr.Error(),
+			}
+		}
 
 		resp := HealthResponse{
 			Status:                status,
@@ -163,6 +178,11 @@ func (d *Daemon) healthHandler(startedAt time.Time) http.HandlerFunc {
 
 			ReloadPendingReason: d.reloadPending(),
 			Workspaces:          wsList,
+			UITest: UITestHealth{
+				Status:  uiTestStatus.Status,
+				Version: uiTestStatus.Version,
+				Error:   uiTestStatus.Error,
+			},
 		}
 		if reporter, ok := d.repoCache.(interface{ Activity() repocache.Activity }); ok {
 			activity := reporter.Activity()
@@ -235,6 +255,7 @@ func (d *Daemon) repoCheckoutHandler() http.HandlerFunc {
 			http.Error(w, "url is required", http.StatusBadRequest)
 			return
 		}
+		repoURL := repoAuthorizationKey(req.URL)
 		if req.WorkspaceID == "" {
 			http.Error(w, "workspace_id is required", http.StatusBadRequest)
 			return
@@ -253,16 +274,16 @@ func (d *Daemon) repoCheckoutHandler() http.HandlerFunc {
 			return
 		}
 
-		if err := d.ensureRepoReady(r.Context(), req.WorkspaceID, req.URL); err != nil {
+		if err := d.ensureRepoReady(r.Context(), req.WorkspaceID, repoURL); err != nil {
 			if r.Context().Err() != nil {
-				d.logger.Debug("repo checkout readiness cancelled", "url", req.URL, "error", err)
+				d.logger.Debug("repo checkout readiness cancelled", "url", repoURL, "error", err)
 				return
 			}
 			statusCode := http.StatusInternalServerError
 			if errors.Is(err, ErrRepoNotConfigured) {
 				statusCode = http.StatusBadRequest
 			}
-			d.logger.Error("repo checkout readiness failed", "workspace_id", req.WorkspaceID, "url", req.URL, "error", err)
+			d.logger.Error("repo checkout readiness failed", "workspace_id", req.WorkspaceID, "url", repoURL, "error", err)
 			http.Error(w, err.Error(), statusCode)
 			return
 		}
@@ -274,7 +295,7 @@ func (d *Daemon) repoCheckoutHandler() http.HandlerFunc {
 
 		params := repocache.WorktreeParams{
 			WorkspaceID:         req.WorkspaceID,
-			RepoURL:             req.URL,
+			RepoURL:             repoURL,
 			WorkDir:             req.WorkDir,
 			Ref:                 checkoutRef,
 			AgentName:           req.AgentName,

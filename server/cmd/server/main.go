@@ -22,6 +22,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/scheduler"
 	"github.com/multica-ai/multica/server/internal/service"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/detsteps"
 	"github.com/multica-ai/multica/server/pkg/featureflag"
 	"github.com/redis/go-redis/v9"
 )
@@ -197,6 +198,10 @@ func backgroundServices(h *handler.Handler) (*service.TaskService, *service.Auto
 }
 
 func main() {
+	// If re-exec'd as a deterministic-step sandbox, run the one-shot step and
+	// exit before any server initialization. Must be first.
+	detsteps.MaybeRunStepChild()
+
 	logger.Init()
 
 	// Warn about missing configuration

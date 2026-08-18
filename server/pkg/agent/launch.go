@@ -156,6 +156,7 @@ var launchPrefixBlockedArgs = map[string]map[string]blockedArgMode{
 	"copilot":     copilotBlockedArgs,
 	"cursor":      cursorBlockedArgs,
 	"deveco":      devecoBlockedArgs,
+	"dirge":       dirgeBlockedArgs,
 	"grok":        grokBlockedArgs,
 	"hermes":      hermesBlockedArgs,
 	"kimi":        kimiBlockedArgs,

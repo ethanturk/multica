@@ -1864,6 +1864,17 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 	// not — because its absence is what tells an upgraded daemon it is talking
 	// to a server too old to have answered the question (MUL-5811).
 	resp.LeaderRoleResolved = true
+	if tools, err := h.Queries.ListEnabledDeterministicToolsByWorkspace(r.Context(), runtime.WorkspaceID); err != nil {
+		slog.Warn("task claim: failed to load deterministic tools", "workspace_id", runtimeWorkspaceID, "error", err)
+	} else {
+		for _, tool := range tools {
+			resp.DeterministicTools = append(resp.DeterministicTools, DeterministicToolData{
+				Name:        tool.Name,
+				Description: tool.Description,
+				Source:      tool.Source,
+			})
+		}
+	}
 	supportsCoalescedComments := requestHasClientCapability(r, protocol.DaemonCapabilityCoalescedCommentsV1)
 	// Empty-but-non-nil so pgx persists '{}' rather than NULL for tasks without
 	// comment input. Comment tasks replace this with the ids actually embedded

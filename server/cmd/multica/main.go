@@ -10,6 +10,7 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/cli"
 	"github.com/multica-ai/multica/server/internal/daemon/execenv"
+	"github.com/multica-ai/multica/server/pkg/detsteps"
 )
 
 var (
@@ -61,6 +62,8 @@ func init() {
 	// Runtime commands
 	daemonCmd.GroupID = groupRuntime
 	runtimeCmd.GroupID = groupRuntime
+	mcpToolsCmd.GroupID = groupRuntime
+	uiTestCmd.GroupID = groupRuntime
 
 	// Additional commands
 	authCmd.GroupID = groupAdditional
@@ -86,6 +89,8 @@ func init() {
 	rootCmd.AddCommand(chatCmd)
 	rootCmd.AddCommand(daemonCmd)
 	rootCmd.AddCommand(runtimeCmd)
+	rootCmd.AddCommand(mcpToolsCmd)
+	rootCmd.AddCommand(uiTestCmd)
 	rootCmd.AddCommand(authCmd)
 	rootCmd.AddCommand(userCmd)
 	rootCmd.AddCommand(loginCmd)
@@ -99,6 +104,10 @@ func init() {
 }
 
 func main() {
+	// If re-exec'd as a deterministic-step sandbox, run the one-shot step and
+	// exit before any CLI/cobra setup. Must be first.
+	detsteps.MaybeRunStepChild()
+
 	if len(os.Args) == 2 && os.Args[1] == execenv.PreparationHelperArg {
 		logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 		if err := execenv.RunPreparationHelper(os.Stdin, os.Stdout, logger); err != nil {
