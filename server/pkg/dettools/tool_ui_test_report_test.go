@@ -992,24 +992,26 @@ func TestUIReportLockWaitHonorsContextCancellation(t *testing.T) {
 }
 
 func TestUIReportLockReclaimsOnlyOldDeadOwner(t *testing.T) {
-	deadPID := exitedProcessPID(t)
 	tests := []struct {
 		name     string
 		owner    uiTestReportLockOwner
+		deadPID  bool
 		wantLock bool
 	}{
 		{
 			name: "old dead owner",
 			owner: uiTestReportLockOwner{
-				PID: deadPID, Token: "dead-owner", StartedAt: time.Now().Add(-10 * time.Minute),
+				Token: "dead-owner", StartedAt: time.Now().Add(-10 * time.Minute),
 			},
+			deadPID:  true,
 			wantLock: true,
 		},
 		{
 			name: "recent dead owner",
 			owner: uiTestReportLockOwner{
-				PID: deadPID, Token: "recent-dead", StartedAt: time.Now(),
+				Token: "recent-dead", StartedAt: time.Now(),
 			},
+			deadPID: true,
 		},
 		{
 			name: "old live or pid reused owner",
@@ -1026,14 +1028,24 @@ func TestUIReportLockReclaimsOnlyOldDeadOwner(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			owner := tt.owner
+			if tt.deadPID {
+				owner.PID = exitedProcessPID(t)
+			}
 			runDir := t.TempDir()
-			writeUITestReportLockOwner(t, runDir, tt.owner)
+			writeUITestReportLockOwner(t, runDir, owner)
 			root, err := os.OpenRoot(runDir)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer root.Close()
-			ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+			// A reclaim only has to happen at all; a deadline tight enough to
+			// double as a speed limit turns a loaded machine into a failure.
+			acquireTimeout := 40 * time.Millisecond
+			if tt.wantLock {
+				acquireTimeout = 30 * time.Second
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), acquireTimeout)
 			defer cancel()
 			lock, err := acquireUITestReportLock(ctx, root, time.Minute)
 			if tt.wantLock {
@@ -1095,15 +1107,24 @@ func writeUITestReportLockOwner(t *testing.T, runDir string, owner uiTestReportL
 	}
 }
 
+// exitedProcessPID returns the PID of a process that has exited and been
+// reaped. The kernel is free to hand a reaped PID to a new process, which would
+// make the owner look alive, so the PID is confirmed gone before it is used.
 func exitedProcessPID(t *testing.T) int {
 	t.Helper()
-	cmd := exec.Command(os.Args[0], "-test.run=^$")
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
+	for range 10 {
+		cmd := exec.Command(os.Args[0], "-test.run=^$")
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		pid := cmd.Process.Pid
+		if err := cmd.Wait(); err != nil {
+			t.Fatal(err)
+		}
+		if dead, definitive := uiTestReportOwnerDead(pid); dead && definitive {
+			return pid
+		}
 	}
-	pid := cmd.Process.Pid
-	if err := cmd.Wait(); err != nil {
-		t.Fatal(err)
-	}
-	return pid
+	t.Fatal("no exited PID stayed unused")
+	return 0
 }
