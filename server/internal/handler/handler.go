@@ -25,9 +25,11 @@ import (
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/integrations/channel/engine"
 	composio "github.com/multica-ai/multica/server/internal/integrations/composio"
+	"github.com/multica-ai/multica/server/internal/integrations/dingtalk"
 	"github.com/multica-ai/multica/server/internal/integrations/ghsnapshot"
 	"github.com/multica-ai/multica/server/internal/integrations/lark"
 	"github.com/multica-ai/multica/server/internal/integrations/slack"
+	"github.com/multica-ai/multica/server/internal/integrations/wecom"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/middleware"
 	"github.com/multica-ai/multica/server/internal/realtime"
@@ -81,9 +83,10 @@ type Config struct {
 	VCSIntegrationEnabled bool
 	// PublicURL is the absolute base URL the API is reachable at from the
 	// public internet, with no trailing slash (e.g. "https://multica.ai").
-	// Used only to build webhook_url responses for autopilot webhook triggers
-	// — never for auth, routing, or workspace resolution. Empty when unset,
-	// in which case clients fall back to webhook_path + their own origin.
+	// Used to build webhook_url responses and the fixed Remote MCP OAuth
+	// callback URI — never to decide request identity, routing, or workspace
+	// scope. Empty when unset; webhook clients can fall back to their own origin,
+	// while OAuth Connect fails closed because providers require an exact URI.
 	// Reading the public host from request headers (Host / X-Forwarded-Host)
 	// is intentionally avoided so a misconfigured reverse proxy cannot trick
 	// the server into minting webhook URLs pointing at an attacker-controlled
@@ -160,6 +163,7 @@ type Handler struct {
 	DaemonWorkspaceRefresh WorkspaceSetRefreshNotifier
 	Bus                    *events.Bus
 	TaskService            *service.TaskService
+	PluginService          *service.PluginService
 	IssueService           *service.IssueService
 	AutopilotService       *service.AutopilotService
 	EmailService           *service.EmailService
@@ -194,6 +198,7 @@ type Handler struct {
 	WebhookRateLimiter           WebhookRateLimiter
 	WebhookIPRateLimiter         WebhookRateLimiter
 	WebhookAbsoluteIPRateLimiter WebhookRateLimiter
+	InvitationRateLimiters       InvitationRateLimiters
 	WebhookDeliveryWorker        *WebhookDeliveryWorker
 	CloudRuntime                 cloudRuntimeProxy
 	// Lark integration. All three are nil when the Lark master key
@@ -225,9 +230,10 @@ type Handler struct {
 	// ChannelSupervisor owns the per-installation supervisor goroutines
 	// that hold the §4.4 WS lease and drive each channel.Channel
 	// (MUL-3620 generalized the Feishu-only Hub into this channel-agnostic
-	// engine). The router constructs it UNCONDITIONALLY — it drives any
-	// channel type, not just Feishu, so it does not depend on the Lark
-	// master key; each platform registers its Factory only when configured
+	// engine). The router constructs it independently of platform secrets — it
+	// drives any channel type, not just Feishu. It remains nil when lease
+	// configuration is unsafe or a selected Redis backend fails its startup
+	// readiness check; each platform registers its Factory only when configured
 	// (Feishu when MULTICA_LARK_SECRET_KEY is set). The router does NOT
 	// call Run; the process owner (main.go) starts it under a long-running
 	// context and joins via WaitWithTimeout (bounded, fenced by
@@ -254,11 +260,58 @@ type Handler struct {
 	// "link your Slack account" prompt (MUL-3666). Nil unless Slack is
 	// configured (MULTICA_SLACK_SECRET_KEY set).
 	SlackBindingTokens *slack.BindingTokenService
+	// DingTalkInstall owns the bring-your-own-app DingTalk lifecycle. It is nil
+	// unless MULTICA_DINGTALK_SECRET_KEY is configured.
+	DingTalkInstall *dingtalk.InstallService
+	// DingTalkBindingTokens mints and redeems the single-use account-link tokens.
+	DingTalkBindingTokens *dingtalk.BindingTokenService
 	// SlackHistory backs the agent-facing `multica chat history` command: it
 	// reads a chat session's bound Slack conversation on demand (MUL-3871). Nil
 	// unless Slack is configured; GetChatChannelHistory then reports "no channel
 	// integration". A future platform satisfies the same reader interface.
 	SlackHistory ChatChannelHistoryReader
+	// WecomStore is the read/write handle over channel_installation rows scoped
+	// to channel_type='wecom'. Nil disables the wecom Web-UI endpoints (they
+	// return 503) and prevents boot from wiring the smart-bot supervisor.
+	WecomStore *wecom.Store
+	// WecomCredentials unseals a wecom installation's smart-bot secret for the
+	// WebSocket subscribe frame. Nil disables the wecom integration.
+	WecomCredentials wecom.CredentialsResolver
+	// WecomBindingTokens mints/redeems the user-binding tokens behind the
+	// "link your Multica account" prompt sent to first-time WeCom users
+	// (their aibot userid is a "T"-prefixed anonymized id with no relation
+	// to their real userid or email, so an explicit binding is required —
+	// see wecom/binding.go). Nil disables the redeem endpoint (returns 503)
+	// and the OutboundReplier's binding-prompt path.
+	WecomBindingTokens WecomBindingRedeemer
+
+	// WecomCredentialProbe overrides the install-time control check. Nil in
+	// production, which gets the real handshake probe; tests inject a fake so
+	// the install path runs without a socket.
+	WecomCredentialProbe wecom.CredentialProbe
+
+	// channelFileDelivery names the channel types that can, IN THIS
+	// DEPLOYMENT, carry a file the agent produced the last hop into the
+	// conversation. It answers the claim response's
+	// chat_channel_delivers_files, which the agent's PER-TURN prompt turns into
+	// either "run `multica attachment upload`" or "describe the file in words"
+	// (daemon/prompt.go). Not the brief: the brief is the prompt cache prefix and
+	// this is a per-turn verdict, so stating it there made one session render two
+	// briefs (MUL-5377).
+	//
+	// It is a deployment fact, not a property of the channel type, and that
+	// distinction is the whole reason it lives here. Whether the file arrives
+	// takes TWO things: an adapter that goes back for the bound attachment,
+	// and object storage for it to go back to. The first is a property of the
+	// code, the second of the configuration, and only the process that wired
+	// both knows the conjunction. A daemon that answers this from the channel
+	// type alone promises delivery a storage-less deployment cannot perform.
+	//
+	// Written once at boot by DeclareChannelFileDelivery (cmd/server/router.go,
+	// in the same branch that passes the storage to the adapter, so the two
+	// cannot drift), read-only from then on. Nil means no channel delivers
+	// files, which is what a deployment with no storage configured gets.
+	channelFileDelivery map[string]bool
 	// LLM is the basic LLM API layer (MUL-4238): a thin wrapper over the
 	// OpenAI Go SDK backing server-internal one-shot LLM helpers such as chat
 	// title generation. The generic passthrough endpoints were removed in
@@ -335,6 +388,7 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 		DaemonWorkspaceRefresh:       daemonWorkspaceRefresh,
 		Bus:                          bus,
 		TaskService:                  taskSvc,
+		PluginService:                service.NewPluginService(queries, txStarter),
 		IssueService:                 service.NewIssueService(queries, txStarter, bus, analyticsClient, taskSvc),
 		AutopilotService:             service.NewAutopilotService(queries, txStarter, bus, taskSvc),
 		EmailService:                 emailService,
@@ -351,6 +405,7 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 		WebhookRateLimiter:           NewMemoryWebhookRateLimiter(DefaultWebhookRateLimit()),
 		WebhookIPRateLimiter:         NewMemoryWebhookIPRateLimiter(DefaultWebhookIPRateLimit()),
 		WebhookAbsoluteIPRateLimiter: NewMemoryWebhookAbsoluteIPRateLimiter(DefaultWebhookAbsoluteIPRateLimit()),
+		InvitationRateLimiters:       NewMemoryInvitationRateLimiters(DefaultInvitationRateLimits()),
 		CloudRuntime: cloudruntime.NewClient(cloudruntime.Config{
 			BaseURL: cfg.CloudRuntimeFleetURL,
 			Timeout: cfg.CloudRuntimeFleetTimeout,
@@ -415,6 +470,14 @@ func writeMeasuredJSON(w http.ResponseWriter, status int, v any) (int, error) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// writeErrorCode is writeError plus a stable machine-readable code, so a UI
+// can translate the failure instead of toasting the English sentence at a
+// user whose console is in another language. The sentence stays as the
+// fallback for anything that has not been given a translation yet.
+func writeErrorCode(w http.ResponseWriter, status int, code, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg, "code": code})
 }
 
 // Thin wrappers around util functions.
@@ -501,6 +564,45 @@ func parseUUIDSliceOrBadRequest(w http.ResponseWriter, ids []string, fieldName s
 		uuids[i] = u
 	}
 	return uuids, true
+}
+
+// DeclareChannelFileDelivery records that this deployment can put a file the
+// agent produced into a channelType conversation. Call it at boot, from the
+// same branch that gives the adapter what it needs to perform the delivery —
+// the point is that one condition produces both the capability and the claim
+// it is announced under, so a deployment cannot end up promising a hop it does
+// not have.
+//
+// Not safe to call once the server is serving: the map it writes is read
+// without a lock by every task claim.
+func (h *Handler) DeclareChannelFileDelivery(channelType string) {
+	if channelType == "" {
+		return
+	}
+	if h.channelFileDelivery == nil {
+		h.channelFileDelivery = map[string]bool{}
+	}
+	h.channelFileDelivery[channelType] = true
+}
+
+// channelDeliversFiles answers chat_channel_delivers_files for one claim.
+//
+// The default is false in every direction that is not an explicit declaration:
+// a channel nobody declared, a deployment with no object storage, an adapter
+// that was never wired. False is the safe answer because of what the two
+// answers cost. False when the file could have travelled loses a delivery the
+// agent then describes in words. True when it cannot has the agent write "the
+// chart is attached" into a room where nothing is attached, and the reader is
+// left hunting for it.
+//
+// Web chat (empty channel type) is not answered here. It has no adapter and no
+// last hop to have — the browser renders the attachment card off the same bind
+// — and the prompt handles it in its own branch.
+func (h *Handler) channelDeliversFiles(channelType string) bool {
+	if channelType == "" {
+		return false
+	}
+	return h.channelFileDelivery[channelType]
 }
 
 // publish sends a domain event through the event bus.
@@ -890,18 +992,33 @@ func splitIdentifier(id string) *identifierParts {
 	return &identifierParts{prefix: id[:idx], number: int32(num)}
 }
 
-// getIssuePrefix fetches the issue_prefix for a workspace.
-// Falls back to generating a prefix from the workspace name if the stored
-// prefix is empty (e.g. workspaces created before the prefix was introduced).
+// issuePrefixForWorkspace resolves a workspace row's effective issue prefix:
+// the configured value, or one generated from the workspace name when the
+// stored prefix is empty (e.g. workspaces created before the prefix was
+// introduced). Split out from getIssuePrefix so callers that already hold the
+// row — such as the GitHub close-intent scan, which must not re-read it — can
+// reuse the rule.
+//
+// The empty-prefix fallback stays on the FROZEN name-based derivation, not the
+// slug-based one new workspaces get (MUL-6050): identifiers are computed at
+// read time, so switching this path would rewrite the identifier of every
+// issue in those legacy workspaces. New workspaces always persist a prefix at
+// creation, so they never reach this branch.
+func issuePrefixForWorkspace(ws db.Workspace) string {
+	if ws.IssuePrefix != "" {
+		return ws.IssuePrefix
+	}
+	return legacyIssuePrefixFromName(ws.Name)
+}
+
+// getIssuePrefix fetches the effective issue_prefix for a workspace, and
+// returns "" when the workspace row cannot be loaded.
 func (h *Handler) getIssuePrefix(ctx context.Context, workspaceID pgtype.UUID) string {
 	ws, err := h.Queries.GetWorkspace(ctx, workspaceID)
 	if err != nil {
 		return ""
 	}
-	if ws.IssuePrefix != "" {
-		return ws.IssuePrefix
-	}
-	return generateIssuePrefix(ws.Name)
+	return issuePrefixForWorkspace(ws)
 }
 
 func (h *Handler) loadAgentForUser(w http.ResponseWriter, r *http.Request, agentID string) (db.Agent, bool) {

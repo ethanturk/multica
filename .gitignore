@@ -74,6 +74,9 @@ server/server
 data/
 .kilo
 .idea
-
 .hermes/
-.gstack/)
+.gstack/
+
+# Python (agent tooling)
+__pycache__/
+*.pyc

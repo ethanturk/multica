@@ -58,6 +58,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuGroup,
+  DropdownMenuCheckboxItem,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
@@ -106,6 +107,11 @@ import type {
   UpdateIssueRequest,
 } from "@multica/core/types";
 import {
+  actorRefsFromValue,
+  formatActorRef,
+  isActorPropertyType,
+} from "@multica/core/types";
+import {
   useInfiniteQuery,
   useQueries,
   useQuery,
@@ -114,7 +120,7 @@ import {
 } from "@tanstack/react-query";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { LabelChip } from "../../labels/label-chip";
-import { useNavigation } from "../../navigation";
+import { resolveClickIntent, useIntentNavigate } from "../../navigation";
 import { ProjectPicker } from "../../projects/components/project-picker";
 import { useT } from "../../i18n";
 import { useIssueSurfaceActionsOptional } from "../surface/actions-context";
@@ -338,6 +344,7 @@ function IssueCheckbox({
         event.stopPropagation();
         onToggle(event.shiftKey);
       }}
+      onAuxClick={stopRowNavigation}
       onChange={() => undefined}
       className="size-3.5 cursor-pointer accent-primary"
     />
@@ -524,22 +531,14 @@ export function TableColumnPicker({
                 {t(($) => $.table.columns.system_section)}
               </DropdownMenuLabel>
               {systemColumns.map((key) => (
-                <DropdownMenuItem
+                <DropdownMenuCheckboxItem
                   key={key}
                   disabled={key === "title"}
-                  onClick={(event) => {
-                    event.preventDefault();
-                    toggleTableColumn(key);
-                  }}
+                  checked={selected.has(key)}
+                  onCheckedChange={() => toggleTableColumn(key)}
                 >
-                  <input
-                    type="checkbox"
-                    checked={selected.has(key)}
-                    readOnly
-                    className="size-3.5 accent-primary"
-                  />
                   {t(($) => $.table.columns[key as ColumnLabelKey])}
-                </DropdownMenuItem>
+                </DropdownMenuCheckboxItem>
               ))}
             </DropdownMenuGroup>
           )}
@@ -553,21 +552,13 @@ export function TableColumnPicker({
                 {visibleProperties.map((property) => {
                   const key = `property:${property.id}` as const;
                   return (
-                    <DropdownMenuItem
+                    <DropdownMenuCheckboxItem
                       key={property.id}
-                      onClick={(event) => {
-                        event.preventDefault();
-                        toggleTableColumn(key);
-                      }}
+                      checked={selected.has(key)}
+                      onCheckedChange={() => toggleTableColumn(key)}
                     >
-                      <input
-                        type="checkbox"
-                        checked={selected.has(key)}
-                        readOnly
-                        className="size-3.5 accent-primary"
-                      />
                       <span className="truncate">{property.name}</span>
-                    </DropdownMenuItem>
+                    </DropdownMenuCheckboxItem>
                   );
                 })}
               </DropdownMenuGroup>
@@ -646,7 +637,7 @@ export function InlineTitle({
   onEditingChange: (editing: boolean) => void;
   onUpdate: (updates: Partial<UpdateIssueRequest>) => void;
   /** Navigate to the issue — clicking the title is the primary way IN. */
-  onOpen: () => void;
+  onOpen: (event: React.MouseEvent) => void;
   onCreateSubIssue: () => void;
   onToggleParent: () => void;
   toggleLabel: string;
@@ -696,6 +687,9 @@ export function InlineTitle({
         }
         gestureStartedWhileEditingRef.current = false;
       }}
+      onAuxClickCapture={(event) => {
+        if (editing) event.stopPropagation();
+      }}
     >
       {row.hasChildren ? (
         <button
@@ -706,6 +700,7 @@ export function InlineTitle({
             event.stopPropagation();
             onToggleParent();
           }}
+          onAuxClick={stopRowNavigation}
         >
           {row.collapsed ? (
             <ChevronRight className="size-3.5" />
@@ -742,7 +737,7 @@ export function InlineTitle({
             className="min-w-0 flex-1 truncate text-left hover:underline"
             onClick={(event) => {
               event.stopPropagation();
-              onOpen();
+              onOpen(event);
             }}
           >
             {row.issue.title}
@@ -773,6 +768,7 @@ export function InlineTitle({
                 event.stopPropagation();
                 onCreateSubIssue();
               }}
+              onAuxClick={stopRowNavigation}
             >
               <Plus className="size-3" />
             </button>
@@ -785,6 +781,7 @@ export function InlineTitle({
                 setDraft(row.issue.title);
                 onEditingChange(true);
               }}
+              onAuxClick={stopRowNavigation}
             >
               <Pencil className="size-3" />
             </button>
@@ -808,7 +805,7 @@ function LazyLabelCell({
   const labels = issue.labels ?? [];
   if (open) {
     return (
-      <div onClick={stopRowNavigation}>
+      <div onClick={stopRowNavigation} onAuxClick={stopRowNavigation}>
         <LabelPicker
           issueId={issue.id}
           open
@@ -828,6 +825,7 @@ function LazyLabelCell({
         event.stopPropagation();
         onOpenChange(true);
       }}
+      onAuxClick={stopRowNavigation}
     >
       {labels.length > 0 ? (
         <>
@@ -890,6 +888,9 @@ export function IssueTableGroupRow({
 function propertyDisplayValue(
   property: IssueProperty,
   value: IssuePropertyValue | undefined,
+  // Actor values are "<kind>:<uuid>" references; without a resolver they would
+  // export as raw ids, so callers that can export an actor column must pass one.
+  getActorName?: (type: string, id: string) => string,
 ) {
   if (value === undefined) return "";
   const options = property.config.options ?? [];
@@ -901,6 +902,11 @@ function propertyDisplayValue(
     return options
       .filter((option) => ids.includes(option.id))
       .map((option) => option.name)
+      .join(", ");
+  }
+  if (isActorPropertyType(property.type)) {
+    return actorRefsFromValue(value)
+      .map((ref) => (getActorName ? getActorName(ref.kind, ref.id) : formatActorRef(ref.kind, ref.id)))
       .join(", ");
   }
   return String(value);
@@ -929,7 +935,7 @@ type TableViewMeta = {
   editingCellKey: string | null;
   setEditingCellKey: (key: string | null) => void;
   updateIssue: (issueId: string, updates: Partial<UpdateIssueRequest>) => void;
-  openIssue: (issue: Issue) => void;
+  openIssue: (issue: Issue, event?: React.MouseEvent) => void;
   createSubIssue: (issue: Issue) => void;
   toggleTableParentCollapsed: (issueId: string) => void;
   handleIssueSelection: (issueId: string, shiftKey: boolean) => void;
@@ -1050,7 +1056,8 @@ function IssueTableHeaderCell({
   const propertyId = propertyIdFromViewKey(key);
   const property = propertyId ? meta.propertyById.get(propertyId) : undefined;
   const staticSort = propertyId
-    ? property && !["multi_select", "checkbox"].includes(property.type)
+    ? property &&
+      !["multi_select", "checkbox", "actor", "multi_actor"].includes(property.type)
       ? (`property:${propertyId}` as SortField)
       : undefined
     : SORTABLE_COLUMNS[key as TableSystemColumnKey];
@@ -1109,7 +1116,7 @@ function IssueTableBodyCell({
     const property = meta.propertyById.get(propertyId);
     if (!property) return null;
     return (
-      <div onClick={stopRowNavigation}>
+      <div onClick={stopRowNavigation} onAuxClick={stopRowNavigation}>
         <CustomPropertyValueEditor
           issue={issue}
           property={property}
@@ -1127,7 +1134,7 @@ function IssueTableBodyCell({
           editing={editorOpen}
           onEditingChange={setEditorOpen}
           onUpdate={onUpdate}
-          onOpen={() => meta.openIssue(issue)}
+          onOpen={(event) => meta.openIssue(issue, event)}
           onCreateSubIssue={() => meta.createSubIssue(issue)}
           onToggleParent={() => meta.toggleTableParentCollapsed(issue.id)}
           toggleLabel={t(($) => $.table.toggle_sub_issues)}
@@ -1141,7 +1148,7 @@ function IssueTableBodyCell({
       );
     case "status":
       return (
-        <div onClick={stopRowNavigation}>
+        <div onClick={stopRowNavigation} onAuxClick={stopRowNavigation}>
           <StatusPicker
             status={issue.status}
             onUpdate={onUpdate}
@@ -1153,7 +1160,7 @@ function IssueTableBodyCell({
       );
     case "priority":
       return (
-        <div onClick={stopRowNavigation}>
+        <div onClick={stopRowNavigation} onAuxClick={stopRowNavigation}>
           <PriorityPicker
             priority={issue.priority}
             onUpdate={onUpdate}
@@ -1165,7 +1172,7 @@ function IssueTableBodyCell({
       );
     case "assignee":
       return (
-        <div onClick={stopRowNavigation}>
+        <div onClick={stopRowNavigation} onAuxClick={stopRowNavigation}>
           <AssigneePicker
             assigneeType={issue.assignee_type}
             assigneeId={issue.assignee_id}
@@ -1186,7 +1193,7 @@ function IssueTableBodyCell({
       );
     case "project":
       return (
-        <div onClick={stopRowNavigation}>
+        <div onClick={stopRowNavigation} onAuxClick={stopRowNavigation}>
           <ProjectPicker
             projectId={issue.project_id}
             onUpdate={onUpdate}
@@ -1203,7 +1210,7 @@ function IssueTableBodyCell({
       );
     case "start_date":
       return (
-        <div onClick={stopRowNavigation}>
+        <div onClick={stopRowNavigation} onAuxClick={stopRowNavigation}>
           <StartDatePicker
             startDate={issue.start_date}
             onUpdate={onUpdate}
@@ -1214,7 +1221,7 @@ function IssueTableBodyCell({
       );
     case "due_date":
       return (
-        <div onClick={stopRowNavigation}>
+        <div onClick={stopRowNavigation} onAuxClick={stopRowNavigation}>
           <DueDatePicker
             dueDate={issue.due_date}
             onUpdate={onUpdate}
@@ -1275,7 +1282,7 @@ export function TableView({
   const { t } = useT("issues");
   const wsId = useWorkspaceId();
   const queryClient = useQueryClient();
-  const navigation = useNavigation();
+  const intentNavigate = useIntentNavigate();
   const paths = useWorkspacePaths();
   const actions = useIssueSurfaceActionsOptional();
   const selection = useIssueSurfaceSelection();
@@ -2093,20 +2100,17 @@ export function TableView({
   );
 
   const openIssue = useCallback(
-    (issue: Issue) => {
-      const path = paths.issueDetail(issue.id);
-      if (navigation.openInNewTab) {
-        navigation.openInNewTab(path, issue.identifier, { activate: true });
-        return;
-      }
-
-      window.open(
-        navigation.getShareableUrl(path),
-        "_blank",
-        "noopener,noreferrer",
+    (issue: Issue, event?: React.MouseEvent) => {
+      // Standard link semantics: plain click navigates in place; modifier /
+      // middle clicks open tabs. Callbacks without an event (keyboard
+      // affordances) count as plain clicks.
+      intentNavigate(
+        paths.issueDetail(issue.id),
+        event ? resolveClickIntent(event) : "push",
+        issue.identifier,
       );
     },
-    [navigation, paths],
+    [intentNavigate, paths],
   );
 
   const createSubIssue = useCallback(
@@ -2257,9 +2261,12 @@ export function TableView({
         const propertyId = propertyIdFromViewKey(column.key);
         return !propertyId || exportPropertyById.has(propertyId);
       });
-      const needsActors = csvColumns.some(
-        (column) => column.key === "assignee" || column.key === "creator",
-      );
+      const needsActors = csvColumns.some((column) => {
+        if (column.key === "assignee" || column.key === "creator") return true;
+        const propertyId = propertyIdFromViewKey(column.key);
+        const property = propertyId ? exportPropertyById.get(propertyId) : undefined;
+        return property ? isActorPropertyType(property.type) : false;
+      });
       const [rows, exportLookups, exportActorName] = await Promise.all([
         mode === "all" ? exportIssues() : Promise.resolve(selectedIssues),
         resolveExportLookups({
@@ -2289,7 +2296,11 @@ export function TableView({
           if (propertyId) {
             const property = exportPropertyById.get(propertyId);
             return property
-              ? propertyDisplayValue(property, issue.properties[propertyId])
+              ? propertyDisplayValue(
+                  property,
+                  issue.properties[propertyId],
+                  exportActorName,
+                )
               : "";
           }
           switch (column.key) {
@@ -2421,9 +2432,9 @@ export function TableView({
             table={table}
             virtualizeRows
             emptyMessage={t(($) => $.table.empty)}
-            onRowClick={(row) => {
+            onRowClick={(row, event) => {
               if (row.original.kind === "issue") {
-                openIssue(row.original.issue);
+                openIssue(row.original.issue, event);
               }
             }}
             renderRow={(row) => {

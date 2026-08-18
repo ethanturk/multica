@@ -166,8 +166,10 @@ type acpDeliverableCase struct {
 var acpDeliverableCases = []acpDeliverableCase{
 	{backend: "hermes", binary: "hermes", notification: "session/update"},
 	{backend: "kimi", binary: "kimi", notification: "session/update"},
+	{backend: "reasonix", binary: "reasonix", notification: "session/update"},
 	{backend: "traecli", binary: "traecli", notification: "session/update"},
 	{backend: "grok", binary: "grok", notification: "session/update"},
+	{backend: "mcode", binary: "mcode", notification: "session/update"},
 	{backend: "kiro", binary: "kiro-cli", notification: "session/notification", camelUpdates: true},
 	{backend: "qoder", binary: "qodercli", notification: "session/notification", camelUpdates: true},
 	{backend: "qoderclicn", binary: "qoderclicn", notification: "session/notification", camelUpdates: true},
