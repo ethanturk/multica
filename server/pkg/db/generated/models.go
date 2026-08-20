@@ -546,18 +546,6 @@ type DaemonToken struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
-type DingtalkGroupRoute struct {
-	ID                pgtype.UUID        `json:"id"`
-	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
-	InstallationID    pgtype.UUID        `json:"installation_id"`
-	ConversationID    string             `json:"conversation_id"`
-	ConversationTitle string             `json:"conversation_title"`
-	AgentID           pgtype.UUID        `json:"agent_id"`
-	Revision          int64              `json:"revision"`
-	DiscoveredAt      pgtype.Timestamptz `json:"discovered_at"`
-	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
-}
-
 type DeterministicTool struct {
 	ID          pgtype.UUID        `json:"id"`
 	WorkspaceID pgtype.UUID        `json:"workspace_id"`
@@ -568,6 +556,18 @@ type DeterministicTool struct {
 	CreatedBy   pgtype.UUID        `json:"created_by"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+type DingtalkGroupRoute struct {
+	ID                pgtype.UUID        `json:"id"`
+	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
+	InstallationID    pgtype.UUID        `json:"installation_id"`
+	ConversationID    string             `json:"conversation_id"`
+	ConversationTitle string             `json:"conversation_title"`
+	AgentID           pgtype.UUID        `json:"agent_id"`
+	Revision          int64              `json:"revision"`
+	DiscoveredAt      pgtype.Timestamptz `json:"discovered_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
 }
 
 type Feedback struct {
