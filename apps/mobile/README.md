@@ -23,6 +23,13 @@ export EXPO_BUNDLE_IDENTIFIER_PROD=com.yourname.multica
 pnpm ios:mobile:device:prod:release
 ```
 
+**If your Apple ID belongs to more than one Apple Developer team** — a personal team plus an employer's, say — the build signs with the first identity it finds, which may not be the team you meant, and it keeps reusing that choice on every later build. Pin the right one (find the id in the Apple Developer Portal under Membership):
+
+```bash
+export EXPO_APPLE_TEAM_ID=ABCDE12345
+pnpm ios:mobile:device:prod:release
+```
+
 **7-day signing limit**: a free Apple ID signs builds for 7 days. After that, plug back into the Mac and re-run the command to re-sign. An Apple Developer Program account ($99/yr) extends this to 1 year.
 
 Android development support lives in this package too. Approved testers can receive signed staging APKs through the manual Firebase App Distribution workflow; public Play Store distribution is still a follow-up. Everything below is for app developers.

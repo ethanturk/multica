@@ -294,6 +294,69 @@ export function createEnDict(allowSignup: boolean): LandingDict {
     },
     entries: [
       {
+        version: "0.4.31",
+        date: "2026-08-20",
+        title: "Run confirmation before leaving backlog, Webhook event filters, and Windows build fixes",
+        changes: [],
+        improvements: [
+          "The web Help menu now makes the desktop app easier to find.",
+          "You can confirm an agent run before moving an assigned Issue out of backlog.",
+          "Webhook event filters are easier to add and remove.",
+          "The / picker now ranks exact skill matches first.",
+        ],
+        fixes: [
+          "Windows command-line builds now create correctly named executables.",
+          "Agents can still load skills after a brief connection drop.",
+          "Run now no longer exposes internal error details.",
+          "Agent updates stay responsive in busy workspaces.",
+        ],
+      },
+      {
+        version: "0.4.30",
+        date: "2026-08-19",
+        title: "Safer Issue editing, empty-property filters, and clearer agent identity",
+        changes: [],
+        features: [
+          "You can see which agent is handling each chat session.",
+          "Workspace admins can see linked DingTalk identities.",
+          "You can filter Issues by custom properties that have no value.",
+          "When an Issue or comment changes while you edit it, you can compare both versions before saving.",
+        ],
+        improvements: [
+          "The command palette now includes every workspace page.",
+          "Chat sessions now resume faster.",
+          "Issue activity times now reflect meaningful updates.",
+        ],
+        fixes: [
+          "Private agents can only be invoked by their owners.",
+          "Agent workspaces stay isolated when tasks run at the same time.",
+          "Provider command logs no longer expose credentials or prompts.",
+          "Posting a comment no longer reports a false send failure.",
+          "A dependency security vulnerability has been fixed.",
+        ],
+      },
+      {
+        version: "0.4.29",
+        date: "2026-08-18",
+        title: "MiniMax Code, cleaner run transcripts, and Hermes agent fixes",
+        changes: [],
+        features: [
+          "You can now run agents with MiniMax Code.",
+          "Press Cmd/Ctrl+, to open Settings in a new desktop tab.",
+        ],
+        improvements: [
+          "Hermes agent runs now show tools while they are working.",
+          "Agent transcripts are easier to scan without repeated names.",
+        ],
+        fixes: [
+          "Tasks keep running through brief runtime connection drops.",
+          "Daily and weekly cost charts now include cache-read costs.",
+          "Files and audio sent directly in Feishu now reach your agent.",
+          "Failed delegated work now returns to the coordinating agent.",
+          "Downloads now show the newest complete release.",
+        ],
+      },
+      {
         version: "0.4.28",
         date: "2026-08-17",
         title:
@@ -384,6 +447,7 @@ export function createEnDict(allowSignup: boolean): LandingDict {
           "Parallel local-folder mode, per-group DingTalk routing, and one-click skill updates",
         changes: [],
         features: [
+          "Your agents can now live in Telegram — DM them or @-mention them in a group or forum topic.",
           "A local folder can now run tasks in parallel, each delivering its own branch.",
           "One DingTalk bot can now serve each group with its own agent.",
           "Imported skills can now be updated from their source in one click.",

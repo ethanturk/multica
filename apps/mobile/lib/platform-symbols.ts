@@ -35,4 +35,3 @@ export function resolvePlatformSymbol(
 ): ComponentProps<typeof Ionicons>["name"] {
   return SYMBOL_MAP[name];
 }
-

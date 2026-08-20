@@ -100,7 +100,7 @@ describe("MoreTabDropdownAnchor", () => {
   let renderer: ReactTestRenderer | null = null;
 
   beforeEach(() => {
-     
+
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     mocks.routerPush.mockReset();
     mocks.triggerProps.length = 0;

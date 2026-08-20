@@ -1,5 +1,6 @@
 "use client";
 
+import { useStatusLabel } from "../utils/status-label";
 import {
   useCallback,
   useEffect,
@@ -72,7 +73,8 @@ import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import { cn } from "@multica/ui/lib/utils";
 import { ApiError } from "@multica/core/api";
 import { useWorkspaceId } from "@multica/core/hooks";
-import { ALL_STATUSES } from "@multica/core/issues/config";
+import { useIssueStatuses } from "@multica/core/issue-statuses/hooks";
+import { useModalStore } from "@multica/core/modals";
 import {
   issueKeys,
   issueTableGroupsOptions,
@@ -98,7 +100,6 @@ import type {
   Issue,
   IssueProperty,
   IssuePropertyValue,
-  IssueStatus,
   IssueTableGroupDescriptor,
   IssueTableGroupSpec,
   IssueTableQuerySpec,
@@ -118,6 +119,7 @@ import {
   useQueryClient,
   type UseQueryResult,
 } from "@tanstack/react-query";
+import { runConfirmIntent } from "../actions/run-confirm-gate";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { LabelChip } from "../../labels/label-chip";
 import { resolveClickIntent, useIntentNavigate } from "../../navigation";
@@ -934,7 +936,9 @@ type TableViewMeta = {
    *  remounts and freezes the table structure while it is up. */
   editingCellKey: string | null;
   setEditingCellKey: (key: string | null) => void;
-  updateIssue: (issueId: string, updates: Partial<UpdateIssueRequest>) => void;
+  /** Takes the ISSUE, not its id: the run-confirm gate reads its status
+   *  category and owner to decide whether the write needs confirming first. */
+  updateIssue: (issue: Issue, updates: Partial<UpdateIssueRequest>) => void;
   openIssue: (issue: Issue, event?: React.MouseEvent) => void;
   createSubIssue: (issue: Issue) => void;
   toggleTableParentCollapsed: (issueId: string) => void;
@@ -1109,7 +1113,7 @@ function IssueTableBodyCell({
   const setEditorOpen = (open: boolean) =>
     meta.setEditingCellKey(open ? cellKey : null);
   const onUpdate = (updates: Partial<UpdateIssueRequest>) =>
-    meta.updateIssue(issue.id, updates);
+    meta.updateIssue(issue, updates);
 
   const propertyId = propertyIdFromViewKey(key);
   if (propertyId) {
@@ -1281,6 +1285,9 @@ export function TableView({
 }: TableViewProps) {
   const { t } = useT("issues");
   const wsId = useWorkspaceId();
+  const resolveStatusLabel = useStatusLabel(wsId);
+  const { entryOf } = useIssueStatuses(wsId);
+  const openModal = useModalStore((s) => s.open);
   const queryClient = useQueryClient();
   const intentNavigate = useIntentNavigate();
   const paths = useWorkspacePaths();
@@ -1752,13 +1759,12 @@ export function TableView({
     (descriptor: IssueTableGroupDescriptor) => {
       const value = descriptor.value;
       if (value.kind === "status") {
-        if (ALL_STATUSES.includes(value.status as IssueStatus)) {
-          return t(($) => $.status[value.status as IssueStatus]);
-        }
-        // Installed clients can receive a status introduced by a newer
-        // backend. Keep the group usable instead of collapsing the response
-        // to the schema fallback or rendering an empty label.
-        return value.status;
+        // A group is one status KEY, so it shows that status's own name — a
+        // custom status must not read as its category. `resolveStatusLabel`
+        // falls back to the raw key, which is also what keeps a status
+        // introduced by a NEWER backend usable on an installed client instead
+        // of collapsing to the schema fallback or an empty label. (MUL-6243)
+        return resolveStatusLabel(value.status);
       }
       if (value.kind === "assignee") {
         return value.actor
@@ -2093,10 +2099,20 @@ export function TableView({
     [propertyById, t],
   );
 
+  // Inline row edits are single-issue writes like the picker in the issue
+  // detail or the right-click menu, so they route on the same gate: a status
+  // change that promotes an agent-owned issue out of the backlog category
+  // starts a run, and must confirm rather than fire from one click (MUL-6463).
   const updateIssue = useCallback(
-    (issueId: string, updates: Partial<UpdateIssueRequest>) =>
-      actions?.updateIssue(issueId, updates),
-    [actions],
+    (issue: Issue, updates: Partial<UpdateIssueRequest>) => {
+      const intent = runConfirmIntent(issue, updates, { entryOf });
+      if (intent) {
+        openModal("issue-run-confirm", intent);
+        return;
+      }
+      actions?.updateIssue(issue.id, updates);
+    },
+    [actions, entryOf, openModal],
   );
 
   const openIssue = useCallback(
@@ -2309,7 +2325,7 @@ export function TableView({
             case "identifier":
               return issue.identifier;
             case "status":
-              return t(($) => $.status[issue.status]);
+              return resolveStatusLabel(issue.status);
             case "priority":
               return t(($) => $.priority[issue.priority]);
             case "assignee":

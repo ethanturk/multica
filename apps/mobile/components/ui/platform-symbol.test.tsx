@@ -31,7 +31,7 @@ vi.mock("@expo/vector-icons", () => ({
 describe("PlatformSymbol", () => {
   beforeEach(() => {
     // react-test-renderer on React 19 requires the act environment flag.
-     
+
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     mocks.imageProps.length = 0;
     mocks.iconProps.length = 0;

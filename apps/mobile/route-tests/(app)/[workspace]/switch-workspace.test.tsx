@@ -85,7 +85,7 @@ describe("SwitchWorkspaceRoute", () => {
   let renderer: ReactTestRenderer | null = null;
 
   beforeEach(() => {
-     
+
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     mocks.alertMock.mockReset();
     mocks.dismiss.mockReset();

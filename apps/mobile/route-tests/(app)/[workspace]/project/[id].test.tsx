@@ -168,7 +168,7 @@ describe("ProjectDetail", () => {
   let renderer: ReactTestRenderer | null = null;
 
   beforeEach(() => {
-     
+
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     mocks.alertMock.mockReset();
     mocks.openUrl.mockReset();

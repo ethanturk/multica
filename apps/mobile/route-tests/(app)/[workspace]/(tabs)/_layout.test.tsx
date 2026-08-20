@@ -75,7 +75,7 @@ describe("TabsLayout", () => {
   let renderer: ReactTestRenderer | null = null;
 
   beforeEach(() => {
-     
+
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     mocks.tabsScreens.length = 0;
     mocks.tabsProps.length = 0;

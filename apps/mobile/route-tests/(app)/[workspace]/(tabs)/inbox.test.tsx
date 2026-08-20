@@ -131,7 +131,7 @@ describe("Inbox", () => {
 
   beforeEach(() => {
     // react-test-renderer on React 19 requires the act environment flag.
-     
+
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     mocks.iconButtons.length = 0;
     mocks.rowProps.length = 0;

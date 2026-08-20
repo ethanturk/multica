@@ -125,7 +125,7 @@ describe("WorkspaceLayout", () => {
   let renderer: ReactTestRenderer | null = null;
 
   beforeEach(() => {
-     
+
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     mocks.stackScreens.length = 0;
     mocks.redirects.length = 0;
