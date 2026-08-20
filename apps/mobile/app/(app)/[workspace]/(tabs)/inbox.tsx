@@ -1,6 +1,5 @@
 import { useMemo } from "react";
 import {
-  ActionSheetIOS,
   Alert,
   FlatList,
   View,
@@ -28,6 +27,7 @@ import {
 import { useWorkspaceStore } from "@/data/workspace-store";
 import { useColorScheme } from "@/lib/use-color-scheme";
 import { THEME } from "@/lib/theme";
+import { showPlatformActionSheet } from "@/lib/action-sheet";
 import { deduplicateInboxItems } from "@/lib/inbox-display";
 
 export default function Inbox() {
@@ -76,40 +76,36 @@ export default function Inbox() {
   // first (most common batch op); "Archive all" is destructive so it gets
   // the iOS red treatment + Alert confirm.
   const onPressMenu = () => {
-    const options = [
-      "Cancel",
-      "Mark all read",
-      "Archive all read",
-      "Archive completed",
-      "Archive all",
-    ];
-    ActionSheetIOS.showActionSheetWithOptions(
-      {
-        options,
-        cancelButtonIndex: 0,
-        destructiveButtonIndex: 4,
-        title: "Inbox",
-      },
-      (i) => {
-        if (i === 1) markAllRead.mutate();
-        else if (i === 2) archiveAllRead.mutate();
-        else if (i === 3) archiveCompleted.mutate();
-        else if (i === 4) {
-          Alert.alert(
-            "Archive all?",
-            "This archives every inbox item, read or unread. You can still find them via the issue pages.",
-            [
-              { text: "Cancel", style: "cancel" },
-              {
-                text: "Archive all",
-                style: "destructive",
-                onPress: () => archiveAll.mutate(),
-              },
-            ],
-          );
-        }
-      },
-    );
+    showPlatformActionSheet({
+      title: "Inbox",
+      options: [
+        { label: "Mark all read", onPress: () => markAllRead.mutate() },
+        { label: "Archive all read", onPress: () => archiveAllRead.mutate() },
+        {
+          label: "Archive completed",
+          onPress: () => archiveCompleted.mutate(),
+        },
+        {
+          label: "Archive all",
+          style: "destructive",
+          onPress: () => {
+            Alert.alert(
+              "Archive all?",
+              "This archives every inbox item, read or unread. You can still find them via the issue pages.",
+              [
+                { text: "Cancel", style: "cancel" },
+                {
+                  text: "Archive all",
+                  style: "destructive",
+                  onPress: () => archiveAll.mutate(),
+                },
+              ],
+            );
+          },
+        },
+        { label: "Cancel", style: "cancel" },
+      ],
+    });
   };
 
   return (

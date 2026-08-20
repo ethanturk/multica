@@ -139,6 +139,7 @@ func writeWorkspacesRootMarkerAtomic(path string, data []byte) error {
 // QwenPaw:      skills → {workDir}/.qwenpaw/skills/{name}/SKILL.md  (native project-level discovery)
 // MiniMax Code: skills → {workDir}/.minimax/skills/{name}/SKILL.md  (native project-level discovery)
 // Antigravity: skills → {workDir}/.agents/skills/{name}/SKILL.md  (native discovery — see https://antigravity.google/docs/gcli-migration "Workspace skills")
+// Dirge:       skills → {workDir}/.dirge/skills/{name}/SKILL.md  (native discovery)
 // Default:     skills → {workDir}/.agent_context/skills/{name}/SKILL.md
 //
 // manifest, when non-nil, is populated with every file we created and every
@@ -431,6 +432,10 @@ func skillsDirPath(workDir, provider string) string {
 		// workspace skill layout; see https://antigravity.google/docs/gcli-migration
 		// under "Workspace skills".
 		return filepath.Join(workDir, ".agents", "skills")
+	case "dirge":
+		// Dirge auto-discovers project-level skills from .dirge/skills/ in
+		// the workdir.
+		return filepath.Join(workDir, ".dirge", "skills")
 	case "grok":
 		// Grok Build CLI discovers project-level skills from .grok/skills/
 		// (and also scans .agents/skills/). Prefer the native .grok tree.

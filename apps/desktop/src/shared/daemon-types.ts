@@ -10,6 +10,18 @@ export type DaemonState =
   // this, an auth failure silently sticks at "starting" forever — see #3512.
   | "auth_expired";
 
+export type UITestCapabilityState =
+  | "unavailable"
+  | "installing"
+  | "ready"
+  | "broken";
+
+export interface UITestCapabilityStatus {
+  status: UITestCapabilityState;
+  version?: string;
+  error?: string;
+}
+
 export interface DaemonStatus {
   state: DaemonState;
   pid?: number;
@@ -32,6 +44,8 @@ export interface DaemonStatus {
    * never disables the toggles for a normally-managed native daemon. See #3916.
    */
   externallyManaged?: boolean;
+  /** Managed browser-testing runtime reported by newer daemons. */
+  uiTest?: UITestCapabilityStatus;
 }
 
 export interface DaemonPrefs {
@@ -68,6 +82,106 @@ export const DAEMON_STATE_LABELS: Record<DaemonState, string> = {
   cli_not_found: "Setup Failed",
   auth_expired: "Sign-in required",
 };
+
+const UI_TEST_PRESENTATION: Record<
+  UITestCapabilityState,
+  { label: string; description: string; color: string }
+> = {
+  unavailable: {
+    label: "Not installed",
+    description: "Install browser support to run UI testing tasks.",
+    color: "bg-muted-foreground/40",
+  },
+  installing: {
+    label: "Installing…",
+    description: "Installing browser support.",
+    color: "bg-amber-500 animate-pulse",
+  },
+  ready: {
+    label: "Ready",
+    description: "Browser support is ready for UI testing tasks.",
+    color: "bg-emerald-500",
+  },
+  broken: {
+    label: "Needs repair",
+    description: "Browser support needs repair.",
+    color: "bg-red-500",
+  },
+};
+
+export function getUITestCapabilityPresentation(
+  capability: UITestCapabilityStatus,
+): { label: string; description: string; color: string } {
+  const presentation = UI_TEST_PRESENTATION[capability.status];
+  return capability.status === "broken" && capability.error
+    ? { ...presentation, description: capability.error }
+    : presentation;
+}
+
+export function getUITestCapabilityAction(
+  capability: UITestCapabilityStatus,
+  cliAvailable: boolean,
+): { label: string; disabled: boolean } | undefined {
+  switch (capability.status) {
+    case "unavailable":
+      return { label: "Install", disabled: !cliAvailable };
+    case "installing":
+      return { label: "Installing…", disabled: true };
+    case "ready":
+      return undefined;
+    case "broken":
+      return { label: "Repair", disabled: !cliAvailable };
+  }
+}
+
+export function createUITestStatusObserver(
+  loadStatus: () => Promise<UITestCapabilityStatus>,
+  publish: (status: UITestCapabilityStatus | null) => void,
+): {
+  observe(status: Pick<DaemonStatus, "profile" | "uiTest">): void;
+  dispose(): void;
+} {
+  let initialized = false;
+  let activeProfile = "";
+  let requestGeneration = 0;
+
+  return {
+    observe(status) {
+      const profile = status.profile ?? "";
+      const profileChanged = !initialized || profile !== activeProfile;
+      if (profileChanged) {
+        initialized = true;
+        activeProfile = profile;
+        requestGeneration++;
+        publish(null);
+      }
+
+      if (status.uiTest) {
+        requestGeneration++;
+        publish(status.uiTest);
+        return;
+      }
+      if (!profileChanged) return;
+
+      const request = ++requestGeneration;
+      loadStatus()
+        .then((capability) => {
+          if (request === requestGeneration) publish(capability);
+        })
+        .catch(() => {
+          if (request === requestGeneration) {
+            publish({
+              status: "broken",
+              error: "UI testing status check failed.",
+            });
+          }
+        });
+    },
+    dispose() {
+      requestGeneration++;
+    },
+  };
+}
 
 export function formatUptime(uptime?: string): string {
   if (!uptime) return "";

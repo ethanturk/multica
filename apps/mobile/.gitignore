@@ -13,7 +13,6 @@ web-build/
 
 # Native (Expo prebuild output)
 ios/
-android/
 
 # Override the root .gitignore "data/" rule (intended for backend runtime
 # dirs). apps/mobile/data/ is source — TanStack Query queries, mutations,

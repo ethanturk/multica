@@ -1,7 +1,7 @@
 // Package agent provides a unified interface for executing prompts via
 // coding agents (Claude Code, CodeBuddy, Codex, Copilot, OpenCode, DevEco Code,
-// OpenClaw, Hermes, Pi, Oh-My-Pi, Cursor, Kimi, Reasonix, Kiro, Antigravity, Qoder,
-// Trae, Grok, Qwen Code, QwenPaw, MiniMax Code). It
+// OpenClaw, Hermes, Pi, Oh-My-Pi, Cursor, Kimi, Reasonix, Kiro, Antigravity, Dirge,
+// Qoder, Trae, Grok, Qwen Code, QwenPaw, MiniMax Code). It
 // mirrors the happy-cli AgentBackend pattern, translated to idiomatic Go.
 package agent
 
@@ -243,7 +243,7 @@ type Result struct {
 
 // Config configures a Backend instance.
 type Config struct {
-	ExecutablePath string            // path to CLI binary (claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, cursor, kimi, reasonix, dsh, kiro-cli, agy, qodercli, qoderclicn, traecli, grok, qwen, qwenpaw, mcode, dim)
+	ExecutablePath string            // path to CLI binary (claude, codebuddy, codex, copilot, opencode, openclaw, hermes, pi, cursor, kimi, reasonix, dsh, kiro-cli, agy, dirge, qodercli, qoderclicn, traecli, grok, qwen, qwenpaw, mcode)
 	CLIVersion     string            // detected version paired with ExecutablePath; observation only, never used to choose behavior
 	Env            map[string]string // extra environment variables
 	Logger         *slog.Logger
@@ -278,7 +278,7 @@ type Config struct {
 }
 
 // New creates a Backend for the given agent type.
-// Supported types: "claude", "codebuddy", "codex", "copilot", "opencode", "deveco", "openclaw", "hermes", "pi", "cursor", "kimi", "reasonix", "dsh", "kiro", "antigravity", "qoder", "qoderclicn", "traecli", "grok", "qwen", "qwenpaw", "mcode".
+// Supported types: "claude", "codebuddy", "codex", "copilot", "opencode", "deveco", "openclaw", "hermes", "pi", "cursor", "kimi", "reasonix", "dsh", "kiro", "antigravity", "dirge", "qoder", "qoderclicn", "traecli", "grok", "qwen", "qwenpaw", "mcode".
 //
 // SupportedTypes is the canonical whitelist of agent types eligible to back a
 // custom runtime profile. It MUST stay in lockstep with the
@@ -287,7 +287,7 @@ type Config struct {
 // add deveco, migration 179 to add grok, migration 202 to add qwen,
 // migration 242 to add qoderclicn, migration 253 to add qwenpaw,
 // migration 254 to add reasonix, migration 313 to add dsh, migration 327 to
-// add mcode): a
+// add mcode, and fork migration 901 to add dirge): a
 // custom runtime profile may only
 // be based on a backend Multica officially supports.
 // qoder and qoderclicn share the same ACP backend; keeping both provider keys
@@ -313,6 +313,7 @@ var SupportedTypes = []string{
 	"dsh",
 	"kiro",
 	"antigravity",
+	"dirge",
 	"qoder",
 	"qoderclicn",
 	"traecli",
@@ -409,6 +410,8 @@ func New(agentType string, cfg Config) (Backend, error) {
 		return &kiroBackend{cfg: cfg}, nil
 	case "antigravity":
 		return &antigravityBackend{cfg: cfg}, nil
+	case "dirge":
+		return &dirgeBackend{cfg: cfg}, nil
 	case "qoder", "qoderclicn":
 		return &qoderBackend{cfg: cfg, defaultExecutable: qoderDefaultBinary(agentType)}, nil
 	case "traecli":
@@ -450,6 +453,7 @@ var launchHeaders = map[string]string{
 	"copilot":     "copilot (json)",
 	"cursor":      "cursor-agent (stream-json)",
 	"deveco":      "deveco run (json)",
+	"dirge":       "dirge --print (json)",
 	"hermes":      "hermes acp",
 	"kimi":        "kimi acp",
 	"reasonix":    "reasonix acp",

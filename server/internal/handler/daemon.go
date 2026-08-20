@@ -1896,23 +1896,15 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 	// not — because its absence is what tells an upgraded daemon it is talking
 	// to a server too old to have answered the question (MUL-5811).
 	resp.LeaderRoleResolved = true
-	// Agent-trigger plugin hooks, as tools. A failure here degrades to no
-	// tools rather than failing the claim: a plugin that cannot be listed must
-	// not stop an agent from working on the issue.
-	if h.PluginService != nil && h.pluginsV1Enabled(r.Context()) {
-		if tools, toolErr := h.PluginService.AgentHookTools(r.Context(), parseUUID(runtimeWorkspaceID)); toolErr != nil {
-			slog.Warn("plugins: could not list agent hook tools", "workspace_id", runtimeWorkspaceID, "error", toolErr)
-		} else {
-			resp.PluginHookTools = tools
-		}
-		// mcp-transport hooks ride the EXISTING broker: the connection shape is
-		// what validatePinnedRemoteMCPTools already reads, so an approved tool
-		// that went missing or whose schema drifted refuses at startup without
-		// any new enforcement code.
-		if connections, connErr := h.PluginService.AgentMCPConnections(r.Context(), parseUUID(runtimeWorkspaceID)); connErr != nil {
-			slog.Warn("plugins: could not list agent MCP connections", "workspace_id", runtimeWorkspaceID, "error", connErr)
-		} else if len(connections) > 0 {
-			resp.RemoteMCPConnections = append(resp.RemoteMCPConnections, connections...)
+	if tools, err := h.Queries.ListEnabledDeterministicToolsByWorkspace(r.Context(), runtime.WorkspaceID); err != nil {
+		slog.Warn("task claim: failed to load deterministic tools", "workspace_id", runtimeWorkspaceID, "error", err)
+	} else {
+		for _, tool := range tools {
+			resp.DeterministicTools = append(resp.DeterministicTools, DeterministicToolData{
+				Name:        tool.Name,
+				Description: tool.Description,
+				Source:      tool.Source,
+			})
 		}
 	}
 	supportsCoalescedComments := requestHasClientCapability(r, protocol.DaemonCapabilityCoalescedCommentsV1)

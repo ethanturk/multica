@@ -15,6 +15,7 @@ import type {
   DaemonStatus,
   DaemonPrefs,
   LocalRuntimeProbe,
+  UITestCapabilityStatus,
 } from "../shared/daemon-types";
 
 interface DesktopAPI {
@@ -126,6 +127,8 @@ interface DaemonAPI {
   stop: () => Promise<{ success: boolean; error?: string }>;
   restart: () => Promise<{ success: boolean; error?: string }>;
   getStatus: () => Promise<DaemonStatus>;
+  getUITestStatus: () => Promise<UITestCapabilityStatus>;
+  installUITest: () => Promise<UITestCapabilityStatus>;
   probeRuntimes: () => Promise<LocalRuntimeProbe>;
   getHostName: () => Promise<string>;
   onStatusChange: (callback: (status: DaemonStatus) => void) => () => void;

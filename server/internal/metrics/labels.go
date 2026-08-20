@@ -141,6 +141,7 @@ var (
 		"copilot":       "copilot",
 		"cursor":        "cursor",
 		"dsh":           "dsh",
+		"dirge":         "dirge",
 		"gemini":        "gemini",
 		"grok":          "grok",
 		"hermes":        "hermes",
