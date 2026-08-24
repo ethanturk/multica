@@ -307,7 +307,7 @@ Installing and authenticating them: [Install an agent runtime](https://multica.a
                           ▼
    ┌──────────────┐   ┌──────────────┐   ┌──────────────────┐
    │   Next.js    │──>│  Go backend  │──>│   PostgreSQL     │
-   │   frontend   │<──│  (Chi + WS)  │<──│   (pgvector)     │
+   │   frontend   │<──│  (Chi + WS)  │<──│   (17)           │
    └──────────────┘   └──────┬───────┘   └──────────────────┘
                              │  tasks over WebSocket
                       ┌──────┴───────┐
@@ -326,7 +326,7 @@ Installing and authenticating them: [Install an agent runtime](https://multica.a
 | Desktop | Electron, sharing the web UI packages |
 | Mobile | Expo / React Native (iOS) |
 | Backend | Go (Chi router, sqlc, gorilla/websocket) |
-| Database | PostgreSQL 17 with pgvector |
+| Database | PostgreSQL 17 (`pgcrypto` + `pg_trgm`) |
 | Agent runtime | Local daemon executing any of the 23 agent CLIs above |
 
 ---

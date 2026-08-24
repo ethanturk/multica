@@ -236,6 +236,37 @@ func TestBuildQuickCreatePromptParentPinning(t *testing.T) {
 	}
 }
 
+// TestBuildPromptSquadLeaderNoActionFailureFallback locks the escape hatch added
+// in MUL-6622 / GH #7487. The comment prohibition is conditional on the
+// `squad activity` call succeeding — the server only rejects a leader comment
+// once the no_action activity exists — so a failed call must not end the turn in
+// silence. The fallback is capped at ONE comment so it cannot collide with the
+// one-comment-per-turn rule.
+func TestBuildPromptSquadLeaderNoActionFailureFallback(t *testing.T) {
+	out := BuildPrompt(Task{
+		IssueID:               "issue-123",
+		TriggerCommentID:      "comment-456",
+		TriggerCommentContent: "LGTM",
+		TriggerAuthorType:     "member",
+		TriggerAuthorName:     "Bohan",
+		IsLeaderTask:          true,
+		LeaderRoleResolved:    true,
+		Agent: &AgentData{
+			Instructions: "Some instructions\n\n## Squad Operating Protocol\n\nYou are the LEADER...",
+		},
+	}, "claude")
+
+	for _, want := range []string{
+		"conditional on that call SUCCEEDING",
+		"post exactly ONE short comment",
+		"does not license a second one",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("squad leader no_action rule must contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
 // TestBuildPromptSquadLeaderNoActionForMemberTrigger verifies that the
 // squad leader no_action prohibition is injected in the per-turn prompt
 // regardless of whether the triggering comment was posted by an agent or
@@ -1727,4 +1758,48 @@ func TestChatChannelDeliversFilesDefaultsOffAcrossVersions(t *testing.T) {
 	if !strings.Contains(buildChatPrompt(delivering), "run `multica attachment upload <local-path>`") {
 		t.Error("a server that reported file delivery did not produce the upload guidance")
 	}
+}
+
+// TestSharedLocalDirectoryBlock covers the notice a lock-exempt turn gets. It
+// is opt-in per run rather than derived from the Task, because whether the
+// directory is shared depends on the daemon's own resolution of the resource —
+// something the claimed Task does not carry.
+func TestSharedLocalDirectoryBlock(t *testing.T) {
+	t.Parallel()
+
+	chat := Task{ChatSessionID: "sess-1", ChatMessage: "how does the parser work?"}
+
+	t.Run("absent by default", func(t *testing.T) {
+		out := BuildPrompt(chat, "claude")
+		if strings.Contains(out, "Shared working directory") {
+			t.Fatalf("notice leaked into a run with no local_directory:\n%s", out)
+		}
+	})
+
+	t.Run("present when the turn runs unlocked in a shared directory", func(t *testing.T) {
+		out := BuildPrompt(chat, "claude", WithSharedLocalDirectory())
+		if !strings.Contains(out, "Shared working directory") {
+			t.Fatalf("notice missing:\n%s", out)
+		}
+		// The non-inferable fact is the concurrent writer. Without it the block
+		// is just style advice.
+		if !strings.Contains(out, "another task on this machine may be editing it") {
+			t.Fatalf("notice does not state that a sibling task may be writing:\n%s", out)
+		}
+		// It must stay guidance: turning it into a prohibition would promise an
+		// isolation the daemon does not enforce for the user's own editor either.
+		if strings.Contains(out, "Do NOT write") || strings.Contains(out, "must not write") {
+			t.Fatalf("notice hardened into a prohibition the system does not enforce:\n%s", out)
+		}
+	})
+
+	t.Run("appended after the cacheable prefix", func(t *testing.T) {
+		// Run-scoped blocks go at the end so a resumed session's cached prefix
+		// is unchanged by them (MUL-5377).
+		out := BuildPrompt(chat, "claude", WithSharedLocalDirectory())
+		body := buildChatPrompt(chat)
+		if !strings.HasPrefix(out, body) {
+			t.Fatalf("notice was not appended after the chat body:\n%s", out)
+		}
+	})
 }
