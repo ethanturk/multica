@@ -55,6 +55,7 @@ export type NavLabelKey =
   | "usage"
   | "runtimes"
   | "skills"
+  | "deterministic_tools"
   | "settings";
 
 /** Stable identifier for each workspace navigation page. */
@@ -70,6 +71,7 @@ export type WorkspacePageKey =
   | "usage"
   | "runtimes"
   | "skills"
+  | "deterministicTools"
   | "settings";
 
 export interface WorkspacePage {
@@ -97,6 +99,11 @@ export const WORKSPACE_PAGES: Record<WorkspacePageKey, WorkspacePage> = {
   usage: { segment: "usage", icon: "BarChart3", navKey: "usage" },
   runtimes: { segment: "runtimes", icon: "Monitor", navKey: "runtimes" },
   skills: { segment: "skills", icon: "BookOpenText", navKey: "skills" },
+  deterministicTools: {
+    segment: "deterministic-tools",
+    icon: "FileCode",
+    navKey: "deterministic_tools",
+  },
   settings: { segment: "settings", icon: "Settings", navKey: "settings" },
 };
 

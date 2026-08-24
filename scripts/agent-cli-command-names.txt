@@ -6,6 +6,7 @@ copilot
 cursor-agent
 deveco
 dim
+dirge
 dsh
 grok
 hermes

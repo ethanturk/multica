@@ -2,6 +2,7 @@ import { ActivityIndicator, View } from "react-native";
 import { Redirect } from "expo-router";
 import { useAuthStore } from "@/data/auth-store";
 import { useWorkspaceStore } from "@/data/workspace-store";
+import { getEntryRoute } from "@/lib/entry-route";
 
 /**
  * Entry redirect. AuthInitializer (in _layout.tsx) finishes auth + slug
@@ -15,8 +16,13 @@ export default function Index() {
   const user = useAuthStore((s) => s.user);
   const isLoading = useAuthStore((s) => s.isLoading);
   const slug = useWorkspaceStore((s) => s.currentWorkspaceSlug);
+  const route = getEntryRoute({
+    isLoading,
+    user,
+    workspaceSlug: slug,
+  });
 
-  if (isLoading) {
+  if (!route) {
     return (
       <View className="flex-1 items-center justify-center bg-background">
         <ActivityIndicator />
@@ -24,7 +30,5 @@ export default function Index() {
     );
   }
 
-  if (!user) return <Redirect href="/login" />;
-  if (!slug) return <Redirect href="/select-workspace" />;
-  return <Redirect href={`/${slug}/inbox`} />;
+  return <Redirect href={route} />;
 }

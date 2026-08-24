@@ -99,6 +99,7 @@ const PAGE_KEYWORDS: Record<WorkspacePageKey, string[]> = {
   usage: ["usage", "analytics", "stats", "metrics", "统计", "分析", "用量"],
   runtimes: ["runtimes", "environments", "machines", "运行时"],
   skills: ["skills", "library", "技能"],
+  deterministicTools: ["deterministic", "tools", "dettools"],
   settings: ["settings", "config", "preferences", "设置", "配置"],
 };
 
