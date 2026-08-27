@@ -510,10 +510,6 @@ func findTaskLocks(t *testing.T, dir string) []string {
 	return found
 }
 
-func discardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
-
 // TestLockReusablePriorEnvRootLocksAValidatedRoot is the positive half: a fully
 // provenanced managed workdir IS accepted, the lock lands inside the workspaces
 // root, and a second continuation of the same task is excluded from it while

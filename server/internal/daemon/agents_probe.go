@@ -278,6 +278,9 @@ var probeAgentCLIs = func() map[string]AgentEntry {
 	if e, ok := probe("MULTICA_ZEROCLAW_PATH", "zeroclaw", ""); ok {
 		agents["zeroclaw"] = e
 	}
+	if e, ok := probe("MULTICA_DIRGE_PATH", "dirge", "MULTICA_DIRGE_MODEL"); ok {
+		agents["dirge"] = e
+	}
 	return agents
 }
 

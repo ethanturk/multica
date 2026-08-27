@@ -361,6 +361,14 @@ import {
   EMPTY_TELEGRAM_INSTALLATION,
   EMPTY_LIST_TELEGRAM_INSTALLATIONS_RESPONSE,
   EMPTY_REDEEM_TELEGRAM_BINDING_TOKEN_RESPONSE,
+  DeterministicToolResultSchema,
+  type DeterministicToolResult,
+  EMPTY_DETERMINISTIC_TOOL_RESULT,
+  DeterministicToolSchema,
+  DeterministicToolListSchema,
+  type DeterministicTool,
+  EMPTY_DETERMINISTIC_TOOL,
+  EMPTY_DETERMINISTIC_TOOL_LIST,
   EMPTY_BILLING_BALANCE,
   EMPTY_BILLING_TRANSACTIONS_PAGE,
   EMPTY_BILLING_BATCHES_PAGE,
@@ -1602,6 +1610,10 @@ export class ApiClient {
     return this.fetch(`/api/runtimes?${search}`, {
       headers: workspaceHeader(workspaceSlug),
     });
+  }
+
+  async getLatestCliRelease(): Promise<{ tag_name: string | null; repo: string }> {
+    return this.fetch(`/api/runtimes/latest-version`);
   }
 
   async listCloudRuntimeNodes(
@@ -2989,6 +3001,61 @@ export class ApiClient {
       method: "POST",
       body: JSON.stringify(data),
     });
+  }
+
+  // Deterministic tools — compile + run a user-authored Go step in the sandbox
+  // and return its Result envelope. The workspace is taken from the
+  // X-Workspace-Slug header (set by authHeaders), like the skills endpoints.
+  async testDeterministicTool(payload: {
+    source: string;
+    input?: Record<string, unknown>;
+  }): Promise<DeterministicToolResult> {
+    const raw = await this.fetch<unknown>("/api/deterministic-tools/test", {
+      method: "POST",
+      body: JSON.stringify({ source: payload.source, input: payload.input ?? {} }),
+    });
+    return parseWithFallback(raw, DeterministicToolResultSchema, EMPTY_DETERMINISTIC_TOOL_RESULT, {
+      endpoint: "POST /api/deterministic-tools/test",
+    });
+  }
+
+  async listDeterministicTools(): Promise<DeterministicTool[]> {
+    const raw = await this.fetch<unknown>("/api/deterministic-tools");
+    return parseWithFallback(raw, DeterministicToolListSchema, EMPTY_DETERMINISTIC_TOOL_LIST, {
+      endpoint: "GET /api/deterministic-tools",
+    });
+  }
+
+  async createDeterministicTool(payload: {
+    name: string;
+    description?: string;
+    source?: string;
+    enabled?: boolean;
+  }): Promise<DeterministicTool> {
+    const raw = await this.fetch<unknown>("/api/deterministic-tools", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    return parseWithFallback(raw, DeterministicToolSchema, EMPTY_DETERMINISTIC_TOOL, {
+      endpoint: "POST /api/deterministic-tools",
+    });
+  }
+
+  async updateDeterministicTool(
+    id: string,
+    payload: { name?: string; description?: string; source?: string; enabled?: boolean },
+  ): Promise<DeterministicTool> {
+    const raw = await this.fetch<unknown>(`/api/deterministic-tools/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+    return parseWithFallback(raw, DeterministicToolSchema, EMPTY_DETERMINISTIC_TOOL, {
+      endpoint: "PUT /api/deterministic-tools/{id}",
+    });
+  }
+
+  async deleteDeterministicTool(id: string): Promise<void> {
+    await this.fetch(`/api/deterministic-tools/${encodeURIComponent(id)}`, { method: "DELETE" });
   }
 
   async updateSkill(id: string, data: UpdateSkillRequest): Promise<Skill> {

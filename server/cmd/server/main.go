@@ -26,6 +26,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/scheduler"
 	"github.com/multica-ai/multica/server/internal/service"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/detsteps"
 	"github.com/multica-ai/multica/server/pkg/featureflag"
 	"github.com/multica-ai/multica/server/pkg/llm"
 	"github.com/redis/go-redis/v9"
@@ -270,6 +271,10 @@ func jwtSecretBootError(jwtSecret, appEnv string) error {
 }
 
 func main() {
+	// If re-exec'd as a deterministic-step sandbox, run the one-shot step and
+	// exit before any server initialization. Must be first.
+	detsteps.MaybeRunStepChild()
+
 	logger.Init()
 	// Warn about missing configuration
 	if err := jwtSecretBootError(os.Getenv("JWT_SECRET"), os.Getenv("APP_ENV")); err != nil {

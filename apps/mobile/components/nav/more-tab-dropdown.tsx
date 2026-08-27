@@ -23,8 +23,8 @@
  * leaves the real tab button entirely alone.
  *
  * Visual conventions inside the popover (apps/mobile/CLAUDE.md):
- *   - All glyphs are SF Symbols rendered via expo-image (`sf:` source),
- *     so they share the visual language of the bottom tab bar icons.
+ *   - Glyphs go through `PlatformSymbol`, which keeps SF Symbols on iOS
+ *     and maps to Ionicons on Android.
  *   - All colours route through THEME tokens (foreground /
  *     mutedForeground / secondary), so dark mode is automatic.
  *   - Workspace is collapsed to a single `<WorkspaceCard>` row (icon +
@@ -36,7 +36,6 @@
  */
 import { useMemo } from "react";
 import { Image, Pressable, View } from "react-native";
-import { Image as ExpoImage } from "expo-image";
 import { router, usePathname } from "expo-router";
 import { useQuery } from "@tanstack/react-query";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -51,6 +50,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Text } from "@/components/ui/text";
 import { WorkspaceAvatar } from "@/components/workspace/workspace-avatar";
+import { PlatformSymbol } from "@/components/ui/platform-symbol";
 import { workspaceListOptions } from "@/data/queries/workspaces";
 import { useAuthStore } from "@/data/auth-store";
 import { useWorkspaceStore } from "@/data/workspace-store";
@@ -67,8 +67,7 @@ const TAB_BAR_HEIGHT = 49;
 
 interface NavItem {
   label: string;
-  /** SF Symbol name, rendered via expo-image `source: "sf:<name>"`. */
-  icon: string;
+  icon: "pin" | "list.bullet" | "square.stack";
   /** Path under /:slug/ — final href is `/${slug}${path}`. */
   path: string;
 }
@@ -158,10 +157,10 @@ export function MoreTabDropdownAnchor({
                 isActive(item.path) && "bg-secondary",
               )}
             >
-              <ExpoImage
-                source={`sf:${item.icon}`}
+              <PlatformSymbol
+                name={item.icon}
                 tintColor={t.foreground}
-                style={{ width: 18, height: 18 }}
+                size={18}
               />
               <Text className="text-sm text-foreground">{item.label}</Text>
             </DropdownMenuItem>
@@ -222,10 +221,10 @@ function UserCard({
           </Text>
         ) : null}
       </View>
-      <ExpoImage
-        source="sf:chevron.right"
+      <PlatformSymbol
+        name="chevron.right"
         tintColor={chevronTint}
-        style={{ width: 12, height: 12 }}
+        size={12}
       />
     </DropdownMenuItem>
   );
@@ -283,10 +282,10 @@ function WorkspaceCard({
         </Text>
       </View>
       {canSwitch ? (
-        <ExpoImage
-          source="sf:chevron.right"
+        <PlatformSymbol
+          name="chevron.right"
           tintColor={chevronTint}
-          style={{ width: 12, height: 12 }}
+          size={12}
         />
       ) : null}
     </DropdownMenuItem>
