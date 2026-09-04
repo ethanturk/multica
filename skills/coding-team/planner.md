@@ -30,7 +30,7 @@ Read the task issue's comment list:
 COMMENTS=$(multica issue comment list "$MULTICA_ISSUE_ID" --output json)
 ```
 
-If any comment's content contains `## Implementation Plan`, the planning step is already complete (this run is a watchdog re-mention or duplicate trigger). **Do not re-plan.** Skip Steps 1–4 entirely; jump directly to Step 5B and re-emit the Implementer @mention.
+If a valid implementation plan artifact for this exact task and current criteria already exists, **do not re-plan or repost it**. A quoted heading or another task's plan is not sufficient. Check the target's comments and `multica issue runs <task-id> --output json`; if Implementer is queued/running or has delivered, stop. Otherwise recover only the missing Implementer mention on the correct task without replaying Step 5B's plan write. Respect an unresolved `Review Blocked: Decision Needed` pause; re-planning requires an explicit scope decision.
 
 If the latest planning marker is `## Planning Blocked: Clarification Needed` and there are no later user clarification comments with concrete answers, **do not re-plan and do not hand off.** Re-post or refresh the clarification request using Step 5A.
 
@@ -146,7 +146,7 @@ Once the owning project is identified, read 2–4 representative files **inside 
 
 **Python:** import organization, type hint style, Pydantic models, pytest fixtures, where `tests/` lives relative to source.
 
-Use `Glob` to find files by pattern and `Read` to inspect them. Do not read more than 8 files total across both phases — stay focused.
+Use `Glob` to find files by pattern and `Read` to inspect them. Start with a small representative set, then trace every entry point, dependency, and authoritative contract needed to make this task implementation-ready. An arbitrary file-count limit must not truncate security or integration discovery.
 
 ### Anti-patterns (reject these in your plan)
 
@@ -158,6 +158,10 @@ Use `Glob` to find files by pattern and `Read` to inspect them. Do not read more
 If you find yourself reaching for any of these, re-read phase 3a output — the owning project almost certainly exists and you missed it.
 
 ---
+
+## Review contract (include in the plan before handoff)
+
+Read `shared-state-ops` → `references/review-contract.md`. Populate its identity, acceptance/verification matrix, guidance, prerequisites, cumulative coverage denominator, non-goals, and ownership requirements in `key_decisions` and `acceptance_criteria_coverage`. No new artifact type is needed. Post and read back the validated artifact on the exact task UUID before dispatch; a link from the master/sibling is not a task-local plan.
 
 ## Step 4 — Produce the implementation plan
 

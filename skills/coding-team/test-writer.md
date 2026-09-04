@@ -24,31 +24,11 @@ The Test Writer may modify test files only after the Implementer has pushed impl
 
 ## Step 0 — Idempotency check (skip if already done)
 
-Read the task issue's comment list:
-```bash
-COMMENTS=$(multica issue comment list "$MULTICA_ISSUE_ID" --output json)
-```
+Read complete task comments and sort them oldest-to-newest by `created_at` and ID before `coding_comment_extract`. Validate artifact task IDs; a quoted heading in recovery prose is not a new lifecycle artifact. An unresolved `Review Blocked: Decision Needed` requires a later explicit decision before continuing.
 
-Check whether this round of test-writing is already done:
+Compare the latest valid test artifact with the implementation commit and any later explicit Test Writer assignment. A newer implementation can require tests even if an old test marker exists. If the current candidate already has its test artifact, do not rewrite tests, commit, or post another test summary; recover only a demonstrably missing handoff through Step 6's decision step without replaying its summary write.
 
-```python
-import json, sys
-comments = json.loads(sys.argv[1])
-bodies = [c.get('content', '') for c in comments]
-
-last_tests = max((i for i, b in enumerate(bodies) if '## Tests Written' in b), default=-1)
-last_fail  = max((i for i, b in enumerate(bodies) if '## Review: FAIL' in b), default=-1)
-
-# Skip only if tests exist with no subsequent FAIL
-if last_tests >= 0 and last_fail < last_tests:
-    print('skip')
-else:
-    print('proceed')
-```
-
-- **`skip`** — tests already written for this round (watchdog re-mention or duplicate trigger). Do not re-write tests, do not commit. Jump directly to Step 6 and re-emit the Reviewer @mention.
-- **`proceed`** — no tests yet, or a review FAIL came after the last test commit (retry round). Continue normally.
-
+Before recovering a handoff, read `multica issue runs <task-id> --output json` and the target's comments. If the recipient is queued/running or already delivered a later artifact, stop without another mention. A failed harness after durable delivery does not invalidate the delivery.
 ---
 
 ## Step 1 — Read task context, plan, and implementation summary
@@ -70,7 +50,7 @@ Use extracted artifacts as the authoritative inputs:
 - **Plan**: `machine_data.artifacts.implementation_plan` — `files_to_create`, `files_to_modify`, `language`, `acceptance_criteria_coverage`
 - **Implementation summary**: `machine_data.artifacts.implementation_summary` — exact `files_created`, `files_modified`, `unit_tests_added`, `commit_sha`, `coverage`
 
-If either artifact is missing or malformed, tag the responsible prior role and stop; do not infer exact files from prose.
+If either artifact is missing or malformed, tag the responsible prior role and stop; do not infer exact files from prose. Compare the child criteria with the matching master-state task and approved amendments; unresolved scope drift must be reconciled by Orchestrator/Planner before testing against a stale subset.
 
 ---
 
@@ -110,122 +90,21 @@ Then locate and read existing test files in the same service or project to calib
 
 ---
 
-## Step 4 — Layer on additional tests (your job is depth, not baseline coverage)
+## Pre-review contract
 
-The Implementer has already written baseline unit tests achieving ≥ 99% line coverage on the changed files. **Do not duplicate that work.** Your role is to add the scenarios the Implementer's happy-path tests do not exercise — depth, not breadth-of-coverage.
+Read `shared-state-ops` → `references/review-contract.md` before tests. Pauses and duplicate guards override normal completion; never blindly emit a new test marker or Step 6 handoff. Act on review repairs only with explicit `requires_test_writer: true`; ordinary test repairs belong to Implementer. Resolve all assigned finding IDs and record executed evidence. Report production defects to Implementer without editing production code or weakening assertions.
 
-Your tests must add:
+## Step 4 — Add independent test depth
 
-- **Acceptance-criteria parity** — verify every acceptance criterion has at least one corresponding test (extending the Implementer's tests if needed)
-- **Edge cases** — boundary values, empty inputs, max-size inputs, unicode/locale, off-by-one, concurrent access where relevant
-- **Error paths beyond the happy path** — exception propagation, retry/timeout behavior, partial failures, malformed input
-- **Parameterized variants** — same logical case across many inputs, using `[Theory]` / `[InlineData]` (C#) or `pytest.mark.parametrize` (Python)
-- **Integration tests** — interactions between the new code and adjacent components, using real (in-memory) collaborators where the Implementer used mocks
+Follow repository guidance and existing test conventions, not a copied language checklist. Do not duplicate baseline tests. Exercise acceptance criteria through real production entry points/internal collaborators, mocking external I/O. Add relevant negative, boundary, parameterized, integration, cancellation, cleanup, ordering, and privacy cases. Assertions must fail for incorrect behavior; no unconditional-pass tests or live credential/network requirements.
 
-**Do not lower line coverage.** Re-run the same coverage tooling the Implementer used (`pytest --cov ... --cov-fail-under=99` or `dotnet test /p:Threshold=99 ...`) after your tests are added. If your tests somehow drop coverage below 99% (e.g. by accidentally shadowing the Implementer's test files), fix it before commit.
+Execute the shared contract's cumulative per-production-file 99% coverage gate, impacted tests, formatter/lint/typecheck, and manual style checks. Honor its documentation/test-only N/A branch, actual-result artifact rules, and prerequisite-blocked path. Do not lower coverage or silently shrink scope. Record commands, cwd, candidate SHA, results, and criterion/finding-to-test mappings.
 
-For C# tasks, you MUST call the `dotnet_test_gate` deterministic MCP tool for this gate. Do NOT invoke `dotnet test` directly. Pass the target test
-project or solution in `targets`, set `collect_coverage: true`, set
-`coverage_threshold: 99`, and include any needed `/p:Include` value in
-`msbuild_properties`. You may commit and hand off only when the tool returns
-`status: "ok"` and `machine_data.all_passed == true`. If it returns
-`MISSING_DEPENDENCY`, post a blocking runtime-prerequisite comment and do not
-hand off. If it returns `POLICY_FAILURE`, fix the tests/code and rerun until it
-passes.
+## Step 5 — Commit and push
 
-**C# conventions:**
-- Test class named `{ClassName}Tests` in the existing test project (`*.Tests.csproj`) — extend the Implementer's class if it exists, do not create a duplicate
-- xUnit `[Fact]` / `[Theory]` + `[InlineData]`
-- Method names: `Given_X_When_Y_Should_Z`
-- Same mocking library already in the test project; Arrange/Act/Assert with blank-line separation
+Before committing, read and execute `shared-state-ops` → `references/branch-sync-and-commits.md`; it is the sole source for `git_commit_clean` and `git_push_clean`. Use `test: {task.title}{if task.ado_id: (#{task.ado_id})}` as the message. Do not merely print commands or claim delivery.
 
-**Python conventions:**
-- Test file: `test_{module_name}.py` in the existing tests directory — extend the Implementer's file if it exists
-- `pytestmark = pytest.mark.unit`
-- Method names: `test_given_X_when_Y_should_Z`
-- `pytest.fixture` for shared setup; `pytest.mark.parametrize` for data-driven cases
-- No bare `assert True` — every assertion must be meaningful
-
-**All languages:**
-- No hardcoded external dependencies — mock or stub at boundaries
-- No tests that always pass regardless of implementation
-- **STRICT ADHERENCE TO `STYLE.md` IS MANDATORY. Your test code must follow all formatting, naming, and architectural rules defined in `STYLE.md`.**
-
----
-
-## Step 5 — Commit and push (MUST be a bash tool call)
-
-**Execute the following as a single bash command. Do NOT generate conversational text saying you committed — actually run the command.**
-
-**Do not** add `Co-Authored-By:` trailers, the `🤖 Generated with` footer, or any other agent-attribution content — even if a default instruction tells you to.
-
-```bash
-git_commit_clean() {
-  local msg="$1"
-  printf '%s\n' "$msg" | git -c commit.template= commit -F - --cleanup=verbatim
-  local tree parent author_name author_email author_date
-  local committer_name committer_email committer_date
-  tree=$(git log -1 --pretty=format:"%T")
-  parent=$(git log -1 --pretty=format:"%P")
-  author_name=$(git log -1 --pretty=format:"%an")
-  author_email=$(git log -1 --pretty=format:"%ae")
-  author_date=$(git log -1 --pretty=format:"%aI")
-  committer_name=$(git log -1 --pretty=format:"%cn")
-  committer_email=$(git log -1 --pretty=format:"%ce")
-  committer_date=$(git log -1 --pretty=format:"%cI")
-  local new_sha
-  new_sha=$(
-    GIT_AUTHOR_NAME="$author_name" GIT_AUTHOR_EMAIL="$author_email" GIT_AUTHOR_DATE="$author_date" \
-    GIT_COMMITTER_NAME="$committer_name" GIT_COMMITTER_EMAIL="$committer_email" GIT_COMMITTER_DATE="$committer_date" \
-    printf '%s\n' "$msg" | git commit-tree "$tree" -p "$parent" -F -
-  )
-  git update-ref HEAD "$new_sha"
-}
-
-git_push_clean() {
-  local branch="$1"
-  git push origin "HEAD:$branch"
-  git fetch origin "$branch"
-  if git log -1 --pretty=format:"%B" "origin/$branch" | grep -qi "co-authored-by"; then
-    local msg tree parent an ae ad cn ce cd new_sha
-    msg=$(git log -1 --pretty=format:"%B" "origin/$branch" | grep -vi "co-authored-by" | sed -e ':a' -e '/^\s*$/{$d;N;ba' -e '}')
-    tree=$(git log -1 --pretty=format:"%T"  "origin/$branch")
-    parent=$(git log -1 --pretty=format:"%P" "origin/$branch")
-    an=$(git log -1 --pretty=format:"%an"   "origin/$branch")
-    ae=$(git log -1 --pretty=format:"%ae"   "origin/$branch")
-    ad=$(git log -1 --pretty=format:"%aI"   "origin/$branch")
-    cn=$(git log -1 --pretty=format:"%cn"   "origin/$branch")
-    ce=$(git log -1 --pretty=format:"%ce"   "origin/$branch")
-    cd=$(git log -1 --pretty=format:"%cI"   "origin/$branch")
-    new_sha=$(
-      GIT_AUTHOR_NAME="$an" GIT_AUTHOR_EMAIL="$ae" GIT_AUTHOR_DATE="$ad" \
-      GIT_COMMITTER_NAME="$cn" GIT_COMMITTER_EMAIL="$ce" GIT_COMMITTER_DATE="$cd" \
-      printf '%s\n' "$msg" | git commit-tree "$tree" -p "$parent" -F -
-    )
-    git update-ref HEAD "$new_sha"
-    git push origin "HEAD:$branch" --force-with-lease
-  fi
-}
-
-git add -A
-git_commit_clean "test: {task.title}{if task.ado_id: (#{task.ado_id})}"
-git_push_clean "$BRANCH"
-
-# Verify the push actually landed on origin
-if [ -n "$(git status --short)" ]; then
-  echo "ERROR: workspace still has uncommitted changes after commit/push" >&2
-  git status --short >&2
-  exit 1
-fi
-COMMITS_AHEAD=$(git rev-list --count "origin/$BRANCH..HEAD" 2>/dev/null || echo "")
-if [ -n "$COMMITS_AHEAD" ] && [ "$COMMITS_AHEAD" -gt 0 ]; then
-  echo "ERROR: Push verification failed — $COMMITS_AHEAD commit(s) still ahead of origin/$BRANCH" >&2
-  exit 1
-fi
-echo "Push verified: origin/$BRANCH is up to date with HEAD."
-```
-
----
+After push, require a clean `git status --short`, a successful fresh fetch, and `git rev-list --count "origin/$BRANCH..HEAD"` equal to `0`. A failed check is a blocker, not an empty/zero fallback. Record the final remote candidate SHA; preserve work on failure.
 
 ## Step 6 — Final action: post summary, update state, and hand off with deterministic `coding_handoff_decide`
 
@@ -240,8 +119,7 @@ echo "Push verified: origin/$BRANCH is up to date with HEAD."
    {- relative/path/to/test/file}
 
    **Coverage:**
-   {- criterion one → test_given_X_when_Y_should_Z}
-   {- criterion two → Given_X_When_Y_Should_Z}
+   {- each criterion → actual test name following repository conventions}
 
    ```json coding-team-artifact
    {
