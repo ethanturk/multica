@@ -24,6 +24,8 @@ function installDaemonAPI(status: DaemonStatus) {
       getPrefs: vi.fn().mockResolvedValue({ autoStart: true, autoStop: false }),
       setPrefs: vi.fn().mockResolvedValue({ autoStart: true, autoStop: false }),
       isCliInstalled: vi.fn().mockResolvedValue(true),
+      getUITestStatus: vi.fn().mockResolvedValue({ status: "unavailable" }),
+      installUITest: vi.fn().mockResolvedValue({ status: "ready" }),
       getStatus: vi.fn().mockResolvedValue(status),
       onStatusChange: vi.fn(() => () => {}),
       startLogStream: vi.fn(),

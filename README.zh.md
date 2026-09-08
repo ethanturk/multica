@@ -53,6 +53,7 @@ diff，全都挂在同一个任务下——没人需要重新捋一遍上下文�
 - **[智能体也是队友](https://multica.ai/docs/agents) →** 起个名字、选个提供方、配台运行时，它就上了看板，跟其他同事没两样。
 - **[小队](https://multica.ai/docs/squads) →** 人和智能体混编成队，leader 决定谁来接活。
 - **[Skills](https://multica.ai/docs/skills) →** 解决过一次的问题沉淀下来，全团队的智能体都能复用。
+- **[确定性工具](#确定性工具) →** 当"测试到底有没有通过？"必须被验证而不是被猜测时：一个带类型的 Go 步骤，在工作区里编写、在沙箱中运行，智能体通过 MCP 调用它。
 - **[你自己的运行时](https://multica.ai/docs/daemon-runtimes) →** 它们的"工位"就是你的机器——守护进程跑在你的笔记本或云主机上，代码不出门。
 
 ## 把活交出去
@@ -134,6 +135,107 @@ Windows 上先设 `$env:MULTICA_MODE="with-server"`，再跑 PowerShell 安装�
 干完把任务挪到审核中。
 
 完整流程：[快速开始](https://multica.ai/docs/cloud-quickstart) · [上手教程](https://multica.ai/docs/tutorial)
+
+---
+
+## 确定性工具
+
+技能是*建议性*的——它是智能体读取的 Markdown，可以遵循、转述，也可以忽略。对于需要判断力的场景（"如何组织一个 PR"、命名规范），这种形态是对的；但对任何与正确性相关的事情，它就是错的：一条写着"确保测试通过"的技能，只是一个模型可以凭空绕过的建议。
+
+**确定性工具**填补了这个缺口。工具是会*真正执行*的带类型 Go 代码——它检查仓库、强制执行策略、或运行某个门禁，并返回智能体可据以分支判断的、可验证的结果。智能体通过 [MCP](https://modelcontextprotocol.io) 调用工具；一套内置目录（`repo_facts`、`policy_check`、`build_probe`、`test_gate`、`diff_summarize`、`artifact_emit`）已编译进守护进程二进制文件，你也可以在工作区里编写自己的工具。
+
+| | 技能（建议性） | 确定性工具 |
+|---|---|---|
+| 是什么 | 智能体上下文中的 Markdown | 会执行的带类型 Go 代码 |
+| 答错时 | 模型据以行动的一个建议 | 被测试捕获的一个 Bug |
+| 适用于 | 框架、规范、判断 | 仓库事实、门禁、"通过了吗？" |
+
+### 编写工具
+
+打开工作区，在侧边栏进入 **Tools（工具）**。编写一个确定性 Go *步骤*，给出示例输入，点击 **Test（测试）** 即可在沙箱中立即运行——无需部署，无需重新构建。
+
+一个步骤是一个名为 `step` 的 Go 包，暴露一个函数：
+
+```go
+package step
+
+import "strings"
+
+// Run 接收解码后的 JSON 输入，返回一个 Result 信封。
+func Run(input map[string]any) map[string]any {
+	name, _ := input["name"].(string)
+	if name == "" {
+		return map[string]any{
+			"status":     "error",
+			"error_code": "INVALID_INPUT",
+			"summary":    "input.name is required",
+		}
+	}
+	return map[string]any{
+		"status":  "ok",
+		"summary": "Greeted " + name,
+		"machine_data": map[string]any{
+			"greeting": "Hello, " + strings.ToUpper(name),
+			"length":   len(name),
+		},
+	}
+}
+```
+
+用输入 `{ "name": "world" }` 测试，会返回标准的 **Result 信封**——这与内置工具和智能体使用的是同一份契约：
+
+```json
+{
+  "status": "ok",
+  "summary": "Greeted world",
+  "machine_data": { "greeting": "Hello, WORLD", "length": 5 },
+  "retryable": false
+}
+```
+
+`status` 取值为 `"ok"` 或 `"error"`；失败时设置一个稳定的 `error_code`（`INVALID_INPUT`、`MISSING_DEPENDENCY`、`POLICY_FAILURE`、`TIMEOUT`、`INTERNAL_ERROR`）。一个只返回数据、不带 `status` 的步骤会被视为成功。
+
+### 是门禁，不是猜测
+
+确定性工具的意义在于*强制执行*，而非建议。一个策略门禁会返回智能体无法绕过的硬性失败：
+
+```go
+package step
+
+import "strings"
+
+// 如果改动落在了非 feature 分支上，就让任务失败。
+func Run(input map[string]any) map[string]any {
+	branch, _ := input["branch"].(string)
+	if !strings.HasPrefix(branch, "feature/") {
+		return map[string]any{
+			"status":     "error",
+			"error_code": "POLICY_FAILURE",
+			"summary":    "branch " + branch + " must start with feature/",
+			"machine_data": map[string]any{"branch": branch},
+		}
+	}
+	return map[string]any{"status": "ok", "summary": "branch policy ok"}
+}
+```
+
+### 沙箱
+
+步骤运行在内嵌的 Go 解释器中，而非编译后的二进制文件，因此可以在运行时编写和修改，无需重新部署。解释器采用**白名单制**：步骤只能导入纯粹、确定性的标准库包（`fmt`、`strings`、`strconv`、`regexp`、`encoding/json`、`time`、`slices`、`math` 等），其余一概不可。`os`、`os/exec`、`io`、`net/*`、`syscall` 均不可导入——步骤可以对输入做计算，但无法触及主机、文件系统或网络。
+
+每次运行还会在**独立的隔离进程**中进行（二进制文件以一次性沙箱模式重新执行自身），而非在进程内运行：子进程只拥有不含服务端任何密钥的最小环境，并带有内核 CPU 时间上限；步骤一旦超时即被硬性终止（`SIGKILL`），panic 则以 `INTERNAL_ERROR` 形式返回——绝不会导致崩溃，也不会在长期运行的进程中泄漏 goroutine。
+
+### 启用面向智能体的工具平面
+
+确定性工具平面默认关闭。在守护进程上启用它，智能体即可通过 MCP 收到这些工具：
+
+```bash
+export MULTICA_DETTOOLS_ENABLED=true                                   # 总开关
+export MULTICA_DETTOOLS_ALLOWED=repo_facts,policy_check,build_probe,test_gate,dotnet_test_gate  # 白名单（默认为完整的只读目录）
+export MULTICA_DETTOOLS_TIMEOUT=90s                                    # 单个工具的超时
+```
+
+启用后，工作区**已保存**的工具会随每个任务一起下发给智能体：认领任务时，守护进程把启用的工具写入任务工作目录，由每个任务的 MCP 服务在沙箱中运行，智能体即可像调用其他工具一样按名调用它们。还可通过智能体的 `runtime_config`（`deterministic_tools.allowed_tools` / `denied_tools`）做按智能体收窄——智能体只能收窄守护进程的白名单，永远无法扩大它。
 
 ---
 

@@ -44,7 +44,6 @@ import { useIssueDraftStore, type IssueCreateDraft } from "@multica/core/issues/
 import { useCreateModeStore } from "@multica/core/issues/stores/create-mode-store";
 import {
   runtimeListOptions,
-  checkQuickCreateCliVersion,
   checkQuickCreateFieldsCliVersion,
   readRuntimeCliVersion,
 } from "@multica/core/runtimes";
@@ -121,6 +120,7 @@ export function AgentCreatePanel({
   const { t } = useT("modals");
   const { t: tIssues } = useT("issues");
   const { t: tProjects } = useT("projects");
+  const showIssueLimitUpgradePrompt = useIssueLimitUpgradePrompt();
   const sendShortcut = useShortcut("send");
   const workspaceName = useCurrentWorkspace()?.name;
   const workspacePaths = useWorkspacePaths();
@@ -136,7 +136,6 @@ export function AgentCreatePanel({
     : undefined;
   const onSourceContextExpandedChange = data?.source_context_on_expanded_change as ((expanded: boolean) => void) | undefined;
   const sourceContextFailureMessage = useSourceContextFailureMessage();
-  const showIssueLimitUpgradePrompt = useIssueLimitUpgradePrompt();
   const userId = useAuthStore((s) => s.user?.id);
   const { data: members = [] } = useQuery(memberListOptions(wsId));
   const { data: agents = [] } = useQuery(agentListOptions(wsId));
@@ -321,8 +320,10 @@ export function AgentCreatePanel({
     setActiveMode("agent");
   }, [setActiveMode]);
 
-  // Daemon CLI version gate. The agent-create flow needs the runtime's
-  // bundled multica CLI to be ≥ MIN_QUICK_CREATE_CLI_VERSION; older
+  // Daemon CLI version gate for priority/due-date fields. These fields need a
+  // daemon new enough to carry them into the generated issue-create prompt;
+  // basic quick-create remains ungated. The agent-create flow also needs the
+  // runtime's bundled multica CLI to be ≥ MIN_QUICK_CREATE_CLI_VERSION; older
   // daemons handle attachments and partial-failure retries incorrectly
   // (see PR #1851 / MUL-1496). Pre-check on the picker so the user gets
   // immediate feedback instead of waiting for the inbox failure; the
@@ -338,31 +339,13 @@ export function AgentCreatePanel({
         : undefined,
     [runtimes, selectedAgent?.runtime_id],
   );
-  // We can only pre-check a version we can actually see. A non-admin member's
-  // runtime list (ListVisibleAgentRuntimes) omits other members' private
-  // machines, so a selected agent bound to such a runtime yields no row here.
-  // That absence is "unknown version", NOT "daemon reported no version": the
-  // two must not collapse, or the member gets the misleading "upgrade your
-  // daemon" wall for a runtime that is in fact new enough (#7633). When we
-  // can't pre-check, defer to the server's authoritative gate
-  // (checkQuickCreateDaemonVersion, which reads the row by id regardless of
-  // role) instead of failing closed in the UI.
-  const canPrecheckVersion = selectedAgent?.runtime_id != null && selectedRuntime != null;
   const runtimeCliVersion = readRuntimeCliVersion(selectedRuntime?.metadata);
-  const baseVersionCheck = useMemo(
-    () => checkQuickCreateCliVersion(runtimeCliVersion),
-    [runtimeCliVersion],
-  );
   const fieldVersionCheck = useMemo(
     () => checkQuickCreateFieldsCliVersion(runtimeCliVersion),
     [runtimeCliVersion],
   );
   const usesExplicitFields = priority !== "none" || dueDate !== null;
-  const versionCheck = usesExplicitFields ? fieldVersionCheck : baseVersionCheck;
-  const versionBlocked =
-    canPrecheckVersion &&
-    (baseVersionCheck.state !== "ok" ||
-      (usesExplicitFields && fieldVersionCheck.state !== "ok"));
+  const versionBlocked = usesExplicitFields && fieldVersionCheck.state !== "ok";
 
   const initialPrompt = draft.agent.prompt || (data?.prompt as string) || "";
   // The editor is uncontrolled — we read the latest markdown via the ref at
@@ -495,7 +478,7 @@ export function AgentCreatePanel({
             setError(
               t(($) => $.create_issue.agent.error_daemon_version, {
                 current: cur,
-                min: body.min_version || versionCheck.min,
+                min: body.min_version || fieldVersionCheck.min,
               }),
             );
             return false;
@@ -598,7 +581,7 @@ export function AgentCreatePanel({
     onSwitchMode?.(Object.keys(carry).length > 0 ? carry : null);
   };
 
-  // Field visibility lives in Settings → Preferences → Issue creation. Persist the prompt draft
+  // Field visibility lives in Settings → Issue. Persist the prompt draft
   // before leaving so what the user typed survives the round-trip, then
   // close — the dialog would otherwise linger over the settings page.
   const openFieldSettings = (e: React.MouseEvent) => {
@@ -669,14 +652,15 @@ export function AgentCreatePanel({
 
         {selectedAgent && versionBlocked && (
           <div className="mx-5 mb-2 shrink-0 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-caption text-amber-700 dark:text-amber-300">
-            {versionCheck.state === "missing"
-              ? t(($) => $.create_issue.agent.version_missing, { min: versionCheck.min })
+            {fieldVersionCheck.state === "missing"
+              ? t(($) => $.create_issue.agent.version_missing, { min: fieldVersionCheck.min })
               : t(($) => $.create_issue.agent.version_below, {
-                  current: versionCheck.current,
-                  min: versionCheck.min,
+                  current: fieldVersionCheck.current,
+                  min: fieldVersionCheck.min,
                 })}
           </div>
         )}
+
 
         {/* Prompt — same rich editor Advanced uses, so paste/drop images,
             mentions, and formatting all work. The dropZone wrapper enables
@@ -820,7 +804,7 @@ export function AgentCreatePanel({
               <DropdownMenuItem
                 render={
                   <AppLink
-                    href={`${workspacePaths.settings()}?tab=preferences&section=issue`}
+                    href={`${workspacePaths.settings()}?tab=issue`}
                     onClick={openFieldSettings}
                   />
                 }
@@ -900,7 +884,7 @@ export function AgentCreatePanel({
             aria-busy={gate.uploading || submitting || undefined}
             title={
               versionBlocked
-                ? t(($) => $.create_issue.agent.version_blocked_tooltip, { min: versionCheck.min })
+                ? t(($) => $.create_issue.agent.version_blocked_tooltip, { min: fieldVersionCheck.min })
                 : undefined
             }
             className={cn(

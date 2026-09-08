@@ -1002,6 +1002,63 @@ func openclawHomeRest(path string) (string, bool) {
 	return "", false
 }
 
+func openclawResolvedMCPServers(bin string, timeout time.Duration) (map[string]json.RawMessage, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	out, err := openclawExec(ctx, bin, "config", "get", "mcp", "--json")
+	if err != nil {
+		if isOpenclawKeyMissingResult(out, err, "mcp") {
+			return nil, nil
+		}
+		return nil, annotateOpenclawJSONError(err, out)
+	}
+	trimmed := strings.TrimSpace(out)
+	if trimmed == "" || trimmed == "null" {
+		return nil, nil
+	}
+	var section map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(trimmed), &section); err != nil {
+		return nil, fmt.Errorf("parse `openclaw config get mcp --json` output: %w", err)
+	}
+	if rawMCP, ok := section["mcp"]; ok {
+		if err := json.Unmarshal(rawMCP, &section); err != nil {
+			return nil, fmt.Errorf("parse mcp section from `openclaw config get mcp --json` output: %w", err)
+		}
+	}
+	rawServers, ok := section["servers"]
+	if !ok || string(rawServers) == "null" {
+		return nil, nil
+	}
+	var servers map[string]json.RawMessage
+	if err := json.Unmarshal(rawServers, &servers); err != nil {
+		return nil, fmt.Errorf("parse mcp.servers from `openclaw config get mcp --json` output: %w", err)
+	}
+	return servers, nil
+}
+
+// ResolveOpenclawNativeMCPServers returns the active OpenClaw config's
+// resolved mcp.servers map.
+func ResolveOpenclawNativeMCPServers(openclawBin string) (map[string]json.RawMessage, error) {
+	if openclawBin == "" {
+		openclawBin = "openclaw"
+	}
+	_, exists, err := openclawActiveConfigPath(openclawBin, openclawCLITimeout)
+	if err != nil {
+		return nil, fmt.Errorf("locate openclaw active config: %w", err)
+	}
+	if !exists {
+		return map[string]json.RawMessage{}, nil
+	}
+	servers, err := openclawResolvedMCPServers(openclawBin, openclawCLITimeout)
+	if err != nil {
+		return nil, fmt.Errorf("read openclaw resolved mcp section: %w", err)
+	}
+	if servers == nil {
+		return map[string]json.RawMessage{}, nil
+	}
+	return servers, nil
+}
+
 // openclawHomeFromEnv resolves OPENCLAW_HOME to the directory the CLI's printed
 // `$OPENCLAW_HOME` prefix actually stands for.
 //

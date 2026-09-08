@@ -16,11 +16,11 @@
  * native alternative" threshold in apps/mobile/CLAUDE.md.
  */
 import { useCallback, useState } from "react";
-import { ActionSheetIOS } from "react-native";
 import * as Clipboard from "expo-clipboard";
 import * as Haptics from "expo-haptics";
 import type { ChatMessage } from "@multica/core/types";
 import { useChatSelectStore } from "@/data/chat-select-store";
+import { showPlatformActionSheet } from "@/lib/action-sheet";
 
 export function useChatMessageLongPress(
   message: ChatMessage,
@@ -33,48 +33,33 @@ export function useChatMessageLongPress(
     Haptics.selectionAsync().catch(() => {});
     setIsPressed(true);
 
-    type Action =
-      | { kind: "copy" }
-      | { kind: "select" }
-      | { kind: "cancel" };
-
-    const options: string[] = [];
-    const actions: Action[] = [];
-    const push = (label: string, action: Action) => {
-      options.push(label);
-      actions.push(action);
-    };
-
-    if (hasContent) {
-      push("Copy", { kind: "copy" });
-      push("Select Text", { kind: "select" });
-    }
-    push("Cancel", { kind: "cancel" });
-
-    const cancelButtonIndex = options.length - 1;
-
-    ActionSheetIOS.showActionSheetWithOptions(
-      { options, cancelButtonIndex },
-      (i) => {
-        setIsPressed(false);
-        const action = actions[i];
-        if (!action || action.kind === "cancel") return;
-
-        switch (action.kind) {
-          case "copy":
-            if (message.content) {
-              Clipboard.setStringAsync(message.content);
-              Haptics.notificationAsync(
-                Haptics.NotificationFeedbackType.Success,
-              ).catch(() => {});
-            }
-            return;
-          case "select":
-            useChatSelectStore.getState().setSelecting(message.id);
-            return;
-        }
-      },
-    );
+    showPlatformActionSheet({
+      options: [
+        ...(hasContent
+          ? [
+              {
+                label: "Copy",
+                onPress: () => {
+                  if (message.content) {
+                    Clipboard.setStringAsync(message.content);
+                    Haptics.notificationAsync(
+                      Haptics.NotificationFeedbackType.Success,
+                    ).catch(() => {});
+                  }
+                },
+              },
+              {
+                label: "Select Text",
+                onPress: () => {
+                  useChatSelectStore.getState().setSelecting(message.id);
+                },
+              },
+            ]
+          : []),
+        { label: "Cancel", style: "cancel" },
+      ],
+      onDismiss: () => setIsPressed(false),
+    });
   }, [message]);
 
   return { onLongPress, isPressed };

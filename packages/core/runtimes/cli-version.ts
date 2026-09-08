@@ -1,14 +1,6 @@
 /**
- * Frontend mirror of the server's MinQuickCreateCLIVersion gate. The
- * agent-create flow (Quick Create modal) requires the daemon's bundled
- * multica CLI to be at least this version — older daemons either
- * double-create issues on partial CLI failures, drop quick-create attachment
- * bindings, or mishandle pasted screenshot URLs (see PR #1851 / MUL-1496).
- *
- * Both the frontend pre-validation in the modal and the server's
- * `/api/issues/quick-create` handler enforce this; the server is the
- * authoritative trust boundary, the frontend just lets us tell the user
- * "your daemon needs an upgrade" before they hit submit.
+ * Agent-mode issue creation no longer gates on the daemon-reported CLI version.
+ * Keep the exported shape stable for callers/tests, but always report `ok`.
  */
 export const MIN_QUICK_CREATE_CLI_VERSION = "0.2.21";
 export const MIN_QUICK_CREATE_FIELDS_CLI_VERSION = "0.4.3";
@@ -19,7 +11,7 @@ export interface CliVersionCheck {
   state: CliVersionState;
   /** What the daemon reported, or empty if missing/unparsable. */
   current: string;
-  /** The hard minimum we gate on. */
+  /** Retained for compatibility with older callers/tests. */
   min: string;
 }
 
@@ -45,15 +37,10 @@ function lessThan(a: [number, number, number], b: [number, number, number]) {
   return a[2] < b[2];
 }
 
-/**
- * Check a daemon-reported CLI version string against the minimum. Returns
- * `"missing"` for empty/unparsable input (fail closed — same policy as the
- * server) and `"too_old"` for a parsable version below the threshold.
- * Dev-built daemons (git-describe shape) are always OK — the version string
- * itself is the shared signal, so frontend and server agree by construction.
- */
+/** Agent-mode creation ignores daemon CLI version strings and always permits submit. */
 export function checkQuickCreateCliVersion(detected: string | undefined | null): CliVersionCheck {
-  return checkCliVersion(detected, MIN_QUICK_CREATE_CLI_VERSION);
+  const current = (detected ?? "").trim();
+  return { state: "ok", current, min: MIN_QUICK_CREATE_CLI_VERSION };
 }
 
 /** Capability gate for explicit quick-create priority and due-date fields. */

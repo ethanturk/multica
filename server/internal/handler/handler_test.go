@@ -21,6 +21,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/testutil"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/detsteps"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
@@ -42,6 +43,10 @@ const (
 )
 
 func TestMain(m *testing.M) {
+	// The Test endpoint runs steps by re-execing this binary as a step sandbox;
+	// handle that here (before any DB setup) so the child runs the step and exits.
+	detsteps.MaybeRunStepChild()
+
 	ctx := context.Background()
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {

@@ -683,7 +683,7 @@ describe("AgentCreatePanel", () => {
     });
   });
 
-  it("routes Customize fields to Settings → Preferences → Issue creation, keeping the typed prompt", async () => {
+  it("routes Customize fields to Settings → Issue, keeping the typed prompt", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
 
@@ -697,7 +697,7 @@ describe("AgentCreatePanel", () => {
 
     expect(mockSetAgent).toHaveBeenLastCalledWith({ prompt: "Half-typed request" });
     expect(onClose).toHaveBeenCalled();
-    expect(mockNavigationPush).toHaveBeenCalledWith("/ws-test/settings?tab=preferences&section=issue");
+    expect(mockNavigationPush).toHaveBeenCalledWith("/ws-test/settings?tab=issue");
   });
 
   it("respects fields enabled in Settings → Preferences → Issue creation by rendering them inline", () => {
@@ -835,7 +835,9 @@ describe("AgentCreatePanel", () => {
       },
     });
 
-    await user.click(screen.getByRole("button", { name: /^Create$/i }));
+    const createButton = screen.getByRole("button", { name: /^Create$/i });
+    expect(createButton).not.toBeDisabled();
+    await user.click(createButton);
 
     await waitFor(() => {
       expect(mockQuickCreateIssue).toHaveBeenCalledWith({
@@ -1191,13 +1193,18 @@ describe("AgentCreatePanel", () => {
       await waitFor(() => expect(mockQuickCreateIssue).toHaveBeenCalledTimes(1));
     });
 
-    it("still blocks a runtime that is visible but genuinely too old", async () => {
+    it("blocks explicit fields for a visible runtime that is genuinely too old", async () => {
       const user = userEvent.setup();
       // The runtime IS in the list and reports a real, below-minimum version —
       // the case the gate exists for. We must keep failing closed here.
       mockRuntimesData.list = [{ id: "runtime-1", metadata: { cli_version: "0.0.1" } }];
 
-      renderPanel({ onClose: vi.fn(), isExpanded: false, setIsExpanded: vi.fn() });
+      renderPanel({
+        onClose: vi.fn(),
+        isExpanded: false,
+        setIsExpanded: vi.fn(),
+        data: { priority: "high" },
+      });
 
       await user.click(screen.getByRole("button", { name: /Bohan/ }));
 

@@ -1,0 +1,47 @@
+def multicaSigningRequired =
+    (System.getenv("MULTICA_ANDROID_RELEASE_SIGNING_REQUIRED") ?: "false").toBoolean()
+def multicaSigningEnvironment = [
+    MULTICA_ANDROID_KEYSTORE_PATH: System.getenv("MULTICA_ANDROID_KEYSTORE_PATH"),
+    MULTICA_ANDROID_KEYSTORE_PASSWORD: System.getenv("MULTICA_ANDROID_KEYSTORE_PASSWORD"),
+    MULTICA_ANDROID_KEY_ALIAS: System.getenv("MULTICA_ANDROID_KEY_ALIAS"),
+    MULTICA_ANDROID_KEY_PASSWORD: System.getenv("MULTICA_ANDROID_KEY_PASSWORD"),
+]
+def multicaMissingSigningEnvironment = multicaSigningEnvironment
+    .findAll { name, value -> !value }
+    .keySet()
+    .sort()
+
+if (multicaSigningRequired && !multicaMissingSigningEnvironment.isEmpty()) {
+    throw new GradleException(
+        "Missing required Android release signing environment variables: " +
+            multicaMissingSigningEnvironment.join(", ")
+    )
+}
+
+if (multicaMissingSigningEnvironment.isEmpty()) {
+    def multicaKeystoreFile =
+        file(multicaSigningEnvironment.MULTICA_ANDROID_KEYSTORE_PATH)
+
+    if (!multicaKeystoreFile.exists()) {
+        throw new GradleException(
+            "Android release keystore does not exist: " + multicaKeystoreFile
+        )
+    }
+
+    android {
+        signingConfigs {
+            multicaRelease {
+                storeFile multicaKeystoreFile
+                storePassword multicaSigningEnvironment.MULTICA_ANDROID_KEYSTORE_PASSWORD
+                keyAlias multicaSigningEnvironment.MULTICA_ANDROID_KEY_ALIAS
+                keyPassword multicaSigningEnvironment.MULTICA_ANDROID_KEY_PASSWORD
+            }
+        }
+
+        buildTypes {
+            release {
+                signingConfig signingConfigs.multicaRelease
+            }
+        }
+    }
+}

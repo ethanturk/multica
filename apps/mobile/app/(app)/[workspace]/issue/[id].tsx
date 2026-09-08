@@ -12,7 +12,6 @@
  */
 import { useCallback, useEffect } from "react";
 import {
-  ActionSheetIOS,
   ActivityIndicator,
   Alert,
   Linking,
@@ -42,6 +41,7 @@ import { useWorkspaceStore } from "@/data/workspace-store";
 import { useViewedIssuesStore } from "@/data/viewed-issues-store";
 import { useCommentSelectStore } from "@/data/comment-select-store";
 import { useReplyTargetStore } from "@/data/stores/reply-target-store";
+import { showPlatformActionSheet } from "@/lib/action-sheet";
 
 export default function IssueDetail() {
   // `highlight` + `h` come from inbox deep-link (apps/mobile/app/(app)/
@@ -116,41 +116,54 @@ export default function IssueDetail() {
     const issueLink = webUrl
       ? `${webUrl}/${wsSlug}/issue/${issue.identifier}`
       : null;
-    const options: string[] = ["Cancel"];
-    options.push(isPinned ? "Unpin" : "Pin");
-    options.push("Edit details");
-    if (issueLink) options.push("Copy link");
-    if (issueLink) options.push("Open on web");
-    options.push("Delete issue");
-    const destructiveIndex = options.length - 1;
-    ActionSheetIOS.showActionSheetWithOptions(
-      {
-        options,
-        cancelButtonIndex: 0,
-        destructiveButtonIndex: destructiveIndex,
-        title: issue.identifier,
-      },
-      (i) => {
-        const label = options[i];
-        if (label === "Pin") {
-          createPin.mutate({ item_type: "issue", item_id: issue.id });
-        } else if (label === "Unpin") {
-          deletePin.mutate({ itemType: "issue", itemId: issue.id });
-        } else if (label === "Edit details") {
-          if (wsSlug) router.push(`/${wsSlug}/issue/${issue.id}/edit`);
-        } else if (label === "Copy link" && issueLink) {
-          Clipboard.setStringAsync(issueLink);
-        } else if (label === "Open on web" && issueLink) {
-          Linking.openURL(issueLink);
-        } else if (label === "Delete issue") {
-          confirmDelete(issue, () =>
-            deleteIssue.mutate(issue.id, {
-              onSuccess: () => router.back(),
-            }),
-          );
-        }
-      },
-    );
+    showPlatformActionSheet({
+      title: issue.identifier,
+      options: [
+        {
+          label: isPinned ? "Unpin" : "Pin",
+          onPress: () =>
+            isPinned
+              ? deletePin.mutate({ itemType: "issue", itemId: issue.id })
+              : createPin.mutate({ item_type: "issue", item_id: issue.id }),
+        },
+        {
+          label: "Edit details",
+          onPress: () => {
+            if (wsSlug) {
+              router.push(`/${wsSlug}/issue/${issue.id}/edit`);
+            }
+          },
+        },
+        ...(issueLink
+          ? [
+              {
+                label: "Copy link",
+                onPress: () => {
+                  Clipboard.setStringAsync(issueLink);
+                },
+              },
+              {
+                label: "Open on web",
+                onPress: () => {
+                  Linking.openURL(issueLink);
+                },
+              },
+            ]
+          : []),
+        {
+          label: "Delete issue",
+          style: "destructive" as const,
+          onPress: () => {
+            confirmDelete(issue, () =>
+              deleteIssue.mutate(issue.id, {
+                onSuccess: () => router.back(),
+              }),
+            );
+          },
+        },
+        { label: "Cancel", style: "cancel" },
+      ],
+    });
   }, [issue, wsSlug, deleteIssue, isPinned, createPin, deletePin]);
 
   return (

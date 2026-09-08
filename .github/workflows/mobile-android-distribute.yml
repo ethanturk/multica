@@ -1,0 +1,142 @@
+name: Android Staging Distribution
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_notes:
+        description: Release notes shown to Firebase testers
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: android-staging-distribution
+  cancel-in-progress: false
+
+jobs:
+  distribute:
+    name: Build and distribute staging APK
+    environment: android-staging
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_VERSION_CODE: ${{ github.run_number }}
+      MULTICA_ANDROID_RELEASE_SIGNING_REQUIRED: "true"
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
+      FIREBASE_APP_ID_ANDROID_STAGING: ${{ vars.FIREBASE_APP_ID_ANDROID_STAGING }}
+      FIREBASE_TESTER_GROUPS: ${{ vars.FIREBASE_TESTER_GROUPS }}
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      MULTICA_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      MULTICA_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      MULTICA_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+    steps:
+      - name: Validate distribution configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          required_names=(
+            GCP_PROJECT_ID
+            GCP_WORKLOAD_IDENTITY_PROVIDER
+            GCP_SERVICE_ACCOUNT
+            FIREBASE_APP_ID_ANDROID_STAGING
+            FIREBASE_TESTER_GROUPS
+            ANDROID_KEYSTORE_BASE64
+            MULTICA_ANDROID_KEYSTORE_PASSWORD
+            MULTICA_ANDROID_KEY_ALIAS
+            MULTICA_ANDROID_KEY_PASSWORD
+          )
+          missing_names=()
+
+          for name in "${required_names[@]}"; do
+            if [[ -z "${!name}" ]]; then
+              missing_names+=("$name")
+            fi
+          done
+
+          if (( ${#missing_names[@]} > 0 )); then
+            joined_names=$(IFS=", "; echo "${missing_names[*]}")
+            printf '::error::Missing android-staging configuration: %s\n' "$joined_names"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Decode Android keystore
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          keystore_path="$RUNNER_TEMP/multica-staging.jks"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
+          chmod 600 "$keystore_path"
+          printf 'MULTICA_ANDROID_KEYSTORE_PATH=%s\n' "$keystore_path" >> "$GITHUB_ENV"
+
+      - name: Generate staging Android project
+        run: pnpm -C apps/mobile android:sync:staging
+
+      - name: Build signed staging APK
+        run: >-
+          pnpm -C apps/mobile exec dotenv -e .env.staging --
+          cross-env APP_ENV=staging
+          sh -c 'cd android && ./gradlew assembleRelease --no-daemon'
+
+      - name: Upload staging APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: multica-android-staging-${{ github.run_number }}
+          path: apps/mobile/android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+
+      - name: Distribute APK to Firebase testers
+        shell: bash
+        env:
+          RELEASE_NOTES_INPUT: ${{ inputs.release_notes }}
+        run: |
+          set -euo pipefail
+
+          release_notes="$RELEASE_NOTES_INPUT"
+          if [[ -z "$release_notes" ]]; then
+            release_notes="Multica Android staging build ${GITHUB_SHA::7}"
+          fi
+
+          pnpm dlx firebase-tools@15.24.0 appdistribution:distribute \
+            "apps/mobile/android/app/build/outputs/apk/release/app-release.apk" \
+            --app "$FIREBASE_APP_ID_ANDROID_STAGING" \
+            --groups "$FIREBASE_TESTER_GROUPS" \
+            --release-notes "$release_notes" \
+            --project "$GCP_PROJECT_ID"
