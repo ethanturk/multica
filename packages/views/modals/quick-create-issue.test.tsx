@@ -697,7 +697,7 @@ describe("AgentCreatePanel", () => {
 
     expect(mockSetAgent).toHaveBeenLastCalledWith({ prompt: "Half-typed request" });
     expect(onClose).toHaveBeenCalled();
-    expect(mockNavigationPush).toHaveBeenCalledWith("/ws-test/settings?tab=issue");
+    expect(mockNavigationPush).toHaveBeenCalledWith("/ws-test/settings?tab=preferences&section=issue");
   });
 
   it("respects fields enabled in Settings → Preferences → Issue creation by rendering them inline", () => {
