@@ -782,10 +782,6 @@ func (h *Handler) prepareAgentCommentSubIssue(w http.ResponseWriter, r *http.Req
 		writeAgentUnavailable(w, verdict.Detail, verdict.Reason)
 		return nil, errSourceContextResponseWritten
 	}
-	if status, payload := h.checkQuickCreateDaemonVersion(r.Context(), obsmetrics.RuntimeLookupSourceSourceContext, agent.RuntimeID); status != 0 {
-		writeJSON(w, status, payload)
-		return nil, errSourceContextResponseWritten
-	}
 	runtime, err := h.getAgentRuntime(r.Context(), obsmetrics.RuntimeLookupSourceSourceContext, agent.RuntimeID)
 	if err != nil || !runtimeHasCapability(runtime.Metadata, protocol.DaemonCapabilitySourceContextQuickCreateV1) {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"code": "source_context_quick_create_unsupported", "error": "selected agent runtime must be updated before using captured context"})
