@@ -98,6 +98,7 @@ import {
 import { IssuePickerModal } from "./issue-picker-modal";
 import { useT } from "../i18n";
 import { SourceContextPreviewCard, useSourceContextFailureMessage } from "./source-context-preview";
+import { useIssueLimitUpgradePrompt } from "./use-issue-limit-upgrade-prompt";
 
 // ---------------------------------------------------------------------------
 // ManualCreatePanel — manual-mode body of the create-issue dialog. Renders
@@ -232,6 +233,7 @@ export function ManualCreatePanel({
     : undefined;
   const onSourceContextExpandedChange = data?.source_context_on_expanded_change as ((expanded: boolean) => void) | undefined;
   const sourceContextFailureMessage = useSourceContextFailureMessage();
+  const showIssueLimitUpgradePrompt = useIssueLimitUpgradePrompt();
 
   const draft = useIssueDraftStore((s) => s.draft);
   const setManual = useIssueDraftStore((s) => s.setManual);
@@ -294,7 +296,7 @@ export function ManualCreatePanel({
     typeof data?.stage === "number" ? (data.stage as number) : null,
   );
   const [parentPickerOpen, setParentPickerOpen] = useState(false);
-  // Toolbar fields hidden via Settings → Issue reuse the overflow reveal
+  // Toolbar fields hidden via Settings → Preferences → Issue creation reuse the overflow reveal
   // pattern: the ⋯ menu item flips this open, which mounts the inline pill
   // (the popover's anchor) AND opens the picker. Closing without a value
   // unmounts the pill again; a field holding a non-default value always
@@ -394,7 +396,7 @@ export function ManualCreatePanel({
     setManual({ propertyValues: next });
   };
 
-  // Inline pill reveal per toolbar field: kept by Settings → Issue, holding a
+  // Inline pill reveal per toolbar field: kept by Settings → Preferences → Issue creation, holding a
   // non-default value (a hidden field with a value must stay visible — the
   // draft or a mode-switch carry may have set it), or just opened from the ⋯
   // overflow (the picker popover needs the inline pill as its anchor).
@@ -674,6 +676,10 @@ export function ManualCreatePanel({
       }
       if (anchorCommentId && sourceCode === "source_context_too_large") {
         toast.error(sourceContextFailureMessage(err) ?? tIssues(($) => $.source_context.error_too_large));
+        return false;
+      }
+      if (sourceCode === "issue_limit_reached") {
+        showIssueLimitUpgradePrompt();
         return false;
       }
       // Duplicate-issue is the only structured 409 the create endpoint
@@ -969,7 +975,7 @@ export function ManualCreatePanel({
                 when an agent assignee will pick the issue up. */}
             <CreateRunHint assigneeType={assigneeType} assigneeId={assigneeId} status={status} />
 
-            {/* Property toolbar — each field renders per the Settings → Issue
+            {/* Property toolbar — each field renders per the Settings → Preferences → Issue creation
                 selection (see showField above). */}
             <div className="flex items-center gap-1.5 px-4 py-2 shrink-0 flex-wrap">
               {/* Status */}
@@ -1056,7 +1062,7 @@ export function ManualCreatePanel({
               )}
 
               {/* Start date — collapsed into the ⋯ menu by default since it's
-                  a low-frequency field (exposable via Settings → Issue).
+                  a low-frequency field (exposable via Settings → Preferences → Issue creation).
                   Renders inline when configured visible, when the field has a
                   value, OR when the user just opened it from the overflow
                   menu (the picker's calendar popover needs the inline pill
@@ -1195,7 +1201,7 @@ export function ManualCreatePanel({
                 />
                 <DropdownMenuContent align="start" className="w-auto">
                   {/* Re-entry points for toolbar fields hidden via
-                      Settings → Issue. Listed in toolbar order; each opens
+                      Settings → Preferences → Issue creation. Listed in toolbar order; each opens
                       the picker inline (mounting the pill as its anchor). */}
                   {!showField.status && (
                     <DropdownMenuItem onClick={() => setFieldPickerOpen("status")}>
@@ -1286,14 +1292,14 @@ export function ManualCreatePanel({
                     </DropdownMenuSub>
                   )}
                   <DropdownMenuSeparator />
-                  {/* Field visibility lives in Settings → Issue; the modal
+                  {/* Field visibility lives in Settings → Preferences → Issue creation; the modal
                       closes first so the dialog doesn't linger over the
                       settings page. The draft store already holds everything
                       typed, so nothing is lost across the round-trip. */}
                   <DropdownMenuItem
                     render={
                       <AppLink
-                        href={`${p.settings()}?tab=issue`}
+                        href={`${p.settings()}?tab=preferences&section=issue`}
                         onClick={(e) => {
                           // A modifier click opens Settings in another tab —
                           // the modal (and the draft in it) stays put. Only

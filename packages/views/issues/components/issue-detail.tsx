@@ -7,6 +7,7 @@ import {
   statusCategoryOfKey,
 } from "@multica/core/issues";
 import { useStatusLabel } from "../utils/status-label";
+import { priorityLabel } from "../utils/priority-label";
 import { useIssueStatuses } from "@multica/core/issue-statuses/hooks";
 import { useState, useEffect, useCallback, useMemo, useRef, Fragment, type ReactNode } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
@@ -62,7 +63,7 @@ import { PropRow } from "../../common/prop-row";
 import { PropertyIcon } from "../../common/property-icon";
 import type { Attachment, Issue, IssueProperty, IssueStatus, IssueStatusCategory, IssuePriority, TimelineEntry, UpdateIssueRequest } from "@multica/core/types";
 import { contentReferencesAttachment } from "@multica/core/types";
-import { STATUS_CONFIG, PRIORITY_CONFIG } from "@multica/core/issues/config";
+import { STATUS_CONFIG } from "@multica/core/issues/config";
 import { formatDateOnly, isPastDateOnly } from "@multica/core/issues/date";
 import { useUpdateIssue } from "@multica/core/issues/mutations";
 import { toast } from "sonner";
@@ -77,17 +78,17 @@ import { IssueAgentActivityIndicator } from "./issue-agent-activity-indicator";
 import { SubIssuesAgentWorkingChip } from "./sub-issues-agent-working-chip";
 import { ProjectPicker } from "../../projects/components/project-picker";
 import { LocalDirectoryHint } from "../../projects/components/local-directory-hint";
-import { CommentCard } from "./comment-card";
+import { useNewRunIds } from "./use-run-comment-motion";
+import { AgentRunComment, CommentCard } from "./comment-card";
+import { EMPTY_COMMENT_RUNS, buildCommentRunView, type CommentRun } from "./comment-runs";
+import { issueTasksOptions } from "@multica/core/issues/queries";
 import { SourceContextBadge } from "./source-context-viewer";
 import { RevisionConflictCompare } from "./revision-conflict-compare";
 import { CommentInput } from "./comment-input";
 import { CurrentIssueRenderContextProvider } from "../current-issue-render-context";
 import { ResolvedThreadBar } from "./resolved-thread-bar";
-import { getShortcut, shortcutMatchesEvent } from "@multica/core/shortcuts";
-import { isImeComposing } from "@multica/core/utils";
-import { ThreadMinimap } from "./thread-minimap";
-import { ThreadNavPanel, mentionsUser, type ThreadNavThread } from "./thread-nav-panel";
-import { collectThreadReplies, deriveThreadResolution } from "./thread-utils";
+import { ThreadMinimap, type ThreadMinimapThread } from "./thread-minimap";
+import { collectThreadParticipants, collectThreadReplies, deriveThreadResolution } from "./thread-utils";
 import { IssueAgentHeaderChip } from "./issue-agent-header-chip";
 import { ExecutionLogSection } from "./execution-log-section";
 import { QuickActionsSection } from "./quick-actions-section";
@@ -123,7 +124,7 @@ import { useIssueTimeline } from "../hooks/use-issue-timeline";
 import { useIssueReactions } from "../hooks/use-issue-reactions";
 import { useIssueSubscribers } from "../hooks/use-issue-subscribers";
 import { ReactionBar } from "@multica/ui/components/common/reaction-bar";
-import { useTimeAgo } from "../../i18n";
+import { useLocale, useTimeAgo } from "../../i18n";
 import {
   useRestoredScrollOffset,
   useRestoredScrollRef,
@@ -260,9 +261,9 @@ function SubscriberPopoverContent({
   );
 }
 
-function shortDate(date: string | null): string {
+function shortDate(date: string | null, locale: string): string {
   if (!date) return "—";
-  return formatDateOnly(date, { month: "short", day: "numeric" }, "en-US");
+  return formatDateOnly(date, { month: "short", day: "numeric" }, locale);
 }
 
 type ActivityT = ReturnType<typeof useT<"issues">>["t"];
@@ -285,16 +286,10 @@ function statusLabel(
   return status;
 }
 
-function priorityLabel(priority: string, t: ActivityT): string {
-  if (priority in PRIORITY_CONFIG) {
-    return t(($) => $.priority[priority as IssuePriority]);
-  }
-  return priority;
-}
-
 function formatActivity(
   entry: TimelineEntry,
   t: ActivityT,
+  locale: string,
   resolveActorName?: (type: string, id: string) => string,
   resolveStatusLabel?: (statusKey: string) => string,
 ): string {
@@ -324,12 +319,12 @@ function formatActivity(
     }
     case "start_date_changed": {
       if (!details.to) return t(($) => $.activity.start_date_removed);
-      const formatted = formatDateOnly(details.to, { month: "short", day: "numeric" }, "en-US");
+      const formatted = formatDateOnly(details.to, { month: "short", day: "numeric" }, locale);
       return t(($) => $.activity.start_date_set, { date: formatted });
     }
     case "due_date_changed": {
       if (!details.to) return t(($) => $.activity.due_date_removed);
-      const formatted = formatDateOnly(details.to, { month: "short", day: "numeric" }, "en-US");
+      const formatted = formatDateOnly(details.to, { month: "short", day: "numeric" }, locale);
       return t(($) => $.activity.due_date_set, { date: formatted });
     }
     case "title_changed":
@@ -462,6 +457,7 @@ function shallowEqualEntries(a: TimelineEntry[], b: TimelineEntry[]): boolean {
 // into one activity-group row) but project it into a discriminated union
 // the itemContent dispatcher can switch on.
 type TimelineItem =
+  | { kind: "run"; id: string; run: CommentRun; entry?: TimelineEntry }
   | { kind: "comment"; id: string; entry: TimelineEntry }
   | { kind: "resolved-bar"; id: string; entry: TimelineEntry }
   | { kind: "activity-group"; id: string; entries: TimelineEntry[] };
@@ -469,7 +465,7 @@ type TimelineItem =
 type RawTimelineGroup = {
   type: "comment" | "activities";
   entries: TimelineEntry[];
-};
+} | { type: "run"; run: CommentRun; entry?: TimelineEntry };
 
 function flattenGroups(
   groups: ReadonlyArray<RawTimelineGroup>,
@@ -477,7 +473,9 @@ function flattenGroups(
 ): TimelineItem[] {
   const out: TimelineItem[] = [];
   for (const group of groups) {
-    if (group.type === "comment") {
+    if (group.type === "run") {
+      out.push({ kind: "run", id: group.entry?.id ?? group.run.task.id, run: group.run, entry: group.entry });
+    } else if (group.type === "comment") {
       const entry = group.entries[0]!;
       const isResolved = !!entry.resolved_at;
       const isExpanded = expandedResolved.has(entry.id);
@@ -538,6 +536,7 @@ function ActivityBlock({
   resolveStatusColor,
   t,
   timeAgo,
+  locale,
 }: {
   entries: TimelineEntry[];
   expanded: boolean;
@@ -555,6 +554,7 @@ function ActivityBlock({
   resolveStatusColor: (statusKey: string) => string | null;
   t: ActivityT;
   timeAgo: (dateStr: string) => string;
+  locale: string;
 }) {
   if (!expanded) {
     const count = entries.length;
@@ -630,7 +630,16 @@ function ActivityBlock({
         } else if (isDueDateChange) {
           leadIcon = <Calendar className="h-4 w-4 shrink-0 text-muted-foreground" />;
         } else {
-          leadIcon = <ActorAvatar actorType={entry.actor_type} actorId={entry.actor_id} size="sm" />;
+          leadIcon = (
+            <ActorAvatar
+              actorType={entry.actor_type}
+              actorId={entry.actor_id}
+              name={entry.actor_name}
+              avatarUrl={entry.actor_avatar_url}
+              profileRequiresDirectoryEntry
+              size="sm"
+            />
+          );
         }
 
         return (
@@ -639,8 +648,10 @@ function ActivityBlock({
               {leadIcon}
             </div>
             <div className="flex min-w-0 flex-1 items-center gap-1">
-              <span className="shrink-0 font-medium">{getActorName(entry.actor_type, entry.actor_id)}</span>
-              <span className="truncate">{formatActivity(entry, t, getActorName, resolveStatusLabel)}</span>
+              <span className="shrink-0 font-medium">
+                {entry.actor_name || getActorName(entry.actor_type, entry.actor_id)}
+              </span>
+              <span className="truncate">{formatActivity(entry, t, locale, getActorName, resolveStatusLabel)}</span>
               {(entry.coalesced_count ?? 1) > 1 &&
                 entry.action !== "task_completed" &&
                 entry.action !== "task_failed" && (
@@ -657,7 +668,7 @@ function ActivityBlock({
                   }
                 />
                 <TooltipContent side="top">
-                  {new Date(entry.created_at).toLocaleString()}
+                  {new Date(entry.created_at).toLocaleString(locale)}
                 </TooltipContent>
               </Tooltip>
             </div>
@@ -687,6 +698,7 @@ function SubIssueRow({
   customProperties: IssueProperty[];
 }) {
   const { t } = useT("issues");
+  const locale = useLocale();
   const paths = useWorkspacePaths();
   const updateIssue = useUpdateIssue();
   const selected = useIssueSelectionStore((s) => s.selectedIds.has(child.id));
@@ -751,7 +763,9 @@ function SubIssueRow({
             type="checkbox"
             checked={selected}
             onChange={() => toggleSelected(child.id)}
-            aria-label={`Select ${child.identifier}`}
+            aria-label={t(($) => $.detail.select_sub_issue_aria, {
+              identifier: child.identifier,
+            })}
             className={cn(
               "absolute inset-0 cursor-pointer accent-primary transition-opacity",
               selected
@@ -847,7 +861,7 @@ function SubIssueRow({
                 )}
               >
                 <CalendarDays className="size-3" />
-                {shortDate(child.due_date)}
+                {shortDate(child.due_date, locale)}
               </span>
             }
           />
@@ -1122,6 +1136,7 @@ export function IssueDetailSkeleton({ leading }: { leading?: ReactNode } = {}) {
 
 export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = true, layoutId = "multica_issue_detail_layout", highlightCommentId, highlightRequestToken, leadingAction }: IssueDetailProps) {
   const { t } = useT("issues");
+  const locale = useLocale();
   const timeAgo = useTimeAgo();
   const id = issueId;
   const user = useAuthStore((s) => s.user);
@@ -1415,6 +1430,15 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
     editComment, deleteComment, toggleResolveComment, toggleReaction: handleToggleReaction,
   } = useIssueTimeline(id, user?.id);
 
+  const { data: commentTasks } = useQuery(issueTasksOptions(id));
+  const enteringRunIds = useNewRunIds(id, commentTasks);
+  const previousCommentRuns = useRef(new Map<string, CommentRun[]>());
+  const { runs: commentRuns, timeline: displayTimeline, standaloneRuns } = useMemo(() => {
+    const next = buildCommentRunView(commentTasks ?? [], timeline, previousCommentRuns.current);
+    previousCommentRuns.current = next.runs;
+    return next;
+  }, [commentTasks, timeline]);
+
   // Resolve / unresolve must always clear the per-session expand entry so
   // re-resolving an already-expanded thread folds it back to the bar (the
   // expand Set is keyed only on commentId, not on resolution state). Without
@@ -1425,13 +1449,13 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
       // Fold the thread back on any resolve change: clear the thread ROOT's
       // expand entry (expand state is keyed on root id, but a resolve target
       // can be a reply). Walk parent_id up to the root.
-      const byId = new Map(timeline.map((e) => [e.id, e]));
+      const byId = new Map(displayTimeline.map((e) => [e.id, e]));
       let cur = byId.get(commentId);
       while (cur?.parent_id && byId.get(cur.parent_id)) cur = byId.get(cur.parent_id)!;
       clearResolvedExpand(cur?.id ?? commentId);
       toggleResolveComment(commentId, resolved);
     },
-    [timeline, clearResolvedExpand, toggleResolveComment],
+    [displayTimeline, clearResolvedExpand, toggleResolveComment],
   );
 
   // Memoized timeline grouping. Each render rebuilds the per-parent map from
@@ -1449,11 +1473,11 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
     // bucketed under their parent's id and rendered nested inside CommentCard.
     // No orphan rescue needed: the timeline is fetched in full, so every
     // reply's parent is always in the same array.
-    const topLevel = timeline.filter(
+    const topLevel = displayTimeline.filter(
       (e) => e.type === "activity" || !e.parent_id,
     );
     const repliesByParent = new Map<string, TimelineEntry[]>();
-    for (const e of timeline) {
+    for (const e of displayTimeline) {
       if (e.type === "comment" && e.parent_id) {
         const list = repliesByParent.get(e.parent_id) ?? [];
         list.push(e);
@@ -1484,13 +1508,24 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
     const COALESCE_MS = 2 * 60 * 1000;
     const NO_TIME_LIMIT_ACTIONS = new Set(["task_completed", "task_failed"]);
     const NEVER_COALESCE_ACTIONS = new Set(["squad_leader_evaluated"]);
-    const coalesced: TimelineEntry[] = [];
-    for (const entry of topLevel) {
+    // Unanchored runs separate activity groups at their actual start position.
+    const standaloneReplyIds = new Set(standaloneRuns.filter((run) => run.hasReply).map((run) => run.commentId));
+    const chronological = [...topLevel.filter((entry) => !standaloneReplyIds.has(entry.id)), ...standaloneRuns].sort((a, b) => {
+      const left = "task" in a ? a.task : a;
+      const right = "task" in b ? b.task : b;
+      return Date.parse(left.created_at) - Date.parse(right.created_at);
+    });
+    const coalesced: (TimelineEntry | CommentRun)[] = [];
+    for (const entry of chronological) {
+      if ("task" in entry) {
+        coalesced.push(entry);
+        continue;
+      }
       if (entry.type === "activity") {
         const prev = coalesced[coalesced.length - 1];
         if (
           !NEVER_COALESCE_ACTIONS.has(entry.action!) &&
-          prev?.type === "activity" &&
+          prev && !("task" in prev) && prev.type === "activity" &&
           prev.action === entry.action &&
           prev.actor_type === entry.actor_type &&
           prev.actor_id === entry.actor_id &&
@@ -1505,9 +1540,11 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
     }
 
     // Group consecutive activities together so the connector line works
-    const groups: { type: "activities" | "comment"; entries: TimelineEntry[] }[] = [];
+    const groups: RawTimelineGroup[] = [];
     for (const entry of coalesced) {
-      if (entry.type === "activity") {
+      if ("task" in entry) {
+        groups.push({ type: "run", run: entry, entry: entry.hasReply ? displayTimeline.find((comment) => comment.id === entry.commentId) : undefined });
+      } else if (entry.type === "activity") {
         const last = groups[groups.length - 1];
         if (last?.type === "activities") {
           last.entries.push(entry);
@@ -1520,7 +1557,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
     }
 
     return { threadReplies, groups };
-  }, [timeline]);
+  }, [displayTimeline, standaloneRuns]);
 
   // Flat array consumed by <Virtuoso>. Recomputed when timelineView.groups
   // changes (timeline events) or expandedResolved flips (user toggles a
@@ -1583,42 +1620,27 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
 
   // One entry per comment thread (folded resolved bars included), activity
   // groups skipped. Derived from the same flat `items` array Virtuoso renders
-  // so the order always matches the page. Feeds both thread navigators — the
-  // right-edge rail and the header panel — from one derivation, so they can
-  // never disagree about what the threads are or what order they are in.
+  // so the right-edge outline always matches the page order.
   //
   // The resolved flag comes from `deriveThreadResolution`, not from the
   // `resolved-bar` kind: that kind only covers root resolutions that are
   // currently folded, so it would miss reply resolutions and would flip off
   // as soon as the user expanded a resolved thread.
-  const minimapThreads = useMemo<ThreadNavThread[]>(
+  const minimapThreads = useMemo<ThreadMinimapThread[]>(
     () =>
       items.flatMap((it) => {
-        if (it.kind !== "comment" && it.kind !== "resolved-bar") return [];
+        if (it.kind === "activity-group" || !it.entry) return [];
         const replies = timelineView.threadReplies.get(it.id) ?? EMPTY_REPLIES;
-        const currentUserId = user?.id ?? "";
-        // "@me" means the thread concerns this reader: they started it,
-        // answered in it, or were @mentioned anywhere in it. Authorship counts
-        // because a thread you spoke in is one you are expected to follow —
-        // narrowing to literal mentions would drop most of them.
-        const involvesMe =
-          currentUserId !== "" &&
-          ([it.entry, ...replies].some(
-            (entry) =>
-              (entry.actor_type === "member" && entry.actor_id === currentUserId) ||
-              mentionsUser(entry.content, currentUserId),
-          ));
         return [
           {
             id: it.id,
             entry: it.entry,
             resolved: deriveThreadResolution(it.entry, replies).kind !== "none",
-            replyCount: replies.length,
-            involvesMe,
+            participants: collectThreadParticipants(it.entry, replies),
           },
         ];
       }),
-    [items, timelineView.threadReplies, user?.id],
+    [items, timelineView.threadReplies],
   );
 
   // When the timeline renders flat (deep-link or in-page find), there is no
@@ -1727,49 +1749,6 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
     },
     [isFlatTimeline, items, scrollContainerEl],
   );
-
-  // Header thread navigator. `open` and `pinned` live here rather than inside
-  // the panel because the global shortcut has to be able to open it already
-  // pinned, and because the rail needs `threadNavHoverId` to light the tick
-  // the panel's pointer is resting on — the two navigators share one
-  // coordinate system (MUL-5755).
-  const [threadNavOpen, setThreadNavOpen] = useState(false);
-  const [threadNavPinned, setThreadNavPinned] = useState(false);
-  const [threadNavHoverId, setThreadNavHoverId] = useState<string | null>(null);
-  const handleThreadNavOpenChange = useCallback((open: boolean, pinned: boolean) => {
-    setThreadNavOpen(open);
-    setThreadNavPinned(pinned);
-    if (!open) setThreadNavHoverId(null);
-  }, []);
-
-  // Global Mod+Shift+O. Scoped to the mounted issue detail and gated on
-  // visibility the same way Cmd+F is, so on desktop only the visible tab
-  // intercepts the key.
-  useEffect(() => {
-    if (minimapThreads.length === 0) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || e.repeat || isImeComposing(e)) return;
-      if (!shortcutMatchesEvent(getShortcut("openThreadNav"), e)) return;
-      if (!scrollContainerEl || scrollContainerEl.getClientRects().length === 0) return;
-      e.preventDefault();
-      // The shortcut is a deliberate act, so it opens the pinned state
-      // directly. Pressing it again over a hover preview pins that preview
-      // rather than closing it, matching what pressing the button does.
-      if (threadNavOpen && threadNavPinned) {
-        handleThreadNavOpenChange(false, false);
-      } else {
-        handleThreadNavOpenChange(true, true);
-      }
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [
-    handleThreadNavOpenChange,
-    minimapThreads.length,
-    scrollContainerEl,
-    threadNavOpen,
-    threadNavPinned,
-  ]);
 
   const {
     reactions: issueReactions,
@@ -1921,14 +1900,14 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
     const rootId = replyToRoot.get(highlightCommentId);
     if (rootId && rootId !== highlightCommentId) {
       // Root resolved → the whole thread is a folded bar.
-      if (items[targetIdx]?.kind === "resolved-bar") {
+      const rootItem = items[targetIdx];
+      if (rootItem?.kind === "resolved-bar" || (rootItem?.kind === "run" && rootItem.entry?.resolved_at && !expandedResolved.has(rootId))) {
         toggleResolvedExpand(rootId, true);
         return;
       }
       // A reply is the resolution → the other replies fold behind the
       // "N comments" bar; expand if the target is one of those folded replies.
-      const rootItem = items[targetIdx];
-      if (rootItem?.kind === "comment" && !expandedResolved.has(rootId)) {
+      if ((rootItem?.kind === "comment" || rootItem?.kind === "run") && rootItem.entry && !expandedResolved.has(rootId)) {
         const resolution = deriveThreadResolution(
           rootItem.entry,
           timelineView.threadReplies.get(rootId) ?? EMPTY_REPLIES,
@@ -1991,8 +1970,6 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
 
   const descEditorRef = useRef<ContentEditorRef>(null);
   const descriptionEditingRef = useRef(false);
-  const [descriptionConflictDraft, setDescriptionConflictDraft] = useState<string | null>(null);
-  const descriptionAttachmentIdsRef = useRef<string[]>([]);
   const descriptionSaveInFlightRef = useRef(false);
   const descriptionSaveIssueIdRef = useRef(id);
   const pendingDescriptionSaveRef = useRef<{
@@ -2014,9 +1991,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
   const [titleResetToken, setTitleResetToken] = useState(0);
   useEffect(() => {
     setTitleConflictDraft(null);
-    setDescriptionConflictDraft(null);
     titleBaseRef.current = undefined;
-    descriptionAttachmentIdsRef.current = [];
     descriptionSaveInFlightRef.current = false;
     descriptionSaveIssueIdRef.current = id;
     pendingDescriptionSaveRef.current = null;
@@ -2058,7 +2033,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
       { content: issue?.description, attachments: descEditorAttachments },
     ];
     for (const item of items) {
-      if (item.kind === "activity-group") continue;
+      if (item.kind === "activity-group" || !item.entry) continue;
       blocks.push({
         content: item.entry.content,
         attachments: item.entry.attachments,
@@ -2269,7 +2244,6 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
       {
         onSuccess: (serverIssue) => {
           if (descriptionSaveIssueIdRef.current !== id) return;
-          setDescriptionConflictDraft(null);
           descriptionSaveInFlightRef.current = false;
           const pending = pendingDescriptionSaveRef.current;
           pendingDescriptionSaveRef.current = null;
@@ -2284,16 +2258,10 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
             persistDescriptionSave({ ...pending, baseMarkdown: nextBase });
           }
         },
-        onError: (error) => {
+        onError: () => {
           if (descriptionSaveIssueIdRef.current !== id) return;
           descriptionSaveInFlightRef.current = false;
-          const pending = pendingDescriptionSaveRef.current;
           pendingDescriptionSaveRef.current = null;
-          if (errorCode(error) === "revision_conflict") {
-            const latest = pending ?? draft;
-            descriptionAttachmentIdsRef.current = latest.attachmentIds;
-            setDescriptionConflictDraft(latest.markdown);
-          }
         },
       },
     );
@@ -2302,7 +2270,6 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
   const queueDescriptionSave = (
     draft: { markdown: string; baseMarkdown: string; attachmentIds: string[] },
   ) => {
-    descriptionAttachmentIdsRef.current = draft.attachmentIds;
     if (descriptionSaveInFlightRef.current) {
       pendingDescriptionSaveRef.current = draft;
       return;
@@ -2596,10 +2563,10 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
             <span className="cursor-pointer truncate">{getActorName(issue.creator_type, issue.creator_id)}</span>
           </PropRow>
           <PropRow label={t(($) => $.detail.prop_created)}>
-            <span className="text-muted-foreground">{shortDate(issue.created_at)}</span>
+            <span className="text-muted-foreground">{shortDate(issue.created_at, locale)}</span>
           </PropRow>
           <PropRow label={t(($) => $.detail.prop_updated)}>
-            <span className="text-muted-foreground">{shortDate(issue.updated_at)}</span>
+            <span className="text-muted-foreground">{shortDate(issue.updated_at, locale)}</span>
           </PropRow>
         </div>}
       </div>
@@ -2648,6 +2615,25 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
   // The wrapper `id="comment-..."` is the deep-link target — equivalent to
   // a native `<a href="#comment-...">` anchor.
   const renderItem = (_i: number, item: TimelineItem): React.ReactElement => {
+    if (item.kind === "run") {
+      const reply = item.entry;
+      return <div className="pb-3" id={reply ? `comment-${reply.id}` : undefined}>
+        {reply?.resolved_at && !expandedResolved.has(reply.id) ? <ResolvedThreadBar
+          entry={reply} replies={timelineView.threadReplies.get(reply.id) ?? EMPTY_REPLIES}
+          onExpand={() => toggleResolvedExpand(reply.id, true)} /> : <AgentRunComment run={item.run} entering={enteringRunIds.has(item.run.task.id)} standalone
+          commentProps={reply ? {
+            issueId: id, entry: reply, replies: timelineView.threadReplies.get(reply.id) ?? EMPTY_REPLIES,
+            currentUserId: user?.id, canModerate: canModerateComments, onReply: submitReply,
+            onReplyAccepted: scrollToTimelineBottom, onEdit: editComment, onDelete: deleteComment,
+            onToggleReaction: handleToggleReaction, onCreateSubIssue: openCommentSubIssue,
+            onResolveToggle: handleResolveToggle,
+            onCollapseResolved: reply.resolved_at ? () => toggleResolvedExpand(reply.id, false) : undefined,
+            expandedResolvedIds: expandedResolved, onResolvedExpandChange: toggleResolvedExpand,
+            highlightedCommentId: highlightedId,
+            runs: commentRuns.get(reply.id) ?? EMPTY_COMMENT_RUNS, enteringRunIds,
+          } : undefined} />}
+      </div>;
+    }
     if (item.kind === "resolved-bar") {
       return (
         <div className="pb-3" id={`comment-${item.id}`}>
@@ -2665,6 +2651,8 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
         <div className="pb-3" id={`comment-${item.id}`}>
           <CommentCard
             issueId={id}
+            runs={commentRuns.get(item.id) ?? EMPTY_COMMENT_RUNS}
+            enteringRunIds={enteringRunIds}
             entry={item.entry}
             replies={timelineView.threadReplies.get(item.id) ?? EMPTY_REPLIES}
             currentUserId={user?.id}
@@ -2706,6 +2694,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
         resolveStatusColor={resolveStatusColor}
         t={t}
         timeAgo={timeAgo}
+        locale={locale}
       />
     );
   };
@@ -2774,21 +2763,6 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
                 it never overlaps the title (which truncates to make room).
                 It self-hides when no agent is active. */}
             <IssueAgentHeaderChip issueId={id} />
-            {/* Thread navigator. Leftmost of the action buttons because it
-                navigates the document, while everything to its right acts on
-                the issue. Hidden on mobile with the rail: the panel would work
-                there, but it needs a sheet rather than a popover to be usable
-                one-handed, which is its own change. */}
-            {!isMobile && (
-              <ThreadNavPanel
-                threads={minimapThreads}
-                onJump={jumpToThread}
-                onHoverThread={setThreadNavHoverId}
-                open={threadNavOpen}
-                pinned={threadNavPinned}
-                onOpenChange={handleThreadNavOpenChange}
-              />
-            )}
             {onDone && !issueBehavesAsAny(issue, ["done", "cancelled"]) && (
               <Tooltip>
                 <TooltipTrigger
@@ -2950,44 +2924,44 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
               localLabel={t(($) => $.revision.local_version)}
               serverValue={issue.title}
               localValue={titleConflictDraft}
-              actions={(
-                <div className="flex flex-wrap items-center gap-2">
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    onClick={() => {
-                      const draft = titleConflictDraft.trim();
-                      if (!draft) return;
-                      handleUpdateField(
-                        { title: draft, title_base: issue.title },
-                        {
-                          onSuccess: (serverIssue) => {
-                            setTitleConflictDraft(null);
-                            titleBaseRef.current = serverIssue.title;
-                          },
+              serverAction={(
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    // Local-only: the server already holds this title, so
+                    // discarding writes nothing. The remount is what puts it
+                    // back into the editor (see titleResetToken).
+                    setTitleConflictDraft(null);
+                    titleBaseRef.current = issue.title;
+                    setTitleResetToken((token) => token + 1);
+                  }}
+                >
+                  {t(($) => $.revision.use_server)}
+                </Button>
+              )}
+              localAction={(
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    const draft = titleConflictDraft.trim();
+                    if (!draft) return;
+                    handleUpdateField(
+                      { title: draft, title_base: issue.title },
+                      {
+                        onSuccess: (serverIssue) => {
+                          setTitleConflictDraft(null);
+                          titleBaseRef.current = serverIssue.title;
                         },
-                      );
-                    }}
-                  >
-                    {t(($) => $.revision.keep_local)}
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => {
-                      // Local-only: the server already holds this title, so
-                      // discarding writes nothing. The remount is what puts it
-                      // back into the editor (see titleResetToken).
-                      setTitleConflictDraft(null);
-                      titleBaseRef.current = issue.title;
-                      setTitleResetToken((token) => token + 1);
-                    }}
-                  >
-                    {t(($) => $.revision.use_server)}
-                  </Button>
-                </div>
+                      },
+                    );
+                  }}
+                >
+                  {t(($) => $.revision.keep_local)}
+                </Button>
               )}
             />
           ) : null}
@@ -3055,7 +3029,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
             <ContentEditor
               ref={descEditorRef}
               key={id}
-              value={descriptionConflictDraft ?? issue.description ?? ""}
+              value={issue.description ?? ""}
               placeholder={t(($) => $.detail.desc_placeholder)}
               onUpdate={(md, baseMarkdown) => {
                 // Bind any pending uploads still referenced in the markdown
@@ -3093,64 +3067,6 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
               currentIssueId={id}
               attachments={descEditorAttachments}
             />
-
-            {descriptionConflictDraft !== null ? (
-              <RevisionConflictCompare
-                className="mt-3"
-                title={t(($) => $.revision.compare_description)}
-                serverLabel={t(($) => $.revision.server_version)}
-                localLabel={t(($) => $.revision.local_version)}
-                serverValue={issue.description || ""}
-                localValue={descriptionConflictDraft}
-                actions={(
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      onClick={() => {
-                        handleUpdateField(
-                          {
-                            description: descriptionConflictDraft,
-                            description_base: issue.description || "",
-                            attachment_ids:
-                              descriptionAttachmentIdsRef.current.length > 0
-                                ? descriptionAttachmentIdsRef.current
-                                : undefined,
-                          },
-                          {
-                            onSuccess: () => {
-                              setDescriptionConflictDraft(null);
-                            },
-                          },
-                        );
-                      }}
-                    >
-                      {t(($) => $.revision.keep_local)}
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => {
-                        // The editor is dirty — that is why this conflict
-                        // exists — so the `value` prop cannot land: ContentEditor
-                        // deliberately refuses to clobber unsaved bytes.
-                        // adoptContent is the explicit "take this content"
-                        // channel and applies without emitting an update, so
-                        // discarding never writes.
-                        descEditorRef.current?.adoptContent(issue.description || "");
-                        descriptionAttachmentIdsRef.current = [];
-                        pendingDescriptionSaveRef.current = null;
-                        setDescriptionConflictDraft(null);
-                      }}
-                    >
-                      {t(($) => $.revision.use_server)}
-                    </Button>
-                  </div>
-                )}
-              />
-            ) : null}
 
             <div className="flex items-center gap-1 mt-3">
               <ReactionBar
@@ -3219,7 +3135,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
                       if (el) el.indeterminate = someChildrenSelected && !allChildrenSelected;
                     }}
                     onChange={handleToggleSelectAllChildren}
-                    aria-label="Select all sub-issues"
+                    aria-label={t(($) => $.detail.select_all_sub_issues_aria)}
                     className={cn(
                       "ml-1 cursor-pointer accent-primary transition-opacity",
                       someChildrenSelected
@@ -3464,7 +3380,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
                       data={items}
                       initialScrollTop={restoredScrollTop}
                       increaseViewportBy={{ top: 800, bottom: 800 }}
-                      computeItemKey={(_i, item) => `${item.kind}:${item.id}`}
+                      computeItemKey={(_i, item) => `${item.kind}:${item.kind === "run" ? item.run.task.id : item.id}`}
                       skipAnimationFrameInResizeObserver
                       // followOutput intentionally NOT set. Virtuoso treats
                       // it as a sticky "is at bottom" flag and resets
@@ -3477,7 +3393,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
               ) : (
                 <div className="mt-4">
                   {items.map((item, i) => (
-                    <Fragment key={`${item.kind}:${item.id}`}>
+                    <Fragment key={`${item.kind}:${item.kind === "run" ? item.run.task.id : item.id}`}>
                       {renderItem(i, item)}
                     </Fragment>
                   ))}
@@ -3538,7 +3454,6 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
             threads={minimapThreads}
             scrollContainerEl={scrollContainerEl}
             onJump={jumpToThread}
-            highlightedThreadId={threadNavHoverId}
             className="absolute bottom-0 right-3 top-12"
           />
         )}

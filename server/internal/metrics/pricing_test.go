@@ -341,3 +341,151 @@ func TestPriceForModelAliasNoFalseBorrowing(t *testing.T) {
 		}
 	}
 }
+
+// TestPriceForModelAliasContextTagStripping pins the `[1m]` context-variant
+// suffix normalization across every rule, including the anchored Codex / Grok /
+// Kimi rules that do not carry a per-rule optional bracket group. Claude Code
+// (and other harnesses) append a context-window tag such as `[1m]` to the
+// model id; it is the same SKU at the same tier, so the row must price instead
+// of falling into the unpriced bucket in RecordLLMUsage. Mirrors the frontend's
+// `stripContextTag` (`\[[^\]]+\]$`) in packages/views/runtimes/utils.ts.
+func TestPriceForModelAliasContextTagStripping(t *testing.T) {
+	cases := []struct {
+		model string
+		want  ModelPrice
+	}{
+		{
+			model: "grok-4.5[1m]",
+			want:  ModelPrice{Provider: "xai", Model: "grok-4.5", InputPerM: 2.00, CacheReadPerM: 0.30, CacheWritePerM: 2.00, OutputPerM: 6.00},
+		},
+		{
+			model: "gpt-5.6-luna[1m]",
+			want:  ModelPrice{Provider: "openai", Model: "gpt-5.6-luna", InputPerM: 1.00, CacheReadPerM: 0.10, CacheWritePerM: 1.25, OutputPerM: 6.00},
+		},
+		{
+			model: "kimi-k3[1m]",
+			want:  ModelPrice{Provider: "moonshotai", Model: "kimi-k3", InputPerM: 3.0, CacheReadPerM: 0.30, CacheWritePerM: 3.0, OutputPerM: 15.0},
+		},
+	}
+
+	for _, tc := range cases {
+		got, ok := PriceForModelAlias(tc.model)
+		if !ok {
+			t.Fatalf("PriceForModelAlias(%q) did not resolve", tc.model)
+		}
+		if got != tc.want {
+			t.Fatalf("PriceForModelAlias(%q) = %+v, want %+v", tc.model, got, tc.want)
+		}
+	}
+
+	// The tag stripper is anchored at end-of-string with a non-empty tag, so it
+	// must not turn these misses into hits: a trailing bracket that is not a
+	// complete end-of-string tag, and an empty tag, both stay unmapped — the
+	// same guard the frontend keeps.
+	for _, model := range []string{
+		"grok-4.5[1m]-extra",
+		"gpt-5.6-luna[]",
+		"kimi-k3[",
+	} {
+		if got, ok := PriceForModelAlias(model); ok {
+			t.Fatalf("PriceForModelAlias(%q) unexpectedly resolved to %+v; want unmapped", model, got)
+		}
+	}
+}
+
+func TestPriceForModelAliasAnthropicFable51(t *testing.T) {
+	// Fable 5.1 is its own SKU on the same Mythos-class tier as Fable 5, but
+	// with cache reads at 0.025x input ($0.25) instead of the usual 0.1x. A
+	// Fable 5 alias that did not stop at the version would swallow the `-1`
+	// suffix and bill those reads at 4x, so every spelling below must land on
+	// the Fable 5.1 row specifically.
+	fable51 := ModelPrice{Provider: "anthropic", Model: "claude-fable-5-1", InputPerM: 10, CacheReadPerM: 0.25, CacheWritePerM: 12.5, OutputPerM: 50}
+	fable5 := ModelPrice{Provider: "anthropic", Model: "claude-fable-5", InputPerM: 10, CacheReadPerM: 1, CacheWritePerM: 12.5, OutputPerM: 50}
+	cases := []struct {
+		model string
+		want  ModelPrice
+	}{
+		{model: "claude-fable-5-1", want: fable51},
+		{model: "anthropic/claude-fable-5-1", want: fable51},
+		{model: "anthropic:claude-fable-5-1", want: fable51},
+		// Copilot reports Claude models dotted.
+		{model: "claude-fable-5.1", want: fable51},
+		// Claude Code reports the 1M-context variant with a bracketed suffix.
+		{model: "claude-fable-5-1[1m]", want: fable51},
+		// Fable 5 must keep resolving to its own row, including its 1M form.
+		{model: "claude-fable-5", want: fable5},
+		{model: "claude-fable-5[1m]", want: fable5},
+		// The frontend resolver strips a trailing date snapshot / `-latest`
+		// before its exact-key lookup (`stripDate` in
+		// packages/views/runtimes/utils.ts), so these forms price there. Both
+		// rules have to admit them too, otherwise the dashboard and
+		// RecordLLMUsage disagree on the same id.
+		{model: "claude-fable-5-20260401", want: fable5},
+		{model: "claude-fable-5-2026-04-01", want: fable5},
+		{model: "claude-fable-5-latest", want: fable5},
+		{model: "claude-fable-5-20260401[1m]", want: fable5},
+		{model: "claude-fable-5-1-20260901", want: fable51},
+		{model: "claude-fable-5-1-latest", want: fable51},
+		{model: "claude-fable-5-1-20260901[1m]", want: fable51},
+	}
+
+	for _, tc := range cases {
+		got, ok := PriceForModelAlias(tc.model)
+		if !ok {
+			t.Fatalf("PriceForModelAlias(%q) did not resolve", tc.model)
+		}
+		if got != tc.want {
+			t.Fatalf("PriceForModelAlias(%q) = %+v, want %+v", tc.model, got, tc.want)
+		}
+	}
+
+	// A later Fable minor is a distinct SKU at an unknown rate: it must stay
+	// unmapped and surface in the unpriced diagnostic rather than borrow a
+	// neighbour's tier. This is the same failure the `-1` suffix had against
+	// the Fable 5 rule, so guard it on the 5.1 rule as well.
+	for _, model := range []string{
+		"claude-fable-5-2",
+		"claude-fable-5.2",
+		"claude-fable-5-10",
+		"claude-fable-5.10",
+		"claude-fable-5-1x",
+	} {
+		if got, ok := PriceForModelAlias(model); ok {
+			t.Errorf("PriceForModelAlias(%q) resolved to %+v; want unmapped", model, got)
+		}
+	}
+
+	// An admitted suffix only counts when it ENDS the id. These rules are
+	// substring matches, so a terminator whose alternatives are not anchored
+	// still fires on anything that merely starts with one — an unknown
+	// qualifier would silently borrow the tier of whichever row it prefixed,
+	// while the frontend (which anchors both `stripDate` and the bracket tag)
+	// leaves it unmapped. Same id, two different costs.
+	for _, model := range []string{
+		"claude-fable-5-1-latest-preview",
+		"claude-fable-5-1-20260901x",
+		"claude-fable-5-1-2026-09-01-preview",
+		"claude-fable-5-1[1m]junk",
+		"claude-fable-5-latest-preview",
+		"claude-fable-5-20260401-preview",
+		"claude-fable-5[1m]junk",
+	} {
+		if got, ok := PriceForModelAlias(model); ok {
+			t.Errorf("PriceForModelAlias(%q) resolved to %+v; want unmapped", model, got)
+		}
+	}
+
+	// A doubly-tagged id must not sneak back in through the tag-stripping
+	// retry: peeling `[2m]` leaves `[1m]`, which the rule above rejected on
+	// the raw form for good reason. The frontend strips one tag and does not
+	// re-strip, so pricing these here would put two different costs on one
+	// usage row.
+	for _, model := range []string{
+		"claude-fable-5[1m][2m]",
+		"claude-fable-5-1[1m][2m]",
+	} {
+		if got, ok := PriceForModelAlias(model); ok {
+			t.Errorf("PriceForModelAlias(%q) resolved to %+v; want unmapped", model, got)
+		}
+	}
+}

@@ -92,13 +92,20 @@ import { ARCHIVED_VIEW_PARAM, type InboxView } from "./inbox-view";
 import { useTypeLabels } from "./inbox-detail-label";
 import {
   getInboxDisplayTitle,
+  isAutopilotQuotaNotice,
   isQuickCreateOutcome,
   resolveDetailItem,
 } from "./inbox-display";
+import { AutopilotQuotaNotice } from "./autopilot-quota-notice";
 import { useT } from "../../i18n";
+import { useIssueLimitUpgradePrompt } from "../../modals/use-issue-limit-upgrade-prompt";
 
 export function InboxPage() {
   const { t } = useT("inbox");
+  const showIssueLimitUpgradePrompt = useIssueLimitUpgradePrompt();
+  const showAutopilotQuotaRecoveryPrompt = useIssueLimitUpgradePrompt(
+    "autopilot_quota",
+  );
   const { searchParams, replace } = useNavigation();
   const urlIssue = searchParams.get("issue") ?? "";
   const urlView: InboxView =
@@ -691,7 +698,9 @@ export function InboxPage() {
         layoutId="multica_inbox_issue_detail_layout"
         highlightCommentId={detailItem.details?.comment_id ?? undefined}
         highlightRequestToken={highlightRequestToken}
-        leadingAction={compactBackAction}
+        // The split layout already has a nav trigger in the list header.
+        // Explicit false suppresses the detail header's fallback trigger.
+        leadingAction={compactBackAction ?? false}
         onDelete={() => {
           // Issue deletion CASCADE-deletes the inbox item server-side, and the
           // issue:deleted WS event prunes it from the inbox cache. Just clear
@@ -706,15 +715,24 @@ export function InboxPage() {
     </ErrorBoundary>
   ) : detailItem ? (
     <div className="p-6">
-      <h2 className="text-title font-semibold">{getInboxDisplayTitle(detailItem)}</h2>
+      <h2 className="text-title font-semibold">
+        {isAutopilotQuotaNotice(detailItem.type)
+          ? typeLabels[detailItem.type]
+          : getInboxDisplayTitle(detailItem)}
+      </h2>
       <p className="mt-1 text-body text-muted-foreground">
         {typeLabels[detailItem.type]} · {timeAgo(detailItem.created_at)}
       </p>
-      {detailItem.body && (
+      {isAutopilotQuotaNotice(detailItem.type) ? (
+        <AutopilotQuotaNotice
+          item={detailItem}
+          onOpenRecovery={showAutopilotQuotaRecoveryPrompt}
+        />
+      ) : detailItem.body ? (
         <div className="mt-4 whitespace-pre-wrap text-body leading-relaxed text-foreground">
           {detailItem.body}
         </div>
-      )}
+      ) : null}
       {isQuickCreateOutcome(detailItem.type) && detailItem.details?.original_prompt && (
         <div className="mt-4 rounded-md border bg-muted/40 p-3">
           <p className="text-caption font-medium text-muted-foreground">
@@ -736,6 +754,13 @@ export function InboxPage() {
                   await retrySourceContextMutation.mutateAsync(detailItem.details!.task_id!);
                   toast.success(t(($) => $.toasts.source_context_retry_started));
                 } catch (error) {
+                  if (
+                    error instanceof ApiError &&
+                    errorCode(error) === "issue_limit_reached"
+                  ) {
+                    showIssueLimitUpgradePrompt();
+                    return;
+                  }
                   toast.error(
                     error instanceof ApiError &&
                       errorCode(error) === "source_context_retry_unavailable"
@@ -855,7 +880,7 @@ export function InboxPage() {
   if (viewLoading) {
     return (
       <ResizablePanelGroup orientation="horizontal" className="flex-1 min-h-0" defaultLayout={defaultLayout} onLayoutChanged={onLayoutChanged}>
-        <ResizablePanel id="list" defaultSize={320} minSize={240} maxSize={480} groupResizeBehavior="preserve-pixel-size">
+        <ResizablePanel id="list" defaultSize={280} minSize={240} maxSize={480} groupResizeBehavior="preserve-pixel-size">
           <div className="flex flex-col border-r h-full">
             <div className={cn("flex h-12 shrink-0 items-center border-b", PAGE_GUTTER)}>
               <Skeleton className="h-5 w-16" />
@@ -886,7 +911,7 @@ export function InboxPage() {
 
   return (
     <ResizablePanelGroup orientation="horizontal" className="flex-1 min-h-0" defaultLayout={defaultLayout} onLayoutChanged={onLayoutChanged}>
-      <ResizablePanel id="list" defaultSize={320} minSize={240} maxSize={480} groupResizeBehavior="preserve-pixel-size">
+      <ResizablePanel id="list" defaultSize={280} minSize={240} maxSize={480} groupResizeBehavior="preserve-pixel-size">
       <div className="flex flex-col border-r h-full">
         {listPanel}
       </div>

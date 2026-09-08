@@ -83,6 +83,7 @@ import { FileUploadButton } from "@multica/ui/components/common/file-upload-butt
 import { useT } from "../i18n";
 import { matchesPinyin } from "../editor/extensions/pinyin-match";
 import { SourceContextPreviewCard, useSourceContextFailureMessage } from "./source-context-preview";
+import { useIssueLimitUpgradePrompt } from "./use-issue-limit-upgrade-prompt";
 
 type ActorSelection =
   | { type: "agent"; id: string }
@@ -119,6 +120,7 @@ export function AgentCreatePanel({
   const { t } = useT("modals");
   const { t: tIssues } = useT("issues");
   const { t: tProjects } = useT("projects");
+  const showIssueLimitUpgradePrompt = useIssueLimitUpgradePrompt();
   const sendShortcut = useShortcut("send");
   const workspaceName = useCurrentWorkspace()?.name;
   const workspacePaths = useWorkspacePaths();
@@ -459,6 +461,10 @@ export function AgentCreatePanel({
             current_version?: string;
             min_version?: string;
           };
+          if (body.code === "issue_limit_reached") {
+            showIssueLimitUpgradePrompt();
+            return false;
+          }
           if (body.code === "agent_unavailable") {
             setError(body.reason || t(($) => $.create_issue.agent.error_agent_unavailable_fallback));
             return false;
@@ -798,7 +804,7 @@ export function AgentCreatePanel({
               <DropdownMenuItem
                 render={
                   <AppLink
-                    href={`${workspacePaths.settings()}?tab=issue`}
+                    href={`${workspacePaths.settings()}?tab=preferences&section=issue`}
                     onClick={openFieldSettings}
                   />
                 }

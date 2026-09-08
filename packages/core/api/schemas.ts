@@ -24,6 +24,7 @@ import type {
   CreateBillingPortalSessionResponse,
   WorkspaceSubscriptionEntitlements,
   WorkspaceSubscriptionSummary,
+  IssueLimitUsage,
   WorkspaceSubscriptionPrice,
   WorkspaceSubscriptionPrices,
   CreateWorkspaceSubscriptionCheckoutResponse,
@@ -79,6 +80,7 @@ import type {
   ShareLink,
   ShareLinkInfo,
   Skill,
+  SkillImportResult,
   Squad,
   TimelineEntry,
   User,
@@ -894,6 +896,8 @@ const TimelineEntrySchema = z.object({
   actor_type: z.string(),
   actor_id: z.string(),
   created_at: z.string(),
+  actor_name: z.string().optional(),
+  actor_avatar_url: z.string().optional(),
   action: z.string().optional(),
   details: z.record(z.string(), z.unknown()).optional(),
   content: z.string().optional(),
@@ -1069,7 +1073,6 @@ const IssueTriggerPreviewItemSchema = z.object({
   issue_id: z.string(),
   agent_id: z.string().default(""),
   source: z.string().default(""),
-  handoff_supported: z.boolean().default(false),
 }).loose();
 
 export const IssueTriggerPreviewSchema = z.object({
@@ -1204,6 +1207,18 @@ export const IssueSchema = z.object({
   // consumers must fall back to `status` rather than treat "" as a category.
   // (MUL-6243)
   status_category: z.string().optional(),
+  // A CUSTOM status's display name; "" for a built-in, which clients localize
+  // from the key. Optional so a response from a server that predates the field
+  // still validates.
+  //
+  // .catch(undefined) because this is ADDITIVE display data and the failure it
+  // guards against is disproportionate: a parse failure anywhere in IssueSchema
+  // takes the whole response through parseWithFallback to EMPTY_LIST_ISSUES_RESPONSE,
+  // so one malformed name from a mixed-version deploy would blank an entire
+  // issue list. Same treatment as source_context and labels above. Nothing reads
+  // this field to make a decision — useStatusLabel resolves the label from the
+  // catalog — so dropping it costs a fallback to the key. (MUL-6749)
+  status_name: z.string().optional().catch(undefined),
   priority: z.string(),
   assignee_type: z.string().nullable(),
   assignee_id: z.string().nullable(),
@@ -1272,12 +1287,10 @@ const SearchIssueResultSchema = IssueSchema.extend({
 
 export const SearchIssuesResponseSchema = z.object({
   issues: z.array(SearchIssueResultSchema).default([]),
-  total: z.number().default(0),
 }).loose();
 
 export const EMPTY_SEARCH_ISSUES_RESPONSE: SearchIssuesResponse = {
   issues: [],
-  total: 0,
 };
 
 const ProjectSchema = z.object({
@@ -1309,12 +1322,10 @@ const SearchProjectResultSchema = ProjectSchema.extend({
 
 export const SearchProjectsResponseSchema = z.object({
   projects: z.array(SearchProjectResultSchema).default([]),
-  total: z.number().default(0),
 }).loose();
 
 export const EMPTY_SEARCH_PROJECTS_RESPONSE: SearchProjectsResponse = {
   projects: [],
-  total: 0,
 };
 
 const IssueAssigneeGroupSchema = z.object({
@@ -1459,14 +1470,17 @@ export const ChildIssuesResponseSchema = z.object({
 }).loose();
 
 export const ChildIssueProgressResponseSchema = z.object({
-  progress: z.array(z.object({
-    parent_issue_id: z.string(),
-    total: z.number(),
-    done: z.number(),
-    visible_total: z.number().optional(),
-    visible_done: z.number().optional(),
-    hidden_total: z.number().optional(),
-  }).loose()).default([]),
+  progress: z
+    .array(
+      z
+        .object({
+          parent_issue_id: z.string(),
+          total: z.number(),
+          done: z.number(),
+        })
+        .loose(),
+    )
+    .default([]),
 }).loose();
 
 export const CloudRuntimeNodeSchema = z.object({
@@ -1724,6 +1738,7 @@ const TaskUsageSchema = z.object({
 }).loose();
 
 export const AgentTaskSchema = z.object({
+  cancelled_by_comment_change: z.boolean().optional().catch(undefined),
   id: z.string(),
   agent_id: z.string().default(""),
   runtime_id: z.string().default(""),
@@ -1748,7 +1763,6 @@ export const AgentTaskSchema = z.object({
   coalesced_comment_ids: OptionalStringArraySchema,
   delivered_comment_ids: OptionalStringArraySchema,
   trigger_summary: z.string().optional(),
-  handoff_note: z.string().optional(),
   kind: z.string().optional(),
   work_dir: z.string().optional().catch(undefined),
   relative_work_dir: z.string().optional().catch(undefined),
@@ -2255,7 +2269,9 @@ export const AutopilotQuotaUsageSchema = z.object({
   action: z.enum(["off", "observe", "enforce"]).default("off"),
   used: z.number().nullable().default(null),
   reserved: z.number().nullable().default(null),
+  total: z.number().nullable().default(null),
   limit: z.number().nullable().default(null),
+  reached: z.boolean().nullable().default(null),
   period_start: z.string().nullable().default(null),
   period_end: z.string().nullable().default(null),
   reset_at: z.string().nullable().default(null),
@@ -2606,6 +2622,22 @@ const StripeHostedURLSchema = z.string().url().refine(
   { message: "Stripe hosted URL must use HTTPS" },
 );
 
+const WorkspaceEntitlementLimitSchema = z
+  .discriminatedUnion("mode", [
+    z
+      .object({
+        mode: z.literal("limited"),
+        limit: z.number().int().positive(),
+      })
+      .loose(),
+    z.object({ mode: z.literal("unlimited") }).loose(),
+  ])
+  .transform(
+    (value): WorkspaceSubscriptionEntitlements["limits"]["issueCount"] =>
+      value.mode === "limited"
+        ? { mode: "limited", limit: value.limit }
+        : { mode: "unlimited", limit: null },
+  );
 
 export const WorkspaceSubscriptionEntitlementsSchema = z
   .object({
@@ -2616,8 +2648,12 @@ export const WorkspaceSubscriptionEntitlementsSchema = z
     // workspace that momentarily reports no human members readable instead of
     // failing the whole snapshot.
     seats: z.number().int().nonnegative(),
-    issue_window: z.number().int().nonnegative().nullable(),
-    autopilot_runs: z.number().int().nonnegative().nullable(),
+    limits: z
+      .object({
+        issue_count: WorkspaceEntitlementLimitSchema,
+        autopilot_runs: WorkspaceEntitlementLimitSchema,
+      })
+      .loose(),
     current_period_end: z.string().nullable().optional(),
     snapshot_expires_at: z.string().nullable().optional(),
     version: z.number().int().nonnegative(),
@@ -2629,8 +2665,10 @@ export const WorkspaceSubscriptionEntitlementsSchema = z
       plan: value.plan,
       status: value.status,
       seats: value.seats,
-      issueWindow: value.issue_window,
-      autopilotRuns: value.autopilot_runs,
+      limits: {
+        issueCount: value.limits.issue_count,
+        autopilotRuns: value.limits.autopilot_runs,
+      },
       currentPeriodEnd: value.current_period_end ?? null,
       snapshotExpiresAt: value.snapshot_expires_at ?? null,
       version: value.version,
@@ -2648,6 +2686,7 @@ export const WorkspaceSubscriptionSummarySchema = z
         used: z.number().int().nonnegative(),
         reserved: z.number().int().nonnegative(),
         available: z.number().int().nonnegative(),
+        overcommitted: z.boolean(),
         version: z.number().int().positive(),
         pending_quantity: z.number().int().positive().nullable(),
         active_purchase: z
@@ -2665,6 +2704,11 @@ export const WorkspaceSubscriptionSummarySchema = z
     cancel_at_period_end: z.boolean(),
     grace_until: z.string().nullable(),
     has_stripe_customer: z.boolean(),
+    available_actions: z.object({
+      checkout: z.boolean(),
+      portal: z.boolean(),
+      purchase_seats: z.boolean(),
+    }).loose(),
   })
   .loose()
   .transform(
@@ -2678,6 +2722,7 @@ export const WorkspaceSubscriptionSummarySchema = z
             used: value.seat_capacity.used,
             reserved: value.seat_capacity.reserved,
             available: value.seat_capacity.available,
+            overcommitted: value.seat_capacity.overcommitted,
             version: value.seat_capacity.version,
             pendingQuantity: value.seat_capacity.pending_quantity,
             activePurchase: value.seat_capacity.active_purchase
@@ -2696,6 +2741,24 @@ export const WorkspaceSubscriptionSummarySchema = z
       cancelAtPeriodEnd: value.cancel_at_period_end,
       graceUntil: value.grace_until,
       hasStripeCustomer: value.has_stripe_customer,
+      availableActions: {
+        checkout: value.available_actions.checkout,
+        portal: value.available_actions.portal,
+        purchaseSeats: value.available_actions.purchase_seats,
+      },
+    }),
+  );
+
+export const IssueLimitUsageSchema = z
+  .object({
+    used: z.number().int().nonnegative(),
+    limit: z.number().int().positive(),
+  })
+  .loose()
+  .transform(
+    (value): IssueLimitUsage => ({
+      used: value.used,
+      limit: value.limit,
     }),
   );
 
@@ -2876,6 +2939,17 @@ const RuntimeModelSchema = z.object({
   thinking: RuntimeModelThinkingSchema.nullable().optional()
     .transform((v) => v ?? undefined),
   service_tiers: z.array(RuntimeModelServiceTierSchema).optional(),
+  supports_explicit_standard_service_tier: z.boolean().optional(),
+}).loose();
+
+// A row the runtime named but will not run (MUL-6961). Parsed from its own
+// top-level list, never from `models`, so nothing here can become a selectable
+// value. `id` is required for the same reason it is on RuntimeModelSchema — a
+// row without one cannot even be keyed in a list.
+const RuntimeUnavailableModelSchema = z.object({
+  id: z.string(),
+  label: z.string().default(""),
+  reason: z.string().optional(),
 }).loose();
 
 export const RuntimeModelListRequestSchema = z.object({
@@ -2883,6 +2957,9 @@ export const RuntimeModelListRequestSchema = z.object({
   runtime_id: z.string().default(""),
   status: z.string(),
   models: z.array(RuntimeModelSchema).optional(),
+  // Absent on any daemon or server older than the field, which simply means
+  // the picker shows no unavailable section.
+  unavailable_models: z.array(RuntimeUnavailableModelSchema).optional(),
   supported: z.boolean().default(true),
   error: z.string().optional(),
   created_at: z.string().default(""),
@@ -3116,6 +3193,35 @@ export const EMPTY_SKILL: Skill = {
   created_at: "",
   updated_at: "",
   files: [],
+};
+
+export const SkillImportExistingSkillSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  created_by: z.string().optional(),
+  can_overwrite: z.boolean().optional(),
+}).loose();
+
+/**
+ * Envelope of POST /api/skills/import.
+ *
+ * `status` stays a plain string (not an enum) so a status added by a newer
+ * backend still parses and its `reason` survives to the user. `z.enum` here
+ * would fail the whole envelope on an unknown value, drop the server's reason
+ * and leave only a generic "Import failed" — the server field is a bare
+ * `string`, so it is free to grow. `skillFromImportResult` has the default
+ * branch: anything outside created/updated is treated as a failure.
+ */
+export const SkillImportResultSchema = z.object({
+  status: z.string().default("failed"),
+  reason: z.string().optional().default(""),
+  skill: SkillSchema.optional(),
+  existing_skill: SkillImportExistingSkillSchema.optional(),
+}).loose();
+
+export const EMPTY_SKILL_IMPORT_RESULT: SkillImportResult = {
+  status: "failed",
+  reason: "",
 };
 
 /**

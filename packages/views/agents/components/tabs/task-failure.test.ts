@@ -109,10 +109,7 @@ describe("failureReasonLabel", () => {
 
   it("covers platform reasons added after the original hardcoded map", () => {
     expect(failureReasonLabel("invalid_task_identity", enT)).toBe(
-      "Task identity mismatch",
-    );
-    expect(failureReasonLabel("issue_window_restricted", enT)).toBe(
-      "Issue unavailable under workspace limits",
+      "Run identity mismatch",
     );
   });
 

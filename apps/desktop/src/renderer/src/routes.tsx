@@ -47,10 +47,10 @@ function DesktopSettingsRoute() {
   const { t } = useT("settings");
   return (
     <SettingsPage
-      extraAccountTabs={[
+      extraDeviceTabs={[
         {
           value: "daemon",
-          label: "Daemon",
+          label: t(($) => $.desktop.daemon.title),
           icon: Server,
           content: <DaemonSettingsTab />,
         },

@@ -17,6 +17,7 @@ import type {
   LocalRuntimeProbe,
   UITestCapabilityStatus,
 } from "../shared/daemon-types";
+import type { TabSelectionShortcutKey } from "../shared/main-renderer-messages";
 
 interface DesktopAPI {
   /** App version + normalized OS, captured synchronously at preload time. */
@@ -109,6 +110,11 @@ interface DesktopAPI {
   /** Listen for Cmd/Ctrl+, requests to open Settings, delivered to the main
    *  window whichever window had focus. Returns an unsubscribe function. */
   onOpenSettings: (callback: () => void) => () => void;
+  /** Listen for Cmd/Ctrl+1..9 tab-selection requests, delivered to the main
+   *  window whichever window had focus. Returns an unsubscribe function. */
+  onSelectTabShortcut: (
+    callback: (key: TabSelectionShortcutKey) => void,
+  ) => () => void;
   /** Ask the main process to close the window. */
   closeWindow: () => void;
   /** Open an issue-detail tab in a dedicated native window. */

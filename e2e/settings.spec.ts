@@ -46,7 +46,7 @@ test.describe("Settings", () => {
     page,
   }) => {
     const workspaceSlug = await loginAsDefault(page);
-    const settingsUrl = `/${workspaceSlug}/settings?tab=integrations`;
+    const settingsUrl = `/${workspaceSlug}/settings?tab=integrations&integration=composio`;
 
     // Stateful: connections is empty until the (mocked) connect flow lands.
     let connected = false;

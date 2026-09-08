@@ -117,6 +117,10 @@ backend:
     # Native connect_timeout / PGCONNECT_TIMEOUT / service settings take
     # precedence so existing deployments keep their pgx connection behavior.
     databaseConnectTimeout: 5s
+    # PostgreSQL work_mem ceiling in MB for search transactions. Set 1-64 to
+    # lower it for memory-constrained databases, or 0 to keep the database
+    # default. Invalid values fall back to 64 in the API process.
+    databaseSearchWorkMemMB: 64
     appEnv: production
     appUrl: http://multica.dev.lan
     frontendOrigin: http://multica.dev.lan
@@ -146,11 +150,6 @@ backend:
     cloudfrontDomain: ""
     cloudfrontKeyPairId: ""
     localUploadBaseUrl: http://api.multica.dev.lan
-    # How long a task may sit in the queue unclaimed before failing with
-    # `queued_expired`; raise it when a runtime's low task concurrency lets
-    # tasks legitimately wait behind long-running work.
-    # Accepts a positive duration and empty/unset falls back to the server default of 2h.
-    taskQueuedTTL: 2h
   resources:
     requests:
       cpu: 100m
@@ -210,20 +209,3 @@ ingress:
   # tls:
   #   - hosts: [multica.dev.lan, api.multica.dev.lan]
   #     secretName: multica-tls
-
-# -----------------------------------------------------------------------------
-# Monitoring
-# -----------------------------------------------------------------------------
-monitoring:
-  prometheusRule:
-    # Requires the Prometheus Operator CRD (monitoring.coreos.com/v1). Kept
-    # disabled by default so minimal self-host installs without that CRD still
-    # render and install.
-    enabled: false
-    additionalLabels: {}
-    samplerQueryErrorsFor: 5m
-    samplerQueryLatencyFor: 10m
-    seatCapacityDeadLetteredFor: 5m
-    seatCapacityPendingAgeSeconds: 900
-    seatCapacityPendingFor: 5m
-    severity: warning

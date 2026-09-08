@@ -60,17 +60,13 @@ func TestCheckMinCLIVersion(t *testing.T) {
 	}{
 		{"tagged release at minimum", "v0.2.21", nil},
 		{"tagged release above minimum", "0.3.1", nil},
-		{"previous tagged release below minimum", "v0.2.20", nil},
-		{"tagged release below minimum", "v0.2.15", nil},
-		{"empty string", "", nil},
-		{"unparsable", "not-a-version", nil},
+		{"previous tagged release below minimum", "v0.2.20", ErrCLIVersionTooOld},
+		{"tagged release below minimum", "v0.2.15", ErrCLIVersionTooOld},
+		{"empty string", "", ErrCLIVersionMissing},
+		{"unparsable", "not-a-version", ErrCLIVersionMissing},
 		{"git-describe dev build past old tag", "v0.2.15-235-gdaf0e935", nil},
 		{"git-describe dirty dev build", "v0.2.15-235-gdaf0e935-dirty", nil},
 		{"git-describe dev build past current tag", "v0.2.21-3-gabc1234", nil},
-		{"ad-hoc local build marker", "dev", nil},
-		{"shallow/hash-style version", "v0.2.15-150-gdb01ce5", nil},
-		{"short git commit hash", "db01ce593", nil},
-		{"hash-only version w/ g prefix", "gdb01ce593-dirty", nil},
 	}
 	for _, tt := range tests {
 		err := CheckMinCLIVersion(tt.input)
@@ -100,55 +96,81 @@ func TestExtractVersionLine(t *testing.T) {
 		name string
 		raw  string
 		want string
+		// wantRecognised is whether the semver scan matched, as opposed to the
+		// trimmed-raw fallback answering. Pinned per case because
+		// salvageProbeAnswer treats the two differently: only a recognised
+		// version is evidence that an incomplete read already holds the answer.
+		wantRecognised bool
 	}{
 		{
-			name: "bare semver",
-			raw:  "0.42.0\n",
-			want: "0.42.0",
+			name:           "bare semver",
+			raw:            "0.42.0\n",
+			want:           "0.42.0",
+			wantRecognised: true,
 		},
 		{
-			name: "claude full string preserved",
-			raw:  "2.1.5 (Claude Code)\n",
-			want: "2.1.5 (Claude Code)",
+			name:           "claude full string preserved",
+			raw:            "2.1.5 (Claude Code)\n",
+			want:           "2.1.5 (Claude Code)",
+			wantRecognised: true,
 		},
 		{
-			name: "codex prefix preserved",
-			raw:  "codex-cli 0.118.0\n",
-			want: "codex-cli 0.118.0",
+			name:           "codex prefix preserved",
+			raw:            "codex-cli 0.118.0\n",
+			want:           "codex-cli 0.118.0",
+			wantRecognised: true,
 		},
 		// Reproduces #2516: gemini's Windows shim emits `chcp` output to stdout
 		// before the real version. The chcp line has no dotted-number form,
 		// so the semver scan skips it and picks up "0.42.0" from the next line.
 		{
-			name: "windows chcp prefix before version",
-			raw:  "Active code page: 65001\n0.42.0\n",
-			want: "0.42.0",
+			name:           "windows chcp prefix before version",
+			raw:            "Active code page: 65001\n0.42.0\n",
+			want:           "0.42.0",
+			wantRecognised: true,
 		},
 		{
-			name: "windows chcp prefix CRLF",
-			raw:  "Active code page: 65001\r\n0.42.0\r\n",
-			want: "0.42.0",
+			name:           "windows chcp prefix CRLF",
+			raw:            "Active code page: 65001\r\n0.42.0\r\n",
+			want:           "0.42.0",
+			wantRecognised: true,
 		},
 		{
-			name: "leading blank lines",
-			raw:  "\n\n  0.42.0\n",
-			want: "0.42.0",
+			name:           "leading blank lines",
+			raw:            "\n\n  0.42.0\n",
+			want:           "0.42.0",
+			wantRecognised: true,
 		},
 		{
-			name: "non-semver output falls back to trimmed raw",
-			raw:  "  some-build-id  \n",
-			want: "some-build-id",
+			name:           "non-semver output falls back to trimmed raw",
+			raw:            "  some-build-id  \n",
+			want:           "some-build-id",
+			wantRecognised: false,
+		},
+		// The shape the salvage gate turns on: a wrapper's progress line
+		// satisfies the fallback, so "non-empty" cannot mean "the version
+		// arrived". See TestDetectCLIVersionDoesNotSalvageABannerAsTheVersion.
+		{
+			name:           "wrapper banner is not a recognised version",
+			raw:            "initializing plugins\n",
+			want:           "initializing plugins",
+			wantRecognised: false,
 		},
 		{
-			name: "empty input",
-			raw:  "",
-			want: "",
+			name:           "empty input",
+			raw:            "",
+			want:           "",
+			wantRecognised: false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := extractVersionLine(tt.raw); got != tt.want {
+			got, recognised := extractVersionLine(tt.raw)
+			if got != tt.want {
 				t.Errorf("extractVersionLine(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+			if recognised != tt.wantRecognised {
+				t.Errorf("extractVersionLine(%q) recognised = %v, want %v", tt.raw, recognised, tt.wantRecognised)
 			}
 		})
 	}

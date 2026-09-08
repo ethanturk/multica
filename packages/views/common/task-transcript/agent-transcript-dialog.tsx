@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, forwardRef } from "react";
+import { useWorkspaceId } from "@multica/core/hooks";
+import { useTraceIssueLabels } from "./use-trace-issue-labels";
 import { Virtuoso, type VirtuosoHandle, type Components } from "react-virtuoso";
 import {
   Bot,
@@ -56,7 +58,7 @@ import { runtimeDisplayName, providerDisplayName } from "@multica/core/runtimes"
 import { useCustomPricingStore } from "@multica/core/runtimes/custom-pricing-store";
 import { redactSecrets } from "./redact";
 import {
-  createNewestFirstFollow,
+  createLiveEndFollow,
   FOLLOW_EDGE_THRESHOLD,
   LINE_SCROLL_PX,
 } from "./transcript-follow";
@@ -68,7 +70,6 @@ import {
   isCallStep,
   isGroupRow,
   rowCalls,
-  shouldShowTimeline,
   toolKindTotals,
   type TraceCallStep,
   type TraceGroupRow,
@@ -95,7 +96,7 @@ import {
   ToolDetailSurface,
 } from "./detail-surfaces";
 import { languageForPath } from "./diff-highlight";
-import { useT } from "../../i18n";
+import { useLocale, useT } from "../../i18n";
 import {
   formatTokens,
   formatUsd,
@@ -116,6 +117,16 @@ interface AgentTranscriptDialogProps {
   items: TimelineItem[];
   agentName: string;
   isLive?: boolean;
+  /**
+   * Whether focus returns to the trigger when the dialog closes. Pass `true`
+   * only for a keyboard open, where the reader has no other way back. After a
+   * pointer open, returning focus is what leaves the trigger wearing a focus
+   * ring and its tooltip once Esc closes the log — and, on the hover-revealed
+   * comment action row, holds the whole row visible with the pointer long gone.
+   */
+  finalFocus?: boolean;
+  /** Loading/error content while the caller retrieves the transcript. */
+  contentState?: React.ReactNode;
   /**
    * Optional content rendered between the header chips and the event list.
    * Used by autopilot run rows to surface the inbound webhook trigger
@@ -159,8 +170,8 @@ function formatOffset(ms: number): string {
   return `+${hours}:${String(minutes % 60).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
-function formatRunTime(iso: string): string {
-  return new Date(iso).toLocaleString(undefined, {
+function formatRunTime(iso: string, locale: string): string {
+  return new Date(iso).toLocaleString(locale, {
     month: "short",
     day: "numeric",
     hour: "2-digit",
@@ -304,9 +315,13 @@ export function AgentTranscriptDialog({
   items,
   agentName,
   isLive = false,
+  finalFocus = false,
   headerSlot,
+  contentState,
 }: AgentTranscriptDialogProps) {
   const { t } = useT("agents");
+  const locale = useLocale();
+  const formatText = useTraceIssueLabels(useWorkspaceId(), task.issue_id, items, open);
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null);
   const [expandedGroups, setExpandedGroups] = useState<Set<number>>(() => new Set());
   const [query, setQuery] = useState("");
@@ -333,7 +348,7 @@ export function AgentTranscriptDialog({
   // controller (see transcript-follow.ts for the model); this component only
   // wires DOM events to it. A stable instance, never re-rendered by scroll
   // traffic.
-  const followCtl = useMemo(() => createNewestFirstFollow(), []);
+  const followCtl = useMemo(() => createLiveEndFollow(), []);
   const detachScrollerRef = useRef<(() => void) | null>(null);
 
   const handleScrollerRef = useCallback(
@@ -341,30 +356,55 @@ export function AgentTranscriptDialog({
       detachScrollerRef.current?.();
       detachScrollerRef.current = null;
       if (!(el instanceof HTMLElement)) return;
+      let inputFrame: number | null = null;
+      const stageInput = (delta: number) => {
+        followCtl.input(delta);
+        if (inputFrame !== null) cancelAnimationFrame(inputFrame);
+        inputFrame = requestAnimationFrame(() => {
+          inputFrame = null;
+          followCtl.endInputFrame();
+        });
+      };
       const onWheel = (e: WheelEvent) => {
         const scale =
           e.deltaMode === 1 ? LINE_SCROLL_PX : e.deltaMode === 2 ? el.clientHeight : 1;
-        followCtl.input(e.deltaY * scale);
+        stageInput(e.deltaY * scale);
       };
+      let touchId: number | null = null;
       let lastTouchY: number | null = null;
+      const trackedTouch = (touches: TouchList) =>
+        Array.from(touches).find((touch) => touch.identifier === touchId);
       const onTouchStart = (e: TouchEvent) => {
-        lastTouchY = e.touches[0]?.clientY ?? null;
+        if (touchId !== null) return;
+        const touch = e.changedTouches[0] ?? e.touches[0];
+        if (!touch) return;
+        touchId = touch.identifier;
+        lastTouchY = touch.clientY;
+        followCtl.touchStart();
       };
       const onTouchMove = (e: TouchEvent) => {
-        const y = e.touches[0]?.clientY;
-        if (y === undefined) return;
+        const touch = trackedTouch(e.touches);
+        if (!touch) return;
         // Finger moving up scrolls the content down (away from the live end).
-        if (lastTouchY !== null) followCtl.input(lastTouchY - y);
-        lastTouchY = y;
+        if (lastTouchY !== null) stageInput(lastTouchY - touch.clientY);
+        lastTouchY = touch.clientY;
+      };
+      const onTouchEnd = (e: TouchEvent) => {
+        if (touchId === null || trackedTouch(e.touches)) return;
+        touchId = null;
+        lastTouchY = null;
+        followCtl.touchEnd();
       };
       const onKeyDown = (e: KeyboardEvent) => {
         // Only keys aimed at the scroller itself; Space/arrows bubbling from
         // row controls are not scroll intent.
         if (e.target !== el) return;
-        if (e.key === "ArrowDown") followCtl.input(LINE_SCROLL_PX);
-        else if (e.key === "ArrowUp") followCtl.input(-LINE_SCROLL_PX);
-        else if (e.key === "PageDown" || e.key === " ") followCtl.input(el.clientHeight);
-        else if (e.key === "PageUp") followCtl.input(-el.clientHeight);
+        if (e.key === "ArrowDown") stageInput(LINE_SCROLL_PX);
+        else if (e.key === "ArrowUp") stageInput(-LINE_SCROLL_PX);
+        else if (e.key === "PageDown") stageInput(el.clientHeight);
+        // Shift+Space pages up — toward this list's live end.
+        else if (e.key === " ") stageInput(e.shiftKey ? -el.clientHeight : el.clientHeight);
+        else if (e.key === "PageUp") stageInput(-el.clientHeight);
         else if (e.key === "End") followCtl.disengage();
       };
       // Scrollbar drags hit the scroller element itself; clicks on row
@@ -388,14 +428,20 @@ export function AgentTranscriptDialog({
       el.addEventListener("wheel", onWheel, { passive: true });
       el.addEventListener("touchstart", onTouchStart, { passive: true });
       el.addEventListener("touchmove", onTouchMove, { passive: true });
+      el.addEventListener("touchend", onTouchEnd, { passive: true });
+      el.addEventListener("touchcancel", onTouchEnd, { passive: true });
       el.addEventListener("keydown", onKeyDown);
       el.addEventListener("mousedown", onPointerDown);
       window.addEventListener("mouseup", onPointerUp, { capture: true });
       el.addEventListener("scroll", onScroll, { passive: true });
       detachScrollerRef.current = () => {
+        if (inputFrame !== null) cancelAnimationFrame(inputFrame);
+        followCtl.endInputFrame();
         el.removeEventListener("wheel", onWheel);
         el.removeEventListener("touchstart", onTouchStart);
         el.removeEventListener("touchmove", onTouchMove);
+        el.removeEventListener("touchend", onTouchEnd);
+        el.removeEventListener("touchcancel", onTouchEnd);
         el.removeEventListener("keydown", onKeyDown);
         el.removeEventListener("mousedown", onPointerDown);
         window.removeEventListener("mouseup", onPointerUp, { capture: true });
@@ -403,6 +449,7 @@ export function AgentTranscriptDialog({
         // The scroller can detach mid-drag (listEpoch remount); a stuck
         // held-mouse flag would suppress enforcement forever.
         followCtl.pointerUp();
+        followCtl.touchEnd();
       };
     },
     [followCtl],
@@ -461,10 +508,13 @@ export function AgentTranscriptDialog({
     if (activeFilterSet.size === 0 && trimmedQuery.length === 0) return steps;
     return steps.filter((step) => {
       if (activeFilterSet.size > 0 && !activeFilterSet.has(stepFilterKey(step))) return false;
-      if (trimmedQuery.length > 0 && !stepHaystack(step).includes(trimmedQuery)) return false;
+      if (trimmedQuery.length > 0) {
+        const raw = stepHaystack(step);
+        if (!raw.includes(trimmedQuery) && !formatText(raw).toLowerCase().includes(trimmedQuery)) return false;
+      }
       return true;
     });
-  }, [steps, activeFilterSet, trimmedQuery]);
+  }, [steps, activeFilterSet, trimmedQuery, formatText]);
 
   // Grouping runs on what the reader is looking at: filtering breaks adjacency,
   // and a group that spans a hidden step would be a lie about what ran.
@@ -490,9 +540,6 @@ export function AgentTranscriptDialog({
   const runEnd = task.completed_at ?? lastStamp;
 
   const lanes = useMemo(() => buildLanes(steps, runStart, runEnd), [steps, runStart, runEnd]);
-  // A short run's timeline says less than the durations already on each row,
-  // so it does not render at all.
-  const showTimeline = shouldShowTimeline(steps, lanes);
   const toolKinds = useMemo(() => toolKindTotals(steps), [steps]);
   const outcome = useMemo(() => buildRunOutcome(steps), [steps]);
 
@@ -768,16 +815,16 @@ export function AgentTranscriptDialog({
           ? t(($) => $.transcript.trigger_chat)
           : task.kind === "quick_create"
             ? t(($) => $.transcript.trigger_quick_create)
-            : task.kind === "direct" || task.handoff_note
+            : task.kind === "direct"
               ? t(($) => $.transcript.trigger_direct)
               : t(($) => $.transcript.trigger_initial);
 
   // Diagnostic detail for the ⓘ popover: everything a reader needs only when
   // debugging this specific run, kept off the always-visible surface.
   const providerLabel = runtimeInfo?.provider ? transcriptProviderLabel(runtimeInfo.provider) : null;
-  const createdLabel = task.created_at ? formatRunTime(task.created_at) : null;
-  const startedLabel = task.started_at ? formatRunTime(task.started_at) : null;
-  const completedLabel = task.completed_at ? formatRunTime(task.completed_at) : null;
+  const createdLabel = task.created_at ? formatRunTime(task.created_at, locale) : null;
+  const startedLabel = task.started_at ? formatRunTime(task.started_at, locale) : null;
+  const completedLabel = task.completed_at ? formatRunTime(task.completed_at, locale) : null;
   const hasTriggeredBy = !!task.attribution?.initiator;
   // This run's own spend. Present on transcripts opened from the issue
   // execution log (the endpoint that hydrates usage); absent elsewhere, where
@@ -816,6 +863,7 @@ export function AgentTranscriptDialog({
       <DialogContent
         className="!max-w-5xl !w-[calc(100vw-4rem)] !max-h-[calc(100vh-4rem)] !h-[calc(100vh-4rem)] flex flex-col !p-0 !gap-0 overflow-hidden"
         showCloseButton={false}
+        finalFocus={finalFocus}
       >
         <DialogTitle className="sr-only">{t(($) => $.transcript.dialog_title)}</DialogTitle>
 
@@ -1037,7 +1085,7 @@ export function AgentTranscriptDialog({
         <RunOutcomeRow outcome={outcome} branch={task.branch_name} />
 
         {/* ── Where the time went ────────────────────────────────────── */}
-        {showTimeline && lanes && (
+        {lanes && (
           <RunTimeline
             lanes={lanes}
             toolKinds={toolKinds}
@@ -1164,7 +1212,7 @@ export function AgentTranscriptDialog({
         {/* ── Steps, and the inspector when one is selected ───────────── */}
         <div className="flex min-h-0 flex-1">
           <div className="flex min-w-0 flex-1 flex-col">
-            {displayRows.length === 0 ? (
+            {contentState ? <div className="flex h-full items-center justify-center p-4">{contentState}</div> : displayRows.length === 0 ? (
               <div className="flex h-full items-center justify-center text-body text-muted-foreground">
                 {isAntigravityLiveEmpty ? (
                   <div className="flex max-w-md items-center gap-2 px-4 text-center">
@@ -1204,13 +1252,14 @@ export function AgentTranscriptDialog({
                 }
                 atBottomThreshold={FOLLOW_EDGE_THRESHOLD}
                 atTopThreshold={FOLLOW_EDGE_THRESHOLD}
-                atTopStateChange={(atTop) => followCtl.onAtTopChange(atTop)}
+                atTopStateChange={(atTop) => followCtl.onAtEdgeChange(atTop)}
                 scrollerRef={handleScrollerRef}
                 computeItemKey={(_, row) => row.seq}
                 components={LIST_COMPONENTS}
                 itemContent={(_, row) => (
                   <TranscriptRow
                     row={row}
+                    formatText={formatText}
                     runStartMs={runStartMs}
                     isLive={isLive}
                     selectedSeq={selectedSeq}
@@ -1322,6 +1371,7 @@ function RunOutcomeRow({
 // ─── Rows ───────────────────────────────────────────────────────────────────
 
 interface TranscriptRowProps {
+  formatText: (text: string) => string;
   row: TraceRow;
   runStartMs?: number;
   isLive: boolean;
@@ -1340,12 +1390,13 @@ function TranscriptRow(props: TranscriptRowProps) {
 
 /** The offset column: where in the run this happened. */
 function OffsetCell({ startedAt, runStartMs }: { startedAt?: string; runStartMs?: number }) {
+  const locale = useLocale();
   const at = timeMs(startedAt);
   const label = at !== undefined && runStartMs !== undefined ? formatOffset(at - runStartMs) : "";
   return (
     <span
       className="w-11 shrink-0 pt-0.5 text-right font-mono text-micro tabular-nums text-faint-foreground"
-      title={startedAt ? new Date(startedAt).toLocaleString() : undefined}
+      title={startedAt ? new Date(startedAt).toLocaleString(locale) : undefined}
     >
       {label}
     </span>
@@ -1410,6 +1461,7 @@ function ProseRow({ row, runStartMs }: TranscriptRowProps & { row: TraceMessageS
  *  click away in the inspector. */
 function StepRow({
   row,
+  formatText,
   runStartMs,
   isLive,
   selectedSeq,
@@ -1418,10 +1470,11 @@ function StepRow({
   const { t } = useT("agents");
   const summaryLabels = useMemo<TraceSummaryLabels>(
     () => ({
+      formatText,
       morePaths: (path, extraCount) =>
         t(($) => $.transcript.patch_summary_more, { path, extra: extraCount }),
     }),
-    [t],
+    [t, formatText],
   );
 
   const call = isCallStep(row) ? row : null;
@@ -1488,6 +1541,7 @@ function StepRow({
 /** Consecutive same-tool calls, folded to one line until asked. */
 function GroupRow({
   row,
+  formatText,
   runStartMs,
   selectedSeq,
   expanded,
@@ -1497,10 +1551,11 @@ function GroupRow({
   const { t } = useT("agents");
   const summaryLabels = useMemo<TraceSummaryLabels>(
     () => ({
+      formatText,
       morePaths: (path, extraCount) =>
         t(($) => $.transcript.patch_summary_more, { path, extra: extraCount }),
     }),
-    [t],
+    [t, formatText],
   );
 
   return (
@@ -1573,7 +1628,7 @@ function callSummary(step: TraceCallStep, labels: TraceSummaryLabels): string {
   }
   if (!step.result) return "";
   if (readImageResult(step.result.output)) return "";
-  return traceEventSummary({ type: "tool_result", output: step.result.output });
+  return traceEventSummary({ type: "tool_result", output: step.result.output }, labels);
 }
 
 function firstLineOf(value: string | undefined): string {
@@ -1697,7 +1752,7 @@ function InspectorSection({ label, children }: { label: string; children: React.
 }
 
 /** One payload, rendered as what it is. */
-function StepBody({ item }: { item: TimelineItem }) {
+export function StepBody({ item }: { item: TimelineItem }) {
   const { t } = useT("agents");
   const detail = useMemo(() => traceEventDetail(item), [item]);
   const image = useMemo(() => readImageResult(item.output), [item.output]);
