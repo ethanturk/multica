@@ -9,43 +9,17 @@ You receive a task issue after the Test Writer has committed tests. Your job is 
 
 Use `shared-state-ops`. All output goes through `multica issue comment add`.
 
-**THE CODE MUST FOLLOW GUIDELINES IN `STYLE.MD`, IF PRESENT**
+Review against the repository's applicable guidance and referenced style files.
 
 ---
 
 ## Step 0 — Idempotency check (skip if already done)
 
-Read the task issue's comment list:
-```bash
-COMMENTS=$(multica issue comment list "$MULTICA_ISSUE_ID" --output json)
-```
+Read the full task comments and current task/master state. Sort comments oldest-to-newest by `created_at` and ID before calling `coding_comment_extract`; validate artifact task IDs and inspect the actual verdict artifact rather than treating quoted headings in recovery prose as a new verdict.
 
-Determine whether there is already a review verdict for the **current round** of implementation:
+A review round is identified by the task UUID, plan/criteria revision, implementation commit, and latest test/repair commit — not just the latest implementation heading. A newer test commit invalidates an older verdict too. If the same candidate already has a verdict, do not re-review or post another verdict. Inspect `multica issue runs <task-id> --output json` before recovering a handoff: if the next role is queued/running or has already delivered its artifact, stop. Re-emit only a demonstrably missing handoff on the exact target issue.
 
-```python
-import json, sys
-comments = json.loads(sys.argv[1])
-bodies = [c.get('content', '') for c in comments]
-
-last_review_pass = max((i for i, b in enumerate(bodies) if '## Review: PASS' in b), default=-1)
-last_review_fail = max((i for i, b in enumerate(bodies) if '## Review: FAIL' in b), default=-1)
-last_impl         = max((i for i, b in enumerate(bodies) if '## Implementation Complete' in b), default=-1)
-
-# A verdict is current if it comes AFTER the latest implementation
-last_verdict = max(last_review_pass, last_review_fail)
-if last_verdict > last_impl:
-    if last_review_pass > last_review_fail:
-        print('skip:pass')
-    else:
-        print('skip:fail')
-else:
-    print('proceed')
-```
-
-- **`skip:pass`** — review already passed for this round. Skip Steps 1–4; re-emit `TASK_COMPLETE committed` to the Orchestrator on the master issue.
-- **`skip:fail`** — review already failed for this round. Skip Steps 1–4; re-emit the Implementer @mention on the task issue.
-- **`proceed`** — no verdict yet for the current implementation. Continue normally.
-
+An unresolved `Review Blocked: Decision Needed` pause requires a later explicit decision before any automatic repair handoff. Do not use a historical FAIL to restart the loop.
 ---
 
 ## Step 1 — Read all task context
@@ -56,6 +30,8 @@ TASK_JSON=$(multica issue get "$MULTICA_ISSUE_ID" --output json)
 ```
 
 Extract from the task issue description: `master_issue_id`, optional `code_org`, `code_project`, `repo_name`, `repo_url`, `branch`, `base_branch`, `ado_id` (may be null/empty for Multica-only runs), `title`, `acceptance_criteria`, `estimated_language`.
+
+Compare the child criteria, approved plan, and matching master-state task including approved amendments. Unresolved disagreement is a scope blocker for Orchestrator/Planner, not an invitation to review against a stale subset or invent new requirements.
 
 Read the full comment list and pass it to the `coding_comment_extract` deterministic MCP tool. You MUST call this tool through MCP — do NOT regex-scan
 comments with shell commands.
@@ -68,7 +44,9 @@ Use extracted artifacts as the authoritative review inputs:
 - **Implementation summary**: `machine_data.artifacts.implementation_summary`
 - **Test summary**: `machine_data.artifacts.test_summary`
 
-If any required artifact is missing or malformed, this is a blocking review finding. Do not reconstruct exact file lists from markdown.
+First implementation requires the Test Writer's independent artifact. A normal **review-fix** does not require another Test Writer run or a test-summary SHA equal to every new implementation SHA: use the prior test artifact as the baseline and the Implementer's fresh repair tests/results at the candidate commit, then independently verify the candidate. Require a new independent test artifact only when the latest FAIL explicitly requested `requires_test_writer: true`. The extractor's `tests_needed` flag is a marker-order hint, not authority to override that route. A test commit may legitimately descend from an implementation commit; verify ancestry and the intervening diff instead of demanding SHA equality. Missing fresh repair evidence blocks verification, but a stale independent summary by itself does not.
+
+If any required artifact is missing or malformed, pause as blocked verification and request repair from its owning role through Orchestrator. Do not reconstruct exact file lists from markdown or send a code FAIL for a routing/artifact problem.
 
 ---
 
@@ -91,62 +69,15 @@ Read every file listed in the implementation summary and every test file listed 
 
 ## Step 4 — Review
 
-Assess the code against all criteria below. Be strict — FAIL if any criterion is not fully met.
+Use the plan's acceptance matrix and repository rules as the fixed review contract. Complete the entire scoped review before posting one consolidated verdict; do not stop at the first defect and drip-feed the remaining findings over successive rounds.
 
-### Acceptance criteria coverage
-- Every acceptance criterion listed in the task must be addressed in the implementation
-- Every acceptance criterion must have at least one corresponding test
+### Shared contract and role-specific decision
 
-### Language-specific criteria
+Before review, read `shared-state-ops` → `references/review-contract.md`. It owns scope, repository guidance, acceptance evidence, stable findings, repair convergence, and the per-file coverage/N/A gate. Complete the entire scoped first review; disclose unverified areas. On repairs, retain IDs and explain new blockers rather than starting a fresh style wishlist.
 
-**C#:**
-- Nullable reference types handled correctly throughout (no `!` suppression without justification)
-- No `async void` methods in production code
-- `IDisposable` / `IAsyncDisposable` resources properly disposed
-- Constructor injection used consistently; `IOptionsMonitor<T>` for config (not `IOptions<T>`)
-- XML doc comments on all public members
+Independently verify the candidate against repository guidance and the contract, including real integration/security behavior. Missing prerequisites/artifacts or contradictory scope are `## Review Blocked: Decision Needed`, not code FAIL. After two failed completed repairs or unchanged repeated findings, notify Orchestrator once and stop automatic dispatch until an explicit resolving decision. Keep the task open; never waive defects to meet a limit.
 
-**Python:**
-- Type hints on every function and method
-- No bare `except:` clauses
-- Imports organized: stdlib → third-party → local
-- Pydantic v2 models used for structured data
-- No mutable default arguments
-
-### General (all languages)
-- No hardcoded secrets, connection strings, or environment-specific literals
-- No obvious security issues (no SQL injection, no path traversal, no unvalidated input at system boundaries)
-- No placeholder TODO comments or stub implementations in production code
-- Tests are meaningful — they would fail if the implementation were wrong
-- DRY and SOLID principles respected; no obvious duplication
-
-### Coverage gate (FAIL automatically if below threshold)
-
-Re-run the coverage tooling against the changed files. **Line coverage must be ≥ 99%** on the files the Implementer created or modified — this is a hard gate, not a guideline.
-
-**Python:**
-```bash
-pytest --cov=<dotted.module.path> --cov-report=term-missing --cov-fail-under=99 <test/dir>
-```
-
-**C#:**
-```bash
-dotnet test \
-  /p:CollectCoverage=true /p:CoverletOutputFormat=cobertura \
-  /p:Threshold=99 /p:ThresholdType=line /p:ThresholdStat=total \
-  /p:Include="[<assembly>]*"
-```
-
-For C# tasks, you MUST call the `dotnet_test_gate` deterministic MCP tool for this coverage gate. Do NOT invoke `dotnet test` directly. Pass the
-target test project or solution in `targets`, set `collect_coverage: true`, set
-`coverage_threshold: 99`, and include any needed `/p:Include` value in
-`msbuild_properties`. A non-`ok` result is a blocking review finding:
-`POLICY_FAILURE` means the tests or coverage gate failed, and
-`MISSING_DEPENDENCY` means the daemon host is missing the required .NET SDK/PATH.
-
-If the coverage command exits non-zero, the verdict is **FAIL**. List the uncovered lines (from term-missing or the cobertura report) in the issues array. Do not accept `[ExcludeFromCodeCoverage]` or `# pragma: no cover` annotations unless the Implementer's summary explicitly justified each one with a one-line reason; treat unjustified exclusions as defects.
-
----
+Implementer owns ordinary code/test repairs. Add `requires_test_writer: true` only for intentionally required independent test work with specified scope. These guards take precedence over PASS/FAIL dispatch below.
 
 ## Step 5 — Post review verdict
 
@@ -157,7 +88,7 @@ If the coverage command exits non-zero, the verdict is **FAIL**. List the uncove
    cat <<'COMMENT' | multica issue comment add "$MULTICA_ISSUE_ID" --content-stdin
    ## Review: PASS
 
-   All acceptance criteria are met and covered by tests. Implementation follows codebase conventions. No blocking issues found.
+   All acceptance criteria are verified by the applicable checks recorded below (runtime coverage N/A where appropriate). Implementation follows repository conventions. No blocking issues found.
 
    ```json coding-team-artifact
    {

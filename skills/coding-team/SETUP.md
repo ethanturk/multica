@@ -17,7 +17,7 @@ During ADO-backed planning, the Planner also walks the ADO parent hierarchy from
 
 ## Skills to import
 
-Import all 11 repo skill files into your Multica workspace. Each markdown file in this directory is a standalone skill.
+Import all 11 repo skills into your Multica workspace. Role entrypoints remain Markdown files; Orchestrator also needs the six files under `orchestrator/references/`, attached as `references/<filename>` to its existing workspace skill. The two shared skills are packages; import each through its `SKILL.md` entrypoint with all supporting files attached. Updating content alone does not upload references.
 
 Also import the upstream `improve` skill for Coding Team Refiner:
 
@@ -35,8 +35,8 @@ multica skill import --url https://github.com/mattpocock/skills/blob/main/skills
 
 | File | Assign to |
 |------|-----------|
-| `shared-ado-ops.md` | Pipeline agents that use ADO or repo operations; not Watchdog |
-| `shared-state-ops.md` | All coding-team agents, including Watchdog |
+| `shared-ado-ops/SKILL.md` | Pipeline agents that use ADO or repo operations; not Watchdog |
+| `shared-state-ops/SKILL.md` | All coding-team agents, including Watchdog |
 | `orchestrator.md` | Coding Team Orchestrator only |
 | `guided-planner.md` | Coding Team Guided Planner only |
 | `planner.md` | Coding Team Planner only |
@@ -46,6 +46,30 @@ multica skill import --url https://github.com/mattpocock/skills/blob/main/skills
 | `refiner.md` | Coding Team Refiner only |
 | `pr-writer.md` | Coding Team PR Writer only |
 | `watchdog.md` | Coding Team Watchdog only |
+
+## Progressive loading and synchronization
+
+The main role files retain permissions, pause/idempotency guards, and stage routing. Orchestrator reads only the applicable stage reference (plus configuration defaults when needed); it must not eagerly read all six. Delivery roles read `shared-state-ops/references/review-contract.md` before substantive work. Commit authors read the existing `branch-sync-and-commits.md` before committing; role files do not redeclare its helpers. Repository AGENTS/CLAUDE/STYLE guidance is authoritative instead of embedded language checklists.
+
+Synchronize supporting files first with `multica skill files upsert <skill-id> --path references/<filename> --content-file <local-file>`, then update each main body with `multica skill update <skill-id> --content-file <entrypoint>`. Preserve unrelated workspace files. Read back every updated body/file and check exact content and the shared-state-ops bindings for each role. Do not import the local `tests/` directory as a skill asset.
+
+Multica writes the main body as `SKILL.md` and supporting files separately in provider skill directories (`server/internal/daemon/execenv/context.go`, `writeSkillFiles`). This enables selective reads; actual model token savings depend on the provider and which stages run, not just file-size reduction. Existing in-flight runs can retain an earlier snapshot.
+
+Run local structural regression checks with `python3 -m unittest discover -s skills/coding-team/tests` from the repository root.
+
+## Review convergence and recovery
+
+All delivery roles share a task-scoped review contract: exact issue/branch/commit identity, an acceptance-to-verification matrix, cumulative changed-production-file coverage, and the repository's automated and manual checks. Planner records that contract in the existing plan artifact; no new artifact schema or tool import is required.
+
+- Reviewer performs one complete first pass, assigns stable finding IDs, and closes those IDs on repair instead of restarting an unrestricted audit. Security/correctness defects and explicit mandatory rules remain blocking; optional cleanup does not.
+- Implementer owns code and test repairs. The normal repair route is Implementer → Reviewer. A separate Test Writer pass requires the literal `requires_test_writer: true` in the latest FAIL; a stale independent test-summary SHA alone is not a reason to reject a verified repair.
+- Missing prerequisites/artifacts and scope disputes use `## Review Blocked: Decision Needed`, not code FAIL. Two unsuccessful completed repair attempts, or repeated unchanged findings without new evidence, also pause for an explicit decision. The cap never grants PASS.
+- Orchestrator and Watchdog respect that pause and check actual successor executions before reissuing mentions. Task handoffs are posted on the target child UUID, never on a master/sibling with only a link to the intended child.
+- Refiner reuses the reviewed task scope and the same repair budget; it does not open another unlimited cleanup loop.
+
+These are skill-level guards. Existing deterministic marker tools do not enforce the decision-needed pause, commit ancestry, or retry limit themselves. Do not deploy only Reviewer/Implementer: refresh Planner, Test Writer, Refiner, Orchestrator, and Watchdog together so recovery cannot restart a paused loop. Existing in-flight runs may still have their earlier skill snapshot; this update does not cancel or restart tasks.
+
+See `docs/inc-646-review-churn.md` for the observed failure patterns and baseline counts. Evaluate subsequent comparable tasks by substantive review rounds, artifact-only rejections, duplicate dispatches, reopened findings, and time to accepted work—not by fewer findings or weaker gates.
 
 ## Deterministic tools to import
 

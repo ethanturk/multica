@@ -26,6 +26,14 @@ Allowed Multica mutations:
 5. Update master issue state with `multica issue update {master_issue_id} --description-stdin` using `shared-state-ops`.
 6. Close the watchdog tick with `multica issue status "$MULTICA_ISSUE_ID" done`.
 
+## Recovery eligibility guard
+
+Before executing a proposed recovery action, fetch the exact target task's comments and `multica issue runs <task-id> --output json`. Do not send another mention when the intended role is queued/running or a later valid artifact already proves progress. A harness failure after a durable handoff is not missing work.
+
+An unresolved `## Review Blocked: Decision Needed` comment is an intentional pause. Suppress both the recovery action and its associated state patches until a later explicit decision addresses its unblock condition and names the next bounded attempt. Do not let historical implementation/review headings reopen the repair loop. Record the skip in the tick summary, not another blocking comment on the task. This guard takes precedence over the deterministic tool's proposed actions; the tool does not enforce this pause itself.
+
+Validate each action's task UUID against the master task entry before posting. A task link in a master/sibling comment does not retarget a mention. Sort fetched comments oldest-to-newest by timestamp and ID before passing them to marker tools, and avoid quoting lifecycle headings in recovery prose.
+
 ## Required Flow
 
 If the `coding_watchdog_analyze` deterministic tool is available, use it for the
