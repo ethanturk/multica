@@ -1,15 +1,13 @@
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
-import path from "node:path";
 
-// Mobile vitest is intentionally minimal — Node environment only, scoped to
-// pure-function helpers in `lib/` and headless data-layer logic in `data/`
-// (query-key + cache-patch functions that take a QueryClient but touch no
-// DOM / RN native modules). We don't ship jsdom or RN test renderers here
-// because the app runs on Hermes / native shims and any DOM-shaped runner
-// would be a lie. Tests that need RN component rendering would need a
-// separate jest+react-native-testing-library track; for now we keep this
-// lane for helpers, serializers, and cache updaters only. Data-layer tests
-// must mock `@/data/api` so the native fetch chain never loads.
+const appRoot = dirname(fileURLToPath(import.meta.url));
+
+// Mobile Vitest runs in Node. It covers helpers, headless data-layer logic,
+// and component/app tests with native dependencies mocked. We don't ship
+// jsdom because the app runs on Hermes/native shims. Data-layer tests must
+// mock `@/data/api` so the native fetch chain never loads.
 //
 // Co-located test files (foo.ts + foo.test.ts) match how the rest of the
 // monorepo organises vitest suites.
@@ -21,8 +19,13 @@ import path from "node:path";
 export default defineConfig({
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "."),
+      "@": resolve(appRoot),
     },
+  },
+  // React Native's bundler defines __DEV__; Expo modules read it at import
+  // time, so component and route tests need it in Node too.
+  define: {
+    __DEV__: "false",
   },
   test: {
     environment: "node",
@@ -31,10 +34,12 @@ export default defineConfig({
       "app.config.test.ts",
       "lib/**/*.test.ts",
       "data/**/*.test.ts",
-      "components/issue/run-cancel-button.test.ts",
-      "components/inbox/inbox-screen.test.ts",
-      "components/issue/timeline-list.test.ts",
+      "data/**/*.test.tsx",
+      "components/**/*.test.ts",
+      "components/**/*.test.tsx",
+      "route-tests/**/*.test.tsx",
     ],
+    setupFiles: ["./vitest.setup.ts"],
     passWithNoTests: true,
   },
 });

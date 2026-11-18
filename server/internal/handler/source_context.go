@@ -854,7 +854,9 @@ func (h *Handler) prepareAgentCommentSubIssue(w http.ResponseWriter, r *http.Req
 		writeAgentUnavailable(w, verdict.Detail, verdict.Reason)
 		return nil, errSourceContextResponseWritten
 	}
-	if status, payload := h.checkQuickCreateDaemonVersion(r.Context(), obsmetrics.RuntimeLookupSourceSourceContext, agent.RuntimeID); status != 0 {
+	if status, payload := h.checkQuickCreateDaemonVersionAtLeast(
+		r.Context(), obsmetrics.RuntimeLookupSourceSourceContext, agent.RuntimeID, agentpkg.MinQuickCreateCLIVersion,
+	); status != 0 {
 		writeJSON(w, status, payload)
 		return nil, errSourceContextResponseWritten
 	}

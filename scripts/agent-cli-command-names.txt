@@ -9,6 +9,7 @@ cursor-agent
 deveco
 devin
 dim
+dirge
 dsh
 grok
 hermes

@@ -41,6 +41,7 @@ import (
 	"github.com/multica-ai/multica/server/pkg/redact"
 	"github.com/multica-ai/multica/server/pkg/skillbundle"
 	"github.com/multica-ai/multica/server/pkg/taskfailure"
+	"github.com/multica-ai/multica/server/pkg/uitest"
 )
 
 // ErrRepoNotConfigured is returned by ensureRepoReady when the requested repo
@@ -775,6 +776,11 @@ type Daemon struct {
 	// New() and overridable in tests so the auto-update poller can be exercised
 	// without touching the real network or the brew CLI.
 	runUpdateFn func(targetVersion string) (string, error)
+
+	uiTestHomeDir       func() (string, error)
+	uiTestStatus        func(string) uitest.CapabilityStatus
+	uiTestExecutable    func() (string, error)
+	openclawMCPResolver func(string) (map[string]json.RawMessage, error)
 }
 
 type profileLaunchSpec struct {
@@ -3314,6 +3320,17 @@ func repoAllowlist(repos []RepoData) map[string]struct{} {
 		allowed[repo.URL] = struct{}{}
 	}
 	return allowed
+}
+
+// redactRepoURLCredentials drops HTTPS userinfo before a clone URL is logged.
+// Agents may send a task-scoped PAT in the checkout URL.
+func redactRepoURLCredentials(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if parsed, err := url.Parse(rawURL); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		parsed.User = nil
+		return parsed.String()
+	}
+	return rawURL
 }
 
 // defaultGitPorts are the ports implied when a URL form omits one. A port
@@ -8459,6 +8476,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// before allowing reuse, so a pre-fix leader session recorded against
 	// local_directory still fails closed.
 	var agentMcpConfig json.RawMessage
+	var agentRuntimeConfig json.RawMessage
 	var effectiveMcpConfig json.RawMessage
 	var cursorMcpAuthSource string
 	var cursorMcpAuthStore string
@@ -8508,6 +8526,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	}
 	if task.Agent != nil {
 		agentMcpConfig = task.Agent.McpConfig
+		agentRuntimeConfig = task.Agent.RuntimeConfig
 		effectiveMcpConfig = agentMcpConfig
 		if merged, mergeErr := mergeRuntimeAndAgentMcpConfig(provider, agentMcpConfig); mergeErr != nil {
 			taskLog.Warn("mcp_config: runtime merge failed; using agent configuration only",
@@ -8543,6 +8562,20 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		// override throughout preparation and execution.
 		openclawModelOverride = strings.TrimSpace(task.ModelOverride)
 	}
+
+	// OpenClaw materializes mcp.servers from this config during execenv.Prepare,
+	// so daemon-managed servers must be merged in before Prepare/Reuse. No-op
+	// for every other provider.
+	effectiveMcpConfig, uiTestInjected := d.injectExecenvOpenClawOverlays(
+		effectiveMcpConfig,
+		provider,
+		openclawBin,
+		agentRuntimeConfig,
+		task.DeterministicTools,
+		task.ID,
+		d.logger,
+	)
+
 	var agentEnvOverrides map[string]string
 	var agentCustomArgs []string
 	if task.Agent != nil {
@@ -8820,6 +8853,11 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		}
 	}
 	phaseRecorder.Mark(taskPhaseEnvironmentReady)
+	defer func() {
+		if err := uitest.CleanupTask(env.WorkDir, task.ID, taskLog); err != nil {
+			taskLog.Warn("ui-test: task cleanup failed", "error", err)
+		}
+	}()
 	// Belt-and-suspenders: also mark whatever root we ended up with, in case
 	// future changes diverge from ResolveRootDir.
 	if env.RootDir != resolvedRoot && env.RootDir != "" {
@@ -9171,6 +9209,13 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if task.Agent != nil {
 		agentCustomEnv = task.Agent.CustomEnv
 	}
+	// Pi reaches the deterministic tool plane through pi-mcp-adapter (opt-in,
+	// experimental): the daemon writes a project-local .pi/mcp.json the adapter
+	// auto-discovers. No-op for every other provider and when disabled. The
+	// cleanup restores the user's file on local_directory tasks.
+	piCleanup := d.preparePiToolPlane(provider, env.WorkDir, env.LocalDirectory, agentMcpConfig, agentRuntimeConfig, task.DeterministicTools, agentEnv, d.logger)
+	defer piCleanup()
+
 	layerCustomEnvAndHermesHome(agentEnv, agentCustomEnv, env.HermesHome, d.logger)
 	if provider == "reasonix" {
 		reasonixStateHome, err := prepareReasonixTaskStateHome(d.cfg.Profile, task.RuntimeID, task.AgentID)
@@ -9309,6 +9354,29 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if task.Agent != nil {
 		customArgs = task.Agent.CustomArgs
 		mcpConfig = effectiveMcpConfig
+	}
+	// Merge the daemon-managed deterministic tool server into the agent's MCP
+	// config when the tool plane is enabled and the provider consumes MCP via
+	// ExecOptions. Additive and fail-open: returns mcpConfig unchanged otherwise.
+	var execAgentRuntimeConfig json.RawMessage
+	if task.Agent != nil {
+		execAgentRuntimeConfig = task.Agent.RuntimeConfig
+	}
+	mcpConfig = d.injectExecOptionsTools(mcpConfig, provider, env.WorkDir, execAgentRuntimeConfig, task.DeterministicTools, taskLog)
+	var execOptionsUITestInjected bool
+	mcpConfig, execOptionsUITestInjected = d.injectExecOptionsUITest(mcpConfig, provider, env.WorkDir, task.ID, taskLog)
+	uiTestInjected = uiTestInjected || execOptionsUITestInjected
+	if uiTestInjected {
+		runtimeBrief += uiTestRuntimeBrief
+	}
+	// Deterministic tools guidance: when the tool plane is enabled and MCP
+	// servers were injected, append instructions telling the agent to prefer
+	// deterministic tools over shell commands. Without this, agents silently
+	// fall through to Bash/exec_command even when MCP tools are available,
+	// because shell commands are more familiar and the tools are never
+	// mentioned in the runtime brief.
+	if d.cfg.DetTools.Enabled && len(mcpConfig) > 0 {
+		runtimeBrief += detToolsRuntimeGuidance()
 	}
 	if hermesOverlayActive {
 		// Stripped above, alongside the launch prefix. A skill-less hermes task
@@ -9557,6 +9625,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			taskLog.Warn("execenv: re-inject cold runtime config for fresh retry failed (non-fatal)", "error", briefErr)
 		} else {
 			runtimeBrief = freshBrief
+			if uiTestInjected {
+				runtimeBrief += uiTestRuntimeBrief
+			}
 			runtimeBriefWritten = true
 			if providerNeedsInlineSystemPrompt(provider) {
 				execOpts.SystemPrompt = runtimeBrief

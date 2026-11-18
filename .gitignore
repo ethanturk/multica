@@ -57,6 +57,7 @@ apps/web/test-results/
 .agent_context/
 .multica/*
 !.multica/environments.toml
+!.multica/ui-test.json
 
 # local settings
 .claude/
@@ -75,6 +76,7 @@ server/server
 data/
 .kilo
 .idea
+.hermes/
 .gstack/
 
 # Python (agent tooling)

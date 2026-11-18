@@ -23,10 +23,9 @@ test.describe("Settings", () => {
     const newName = "Renamed WS " + Date.now();
     await nameInput.fill(newName);
 
-    // Save
-    await page.locator("button", { hasText: "Save" }).click();
-
-    await expect(page.getByText("Workspace settings saved").first()).toBeVisible({ timeout: 5000 });
+    // Workspace details autosave on blur.
+    await nameInput.blur();
+    await expect(page.getByRole("status")).toHaveText("Saved", { timeout: 10000 });
 
     // The rail should reflect the new name WITHOUT page refresh
     await expect(appRail(page).getByRole("link", { name: newName })).toBeVisible();

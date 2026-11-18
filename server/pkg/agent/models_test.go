@@ -56,6 +56,21 @@ func TestListModelsQwenUsesRuntimeDefaultAndManualEntry(t *testing.T) {
 	}
 }
 
+func TestDirgeModelCatalogEmptyButSupported(t *testing.T) {
+	t.Parallel()
+
+	models, err := ListModels(context.Background(), "dirge", Command{})
+	if err != nil {
+		t.Fatalf("ListModels(dirge): %v", err)
+	}
+	if len(models.Models) != 0 {
+		t.Fatalf("ListModels(dirge) = %#v, want empty catalog", models)
+	}
+	if !ModelSelectionSupported("dirge") {
+		t.Fatal("dirge should accept model selection through --model")
+	}
+}
+
 func TestListModelsCopilotFallsBackToStatic(t *testing.T) {
 	// Copilot uses dynamic ACP discovery, but with no `copilot`
 	// binary on PATH (the discovery LookPath fails) it must fall

@@ -325,6 +325,15 @@ type RepoData struct {
 	Ref         string `json:"ref,omitempty"`
 }
 
+// DeterministicToolData is the wire shape for a workspace-authored deterministic
+// tool included in a claim response. The daemon writes these into the task work
+// dir and the per-task MCP server runs each in the sandboxed interpreter.
+type DeterministicToolData struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Source      string `json:"source"`
+}
+
 // ProjectResourceData is the wire shape for a project resource included in a
 // claim response. The daemon reads this list and writes it into the agent's
 // working directory so skills/agents can discover project-scoped context.
@@ -462,6 +471,7 @@ type AgentTaskResponse struct {
 	Agent              *TaskAgentData           `json:"agent,omitempty"`
 	ConnectedApps      []ConnectedAppData       `json:"connected_apps,omitempty"` // daemon-claim only: per-run app capabilities mounted through runtime MCP overlays
 	Repos              []RepoData               `json:"repos,omitempty"`
+	DeterministicTools []DeterministicToolData  `json:"deterministic_tools,omitempty"` // workspace-authored sandboxed tools for the agent tool plane
 	ProjectID          string                   `json:"project_id,omitempty"`          // issue's project, when present
 	ProjectTitle       string                   `json:"project_title,omitempty"`       // for surfacing in agent context
 	ProjectDescription string                   `json:"project_description,omitempty"` // durable project-level context injected into the brief
@@ -861,8 +871,8 @@ type TaskAgentData struct {
 	// RuntimeConfig is the agent's saved runtime_config JSON as-is. The
 	// daemon decodes it per-provider — e.g. the openclaw backend reads
 	// `mode` + `gateway.*` to choose between embedded and gateway routing
-	// (issue #3260). Other providers ignore the payload entirely. Sent
-	// raw so the daemon can evolve its schema without a server roundtrip.
+	// (issue #3260). Other providers ignore the payload entirely. Sent raw so
+	// the daemon can evolve its schema without a server roundtrip.
 	RuntimeConfig json.RawMessage `json:"runtime_config,omitempty"`
 }
 

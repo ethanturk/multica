@@ -1,6 +1,5 @@
 import { useCallback, useMemo } from "react";
 import {
-  ActionSheetIOS,
   Alert,
   FlatList,
   View,
@@ -33,6 +32,7 @@ import {
   deduplicateInboxItems,
   getInboxNavigationTarget,
 } from "@/lib/inbox-display";
+import { showPlatformActionSheet } from "@/lib/action-sheet";
 
 export default function Inbox() {
   const { t } = useT("inbox");
@@ -69,40 +69,36 @@ export default function Inbox() {
   // first (most common batch op); "Archive all" is destructive so it gets
   // the iOS red treatment + Alert confirm.
   const onPressMenu = () => {
-    const options = [
-      t("common:actions.cancel"),
-      t("actions.mark_all_read"),
-      t("actions.archive_all_read"),
-      t("actions.archive_completed"),
-      t("actions.archive_all"),
-    ];
-    ActionSheetIOS.showActionSheetWithOptions(
-      {
-        options,
-        cancelButtonIndex: 0,
-        destructiveButtonIndex: 4,
-        title: t("title"),
-      },
-      (i) => {
-        if (i === 1) markAllRead.mutate();
-        else if (i === 2) archiveAllRead.mutate();
-        else if (i === 3) archiveCompleted.mutate();
-        else if (i === 4) {
-          Alert.alert(
-            t("archive.confirm_title"),
-            t("archive.confirm_body"),
-            [
-              { text: t("common:actions.cancel"), style: "cancel" },
-              {
-                text: t("actions.archive_all"),
-                style: "destructive",
-                onPress: () => archiveAll.mutate(),
-              },
-            ],
-          );
-        }
-      },
-    );
+    showPlatformActionSheet({
+      title: t("title"),
+      options: [
+        { label: t("actions.mark_all_read"), onPress: () => markAllRead.mutate() },
+        { label: t("actions.archive_all_read"), onPress: () => archiveAllRead.mutate() },
+        {
+          label: t("actions.archive_completed"),
+          onPress: () => archiveCompleted.mutate(),
+        },
+        {
+          label: t("actions.archive_all"),
+          style: "destructive",
+          onPress: () => {
+            Alert.alert(
+              t("archive.confirm_title"),
+              t("archive.confirm_body"),
+              [
+                { text: t("common:actions.cancel"), style: "cancel" },
+                {
+                  text: t("actions.archive_all"),
+                  style: "destructive",
+                  onPress: () => archiveAll.mutate(),
+                },
+              ],
+            );
+          },
+        },
+        { label: t("common:actions.cancel"), style: "cancel" },
+      ],
+    });
   };
 
   return (

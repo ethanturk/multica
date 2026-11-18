@@ -58,8 +58,10 @@ jobs:
         if: github.event_name == 'pull_request' || github.event_name == 'push'
         uses: dorny/paths-filter@v3
         with:
-          # Pushes compare before/head SHAs. PRs use the pull-request file API;
-          # paths-filter ignores base/ref for pull_request events.
+          # Fork: no token, so paths-filter diffs with git instead of the
+          # pull-request file API.
+          # Pushes compare before/head SHAs; PRs compare against the base ref.
+          token: ''
           base: ${{ github.event_name == 'push' && github.event.before || github.base_ref }}
           ref: ${{ github.sha }}
           filters: .github/ci-paths.json

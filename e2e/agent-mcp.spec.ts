@@ -161,8 +161,9 @@ test.describe("Agent MCP tab (creator-only)", () => {
     });
     await waitForPageText(page, "MCP Test Agent");
 
-    // The creator-only tab entry is present and opens the connection list.
-    const tab = page.getByRole("button", { name: "MCP Apps" });
+    // Capabilities owns the creator-only secondary navigation.
+    await page.getByRole("tab", { name: "Capabilities", exact: true }).click();
+    const tab = page.getByRole("tab", { name: "MCP Apps", exact: true });
     await expect(tab).toBeVisible({ timeout: 15000 });
     await tab.click();
 
@@ -184,10 +185,14 @@ test.describe("Agent MCP tab (creator-only)", () => {
     });
     await waitForPageText(page, "MCP Test Agent");
 
-    // Other tabs render, but the creator-only MCP Apps entry must not.
-    await expect(page.getByRole("button", { name: "Activity" })).toBeVisible({
+    // Overview is the landing tab; Capabilities exposes the creator-only
+    // secondary navigation, where MCP Apps must remain hidden for this user.
+    await expect(page.getByRole("tab", { name: "Overview", exact: true })).toBeVisible({
       timeout: 15000,
     });
-    await expect(page.getByRole("button", { name: "MCP Apps" })).toHaveCount(0);
+    await page.getByRole("tab", { name: "Capabilities", exact: true }).click();
+    await expect(
+      page.getByRole("tab", { name: "MCP Apps", exact: true }),
+    ).toHaveCount(0);
   });
 });

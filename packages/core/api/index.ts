@@ -15,8 +15,8 @@ export type {
 } from "./client";
 export { parseWithFallback, setSchemaLogger } from "./schema";
 export type { ParseOptions } from "./schema";
-export { DuplicateIssueErrorBodySchema } from "./schemas";
-export type { DuplicateIssueErrorBody } from "./schemas";
+export { DuplicateIssueErrorBodySchema, DeterministicToolResultSchema, DeterministicToolSchema } from "./schemas";
+export type { DuplicateIssueErrorBody, DeterministicToolResult, DeterministicTool } from "./schemas";
 export { WSClient } from "./ws-client";
 export { setApiRequestObserver } from "./request-observer";
 export type { ApiRequestObserver } from "./request-observer";

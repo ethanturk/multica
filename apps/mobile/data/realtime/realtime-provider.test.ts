@@ -16,6 +16,7 @@ vi.mock("react", async (importOriginal) => ({
   useState: () => [lifecycle.clientState, (value: unknown) => { lifecycle.clientState = value; }],
 }));
 vi.mock("react-native", () => ({
+  Platform: { OS: "ios" },
   AppState: {
     addEventListener: (_event: string, handler: (state: string) => void) => {
       lifecycle.onAppState = handler;

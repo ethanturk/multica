@@ -17,6 +17,7 @@ import type {
   DaemonStatus,
   DaemonPrefs,
   LocalRuntimeProbe,
+  UITestCapabilityStatus,
 } from "../shared/daemon-types";
 import type { TabSelectionShortcutKey } from "../shared/main-renderer-messages";
 import type {
@@ -227,6 +228,8 @@ interface DaemonAPI {
   stop: () => Promise<{ success: boolean; error?: string }>;
   restart: () => Promise<{ success: boolean; error?: string }>;
   getStatus: () => Promise<DaemonStatus>;
+  getUITestStatus: () => Promise<UITestCapabilityStatus>;
+  installUITest: () => Promise<UITestCapabilityStatus>;
   probeRuntimes: () => Promise<LocalRuntimeProbe>;
   getHostName: () => Promise<string>;
   /** Brings forward a desktop app environment the local daemon detected. */

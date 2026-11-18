@@ -78,6 +78,12 @@ Use the existing helpers rather than rebuilding request or subscription plumbing
 - Each feature refreshes its affected caches on reconnect, including any account-level projections it owns. Avoid a global refetch sweep or subscriptions with no mobile consumer.
 - Accept authoritative WS updates over local optimistic state. Do not add timestamp gates to protect optimistic patches without a demonstrated ordering problem.
 
+## Android Release (this fork)
+
+- **Android staging distribution** (`.github/workflows/mobile-android-distribute.yml`): manual dispatch only. Builds and signs `ai.multica.mobile.staging`, retains the APK for seven days, authenticates through GitHub OIDC, and uploads to configured Firebase App Distribution tester groups.
+- **External Android release state**: the `android-staging` GitHub environment, Workload Identity Federation, Firebase app/tester groups, and durable keystore must be provisioned outside the repository.
+- **Not implemented**: production Play submission, iOS release automation, and EAS Build/Submit/Update. Do not describe or depend on a `mobile-release.yml` workflow unless one is added.
+
 ## Verification
 
 From the repository root:

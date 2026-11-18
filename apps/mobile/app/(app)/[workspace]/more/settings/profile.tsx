@@ -12,7 +12,6 @@
  */
 import { useState } from "react";
 import {
-  ActionSheetIOS,
   Alert,
   ActivityIndicator,
   Pressable,
@@ -29,6 +28,7 @@ import { useAuthStore } from "@/data/auth-store";
 import { api } from "@/data/api";
 import type { FileAsset } from "@/data/api";
 import { useT } from "@/lib/i18n";
+import { showPlatformActionSheet } from "@/lib/action-sheet";
 
 const MAX_AVATAR_BYTES = 5 * 1024 * 1024; // 5 MB — matches what's reasonable on cellular.
 
@@ -63,35 +63,25 @@ export default function ProfileSettingsScreen() {
   const dirty = name.trim() !== (user?.name ?? "") && name.trim().length > 0;
 
   const handleAvatarPick = () => {
-    const actions = ["camera", "library"];
-    if (user?.avatar_url) actions.push("remove");
-    actions.push("cancel");
-    const removeIndex = user?.avatar_url ? 2 : -1;
-    const cancelIndex = actions.length - 1;
-    const visibleOptions = actions.map((action) =>
-      action === "camera"
-        ? t("avatar.take")
-        : action === "library"
-          ? t("avatar.library")
-          : action === "remove"
-            ? t("avatar.remove")
-            : t("common:actions.cancel"),
-    );
-
-    ActionSheetIOS.showActionSheetWithOptions(
-      {
-        options: visibleOptions,
-        cancelButtonIndex: cancelIndex,
-        destructiveButtonIndex: removeIndex >= 0 ? removeIndex : undefined,
-      },
-      async (index) => {
-        if (index === cancelIndex) return;
-        const action = actions[index];
-        if (action === "camera") await pickFromCamera();
-        else if (action === "library") await pickFromLibrary();
-        else if (action === "remove") await removeAvatar();
-      },
-    );
+    showPlatformActionSheet({
+      options: [
+        { label: t("avatar.take"), onPress: () => void pickFromCamera() },
+        {
+          label: t("avatar.library"),
+          onPress: () => void pickFromLibrary(),
+        },
+        ...(user?.avatar_url
+          ? [
+              {
+                label: t("avatar.remove"),
+                style: "destructive" as const,
+                onPress: () => void removeAvatar(),
+              },
+            ]
+          : []),
+        { label: t("common:actions.cancel"), style: "cancel" as const },
+      ],
+    });
   };
 
   const pickFromCamera = async () => {

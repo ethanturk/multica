@@ -44,6 +44,7 @@ import {
 import type {
   DaemonStatus,
   LocalRuntimeProbe,
+  UITestCapabilityStatus,
 } from "../shared/daemon-types";
 import {
   VOICE_HISTORY_AUDIO_CHANNEL,
@@ -462,6 +463,10 @@ const daemonAPI = {
     ipcRenderer.invoke("daemon:restart"),
   getStatus: (): Promise<DaemonStatus> =>
     ipcRenderer.invoke("daemon:get-status"),
+  getUITestStatus: (): Promise<UITestCapabilityStatus> =>
+    ipcRenderer.invoke("daemon:get-ui-test-status"),
+  installUITest: (): Promise<UITestCapabilityStatus> =>
+    ipcRenderer.invoke("daemon:install-ui-test"),
   probeRuntimes: (): Promise<LocalRuntimeProbe> =>
     ipcRenderer.invoke("daemon:probe-runtimes"),
   getHostName: (): Promise<string> =>

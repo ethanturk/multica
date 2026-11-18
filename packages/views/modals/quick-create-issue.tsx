@@ -47,7 +47,6 @@ import { useIssueDraftStore, type IssueCreateDraft } from "@multica/core/issues/
 import { useCreateModeStore } from "@multica/core/issues/stores/create-mode-store";
 import {
   runtimeListOptions,
-  checkQuickCreateCliVersion,
   checkQuickCreateFieldsCliVersion,
   readRuntimeCliVersion,
 } from "@multica/core/runtimes";
@@ -329,8 +328,10 @@ export function AgentCreatePanel({
     setActiveMode("agent");
   }, [setActiveMode]);
 
-  // Daemon CLI version gate. The agent-create flow needs the runtime's
-  // bundled multica CLI to be ≥ MIN_QUICK_CREATE_CLI_VERSION; older
+  // Daemon CLI version gate for priority/due-date fields. These fields need a
+  // daemon new enough to carry them into the generated issue-create prompt;
+  // basic quick-create remains ungated. The agent-create flow also needs the
+  // runtime's bundled multica CLI to be ≥ MIN_QUICK_CREATE_CLI_VERSION; older
   // daemons handle attachments and partial-failure retries incorrectly
   // (see PR #1851 / MUL-1496). Pre-check on the picker so the user gets
   // immediate feedback instead of waiting for the inbox failure; the
@@ -352,28 +353,21 @@ export function AgentCreatePanel({
   // two must not collapse, or the member gets the misleading "upgrade your
   // daemon" wall for a runtime that is in fact new enough (#7633). When we
   // can't pre-check, defer to the server's authoritative gate
-  // (checkQuickCreateDaemonVersion, which reads the row by id regardless of
-  // role) instead of failing closed in the UI.
+  // (checkQuickCreateDaemonVersionAtLeast, which reads the row by id
+  // regardless of role) instead of failing closed in the UI.
   // Qoder Cloud Agents runs through the managed bridge, which has no CLI.
   const canPrecheckVersion =
     selectedAgent?.runtime_id != null &&
     selectedRuntime != null &&
     selectedRuntime.provider !== "qoder_cloud";
   const runtimeCliVersion = readRuntimeCliVersion(selectedRuntime?.metadata);
-  const baseVersionCheck = useMemo(
-    () => checkQuickCreateCliVersion(runtimeCliVersion),
-    [runtimeCliVersion],
-  );
   const fieldVersionCheck = useMemo(
     () => checkQuickCreateFieldsCliVersion(runtimeCliVersion),
     [runtimeCliVersion],
   );
   const usesExplicitFields = priority !== "none" || dueDate !== null;
-  const versionCheck = usesExplicitFields ? fieldVersionCheck : baseVersionCheck;
   const versionBlocked =
-    canPrecheckVersion &&
-    (baseVersionCheck.state !== "ok" ||
-      (usesExplicitFields && fieldVersionCheck.state !== "ok"));
+    canPrecheckVersion && usesExplicitFields && fieldVersionCheck.state !== "ok";
 
   // An opener's prompt (⌘K "Hand to agent") is newer than any unfinished
   // draft, so it wins, and is written through so a mode switch keeps it.
@@ -520,7 +514,7 @@ export function AgentCreatePanel({
             setError(
               t(($) => $.create_issue.agent.error_daemon_version, {
                 current: cur,
-                min: body.min_version || versionCheck.min,
+                min: body.min_version || fieldVersionCheck.min,
               }),
             );
             return false;
@@ -629,7 +623,7 @@ export function AgentCreatePanel({
     onSwitchMode?.(Object.keys(carry).length > 0 ? carry : null);
   };
 
-  // Field visibility lives in Settings → Preferences → Issue creation. Persist the prompt draft
+  // Field visibility lives in Settings → Issue. Persist the prompt draft
   // before leaving so what the user typed survives the round-trip, then
   // close — the dialog would otherwise linger over the settings page.
   const openFieldSettings = (e: React.MouseEvent) => {
@@ -747,11 +741,11 @@ export function AgentCreatePanel({
 
         {selectedAgent && versionBlocked && (
           <div className="mx-5 mb-2 shrink-0 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-caption text-amber-700 dark:text-amber-300">
-            {versionCheck.state === "missing"
-              ? t(($) => $.create_issue.agent.version_missing, { min: versionCheck.min })
+            {fieldVersionCheck.state === "missing"
+              ? t(($) => $.create_issue.agent.version_missing, { min: fieldVersionCheck.min })
               : t(($) => $.create_issue.agent.version_below, {
-                  current: versionCheck.current,
-                  min: versionCheck.min,
+                  current: fieldVersionCheck.current,
+                  min: fieldVersionCheck.min,
                 })}
           </div>
         )}
@@ -985,7 +979,7 @@ export function AgentCreatePanel({
               <Tooltip>
                 <TooltipTrigger render={createButton} />
                 <TooltipContent side="top">
-                  {t(($) => $.create_issue.agent.version_blocked_tooltip, { min: versionCheck.min })}
+                  {t(($) => $.create_issue.agent.version_blocked_tooltip, { min: fieldVersionCheck.min })}
                 </TooltipContent>
               </Tooltip>
             ) : (

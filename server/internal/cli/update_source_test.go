@@ -33,7 +33,7 @@ func TestReleaseSourceOverridesGitHub(t *testing.T) {
 
 func TestFetchLatestReleaseUsesConfiguredAPI(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/repos/multica-ai/multica/releases/latest" {
+		if r.URL.Path != "/repos/"+updateRepoSlug()+"/releases/latest" {
 			http.NotFound(w, r)
 			return
 		}

@@ -218,6 +218,71 @@ func TestPrepareOpenclawConfigDelegatesParsingToCLI(t *testing.T) {
 	}
 }
 
+func TestResolveOpenclawNativeMCPServersUsesActiveResolvedConfig(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		setPathEnv bool
+	}{
+		{name: "modern_OPENCLAW_CONFIG_PATH", setPathEnv: true},
+		{name: "CLI_selected_active_path"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			userConfigPath := filepath.Join(t.TempDir(), "selected-openclaw.json")
+			rawJSON5 := `{
+				$include: "./native-servers.json",
+				mcp: { servers: {
+					"native-browser": { command: "${NATIVE_BROWSER_COMMAND}", },
+				}, },
+			}`
+			if err := os.WriteFile(userConfigPath, []byte(rawJSON5), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if test.setPathEnv {
+				t.Setenv("OPENCLAW_CONFIG_PATH", userConfigPath)
+			} else {
+				t.Setenv("OPENCLAW_CONFIG_PATH", "")
+			}
+			t.Setenv("NATIVE_BROWSER_COMMAND", "/resolved/native-browser")
+
+			stub := installOpenclawStub(t, map[string]openclawResponse{
+				"config file": {stdout: userConfigPath},
+				"config get mcp --json": {stdout: `{
+					"servers":{
+						"native-browser":{
+							"command":"/resolved/native-browser",
+							"args":["serve"],
+							"env":{"TOKEN":"resolved-secret"}
+						}
+					}
+				}`},
+			})
+
+			servers, err := ResolveOpenclawNativeMCPServers(stub.bin)
+			if err != nil {
+				t.Fatalf("ResolveOpenclawNativeMCPServers: %v", err)
+			}
+			var entry struct {
+				Command string            `json:"command"`
+				Args    []string          `json:"args"`
+				Env     map[string]string `json:"env"`
+			}
+			if err := json.Unmarshal(servers["native-browser"], &entry); err != nil {
+				t.Fatalf("decode native entry: %v", err)
+			}
+			if entry.Command != "/resolved/native-browser" ||
+				!reflect.DeepEqual(entry.Args, []string{"serve"}) ||
+				entry.Env["TOKEN"] != "resolved-secret" {
+				t.Fatalf("native entry lost resolved data: %#v", entry)
+			}
+			if len(stub.calls) != 2 ||
+				strings.Join(stub.calls[0].args, " ") != "config validate --json" ||
+				strings.Join(stub.calls[1].args, " ") != "config get mcp --json" {
+				t.Fatalf("resolver calls = %#v", stub.calls)
+			}
+		})
+	}
+}
+
 // TestPrepareOpenclawConfigFailsClosedOnCLIError — the headline regression
 // for Elon's review. When the openclaw CLI fails (broken config, missing
 // binary, etc.), prepareOpenclawConfig MUST surface the error rather than
@@ -1678,6 +1743,7 @@ func TestPrepareEnvironmentNonOpenclawSkipsConfig(t *testing.T) {
 		"opencode": "bbbbbbbb-1111-2222-3333-4444444444bb",
 		"hermes":   "cccccccc-1111-2222-3333-4444444444cc",
 		"kiro":     "dddddddd-1111-2222-3333-4444444444dd",
+		"dirge":    "eeeeeeee-1111-2222-3333-4444444444ee",
 	}
 	for provider, taskID := range taskIDs {
 		t.Run(provider, func(t *testing.T) {

@@ -692,7 +692,10 @@ func (q *Queries) DeleteWorkspaceRuntimesAndProjects(ctx context.Context, worksp
 }
 
 const deleteWorkspaceSquadsAndSkills = `-- name: DeleteWorkspaceSquadsAndSkills :exec
-WITH deleted_squads AS (
+WITH deleted_deterministic_tools AS (
+    DELETE FROM deterministic_tool WHERE deterministic_tool.workspace_id = $1
+),
+deleted_squads AS (
     DELETE FROM squad WHERE squad.workspace_id = $1
 ),
 deleted_skill_versions AS (

@@ -8,6 +8,9 @@ vi.hoisted(() => {
   process.env.EXPO_PUBLIC_API_URL = "https://api.example.test";
 });
 
+// api.ts reads Platform.OS; react-native's Flow entrypoint does not load in Node.
+vi.mock("react-native", () => ({ Platform: { OS: "ios" } }));
+
 // The real store pulls in expo-secure-store; the client only needs the slug.
 vi.mock("@/data/workspace-store", () => ({ getCurrentSlug: () => null }));
 
