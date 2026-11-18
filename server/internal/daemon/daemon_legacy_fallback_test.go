@@ -42,7 +42,7 @@ func TestClaimTasksWSFirst_LegacyFallbackWhenBatchRouteMissing(t *testing.T) {
 
 	d := New(Config{ServerBaseURL: srv.URL, MaxConcurrentTasks: 4}, slog.New(slog.NewTextHandler(noopWriter{}, nil)))
 
-	tasks, err := d.ClaimTasksWSFirst(context.Background(), "daemon-x", []string{"rt1", "rt2"}, 5)
+	tasks, _, err := d.ClaimTasksWSFirst(context.Background(), "daemon-x", []string{"rt1", "rt2"}, 5)
 	if err != nil {
 		t.Fatalf("ClaimTasksWSFirst: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestClaimTasksWSFirst_LegacyFallbackWhenBatchRouteMissing(t *testing.T) {
 	}
 
 	// Second poll must skip the batch route entirely and go straight to legacy.
-	if _, err := d.ClaimTasksWSFirst(context.Background(), "daemon-x", []string{"rt1", "rt2"}, 5); err != nil {
+	if _, _, err := d.ClaimTasksWSFirst(context.Background(), "daemon-x", []string{"rt1", "rt2"}, 5); err != nil {
 		t.Fatalf("second ClaimTasksWSFirst: %v", err)
 	}
 	if batchCalls.Load() != 1 {
@@ -78,6 +78,8 @@ func TestClaimTasksWSFirst_LegacyFallbackWhenBatchRouteMissing(t *testing.T) {
 // same call — the WS claim may have committed server-side, and an immediate
 // second HTTP claim would double-claim.
 func TestClaimTasksWSFirst_NoDoubleClaimOnDetach(t *testing.T) {
+	t.Parallel()
+
 	var httpClaims atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/claim") {
@@ -94,10 +96,12 @@ func TestClaimTasksWSFirst_NoDoubleClaimOnDetach(t *testing.T) {
 	// disconnect leaves a genuinely uncertain outcome (the server may commit).
 	var mu sync.Mutex
 	var item *wsOutbound
+	frameQueued := make(chan struct{})
 	generation := d.wsRPC.attach(func(frame []byte) (*wsOutbound, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		item = &wsOutbound{data: frame}
+		close(frameQueued)
 		return item, nil
 	})
 	d.wsRPC.markRPCV1Supported(generation)
@@ -106,11 +110,15 @@ func TestClaimTasksWSFirst_NoDoubleClaimOnDetach(t *testing.T) {
 	var tasks []*Task
 	var err error
 	go func() {
-		tasks, err = d.ClaimTasksWSFirst(context.Background(), "daemon-x", []string{"rt1"}, 2)
+		tasks, _, err = d.ClaimTasksWSFirst(context.Background(), "daemon-x", []string{"rt1"}, 2)
 		close(done)
 	}()
 
-	time.Sleep(50 * time.Millisecond) // let Call send the frame and block on the response
+	select {
+	case <-frameQueued:
+	case <-time.After(time.Second):
+		t.Fatal("WS claim frame was not queued")
+	}
 	mu.Lock()
 	item.beginWrite() // frame is now on the wire — cannot be un-sent
 	mu.Unlock()
@@ -170,7 +178,7 @@ func TestClaimTasksWSFirst_HTTPFallbackAfterUncertainCooldown(t *testing.T) {
 	var tasks []*Task
 	var err error
 	go func() {
-		tasks, err = d.ClaimTasksWSFirst(context.Background(), "daemon-x", []string{"rt1"}, 2)
+		tasks, _, err = d.ClaimTasksWSFirst(context.Background(), "daemon-x", []string{"rt1"}, 2)
 		close(done)
 	}()
 
@@ -205,7 +213,7 @@ func TestClaimTasksWSFirst_HTTPFallbackAfterUncertainCooldown(t *testing.T) {
 	})
 	d.wsRPC.markRPCV1Supported(reconnectGeneration)
 
-	tasks, err = d.ClaimTasksWSFirst(context.Background(), "daemon-x", []string{"rt1"}, 2)
+	tasks, _, err = d.ClaimTasksWSFirst(context.Background(), "daemon-x", []string{"rt1"}, 2)
 	if err != nil {
 		t.Fatalf("cooldown ClaimTasksWSFirst: %v", err)
 	}
@@ -217,7 +225,7 @@ func TestClaimTasksWSFirst_HTTPFallbackAfterUncertainCooldown(t *testing.T) {
 	}
 
 	time.Sleep(2 * wsClaimUncertainFallbackDelay)
-	tasks, err = d.ClaimTasksWSFirst(context.Background(), "daemon-x", []string{"rt1"}, 2)
+	tasks, _, err = d.ClaimTasksWSFirst(context.Background(), "daemon-x", []string{"rt1"}, 2)
 	if err != nil {
 		t.Fatalf("post-cooldown ClaimTasksWSFirst: %v", err)
 	}
@@ -258,7 +266,7 @@ func TestClaimTasksWSFirst_ReconnectToOldServerSkipsWSRPC(t *testing.T) {
 		return &wsOutbound{data: frame}, nil
 	})
 
-	tasks, err := d.ClaimTasksWSFirst(context.Background(), "daemon-x", []string{"rt1"}, 1)
+	tasks, _, err := d.ClaimTasksWSFirst(context.Background(), "daemon-x", []string{"rt1"}, 1)
 	if err != nil {
 		t.Fatalf("ClaimTasksWSFirst: %v", err)
 	}

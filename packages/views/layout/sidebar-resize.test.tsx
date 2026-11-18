@@ -9,6 +9,9 @@ import {
 } from "@multica/ui/components/ui/sidebar";
 import { renderWithI18n } from "../test/i18n";
 
+/** No stored width: the theme's, or 280px when it sets none. */
+const UNSTORED_SIDEBAR_WIDTH = "clamp(200px, var(--sidebar-panel-width, 280px), 320px)";
+
 describe("left sidebar resizing", () => {
   beforeEach(() => {
     localStorage.clear();
@@ -35,6 +38,7 @@ describe("left sidebar resizing", () => {
           <StableSidebarConsumer />
           <SidebarRail />
         </Sidebar>
+        <div data-sidebar-resize-consumer />
       </SidebarProvider>,
     );
 
@@ -42,6 +46,9 @@ describe("left sidebar resizing", () => {
     const sidebarContainer = container.querySelector<HTMLElement>("[data-slot='sidebar-container']")!;
     const sidebarGap = container.querySelector<HTMLElement>("[data-slot='sidebar-gap']")!;
     const sidebar = container.querySelector<HTMLElement>("[data-slot='sidebar']")!;
+    const liveWidthConsumer = container.querySelector<HTMLElement>(
+      "[data-sidebar-resize-consumer]",
+    )!;
     const rail = container.querySelector<HTMLButtonElement>("[data-slot='sidebar-rail']")!;
     const setPointerCapture = vi.fn();
     const releasePointerCapture = vi.fn();
@@ -78,7 +85,10 @@ describe("left sidebar resizing", () => {
 
     expect(sidebarGap.style.width).toBe("300px");
     expect(sidebarContainer.style.width).toBe("300px");
-    expect(wrapper.style.getPropertyValue("--sidebar-width")).toBe("256px");
+    expect(
+      liveWidthConsumer.style.getPropertyValue("--sidebar-live-width"),
+    ).toBe("300px");
+    expect(wrapper.style.getPropertyValue("--sidebar-width")).toBe(UNSTORED_SIDEBAR_WIDTH);
     expect(localStorage.getItem("sidebar_width")).toBeNull();
     expect(stableConsumerRender).toHaveBeenCalledTimes(1);
 
@@ -86,6 +96,9 @@ describe("left sidebar resizing", () => {
 
     expect(sidebarGap.style.width).toBe("");
     expect(sidebarContainer.style.width).toBe("");
+    expect(
+      liveWidthConsumer.style.getPropertyValue("--sidebar-live-width"),
+    ).toBe("");
     expect(wrapper.style.getPropertyValue("--sidebar-width")).toBe("300px");
     expect(localStorage.getItem("sidebar_width")).toBe("300");
     expect(releasePointerCapture).toHaveBeenCalledWith(7);
@@ -103,12 +116,16 @@ describe("left sidebar resizing", () => {
         <Sidebar>
           <SidebarRail />
         </Sidebar>
+        <div data-sidebar-resize-consumer />
       </SidebarProvider>,
     );
 
     const wrapper = container.querySelector<HTMLElement>("[data-slot='sidebar-wrapper']")!;
     const sidebarContainer = container.querySelector<HTMLElement>("[data-slot='sidebar-container']")!;
     const sidebarGap = container.querySelector<HTMLElement>("[data-slot='sidebar-gap']")!;
+    const liveWidthConsumer = container.querySelector<HTMLElement>(
+      "[data-sidebar-resize-consumer]",
+    )!;
     const rail = container.querySelector<HTMLButtonElement>("[data-slot='sidebar-rail']")!;
     rail.setPointerCapture = vi.fn();
     rail.hasPointerCapture = vi.fn(() => true);
@@ -133,11 +150,17 @@ describe("left sidebar resizing", () => {
       pointerId: 8,
     });
     fireEvent.pointerMove(document, { buttons: 1, clientX: 320, pointerId: 8 });
+    expect(
+      liveWidthConsumer.style.getPropertyValue("--sidebar-live-width"),
+    ).toBe("320px");
     fireEvent.pointerCancel(document, { pointerId: 8 });
 
     expect(sidebarGap.style.width).toBe("");
     expect(sidebarContainer.style.width).toBe("");
-    expect(wrapper.style.getPropertyValue("--sidebar-width")).toBe("256px");
+    expect(
+      liveWidthConsumer.style.getPropertyValue("--sidebar-live-width"),
+    ).toBe("");
+    expect(wrapper.style.getPropertyValue("--sidebar-width")).toBe(UNSTORED_SIDEBAR_WIDTH);
     expect(localStorage.getItem("sidebar_width")).toBeNull();
     expect(wrapper).not.toHaveAttribute("data-sidebar-resizing");
     expect(document.documentElement).not.toHaveAttribute("data-sidebar-resizing");

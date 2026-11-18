@@ -57,7 +57,7 @@ describe("PlatformSymbol", () => {
     expect(mocks.imageProps).toHaveLength(1);
     expect(mocks.imageProps[0]).toMatchObject({
       source: "sf:tray.fill",
-      tintColor: "#123456",
+      style: { color: "#123456" },
     });
     expect(mocks.iconProps).toHaveLength(0);
   });

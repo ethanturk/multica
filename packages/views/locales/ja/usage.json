@@ -76,7 +76,7 @@
     "header_rate": "失敗率",
     "other_agents": "その他のエージェント",
     "low_sample": "この期間の実行が {{count}} 回未満のため、この失敗率は参考になりません。",
-    "no_data": "この期間に失敗した実行はありません。",
+    "no_data": "この期間に失敗した実行はありません",
     "show_reasons": "エラーコードを表示",
     "hide_reasons": "エラーコードを隠す",
     "show_all": "全 {{count}} 件を表示",
@@ -94,13 +94,16 @@
     "header_cost": "コスト",
     "header_time": "時間",
     "header_tasks": "実行",
+    "usage_unreported_other": "{{count}} 件の実行で使用量が報告されていません",
+    "usage_unreported_pending_other": "{{count}} 件の実行で使用量が報告されていません · 使用量を集計しています",
+    "usage_totals_pending": "使用量を集計しています",
     "show_all": "すべて表示",
     "show_less": "上位 {{count}} 件のみ",
     "no_data": "この期間にエージェントの活動はありません。"
   },
   "empty": {
     "title": "まだ使用量はありません",
-    "body": "ここでエージェントが実行を開始すると、トークンの消費と実行時間がこの画面に表示されます。"
+    "body": "エージェントが動き始めると、トークン使用量、コスト、失敗率がここに表示されます。"
   },
   "duration": {
     "less_than_minute": "1分未満"

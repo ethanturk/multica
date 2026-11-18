@@ -186,6 +186,16 @@ describe("ContentEditor", () => {
     expect(mockFocus).toHaveBeenCalledWith("end");
   });
 
+  it("lets the editor shell shrink below its content's min-content width", () => {
+    // The shell is a flex item; without min-w-0 its automatic minimum width is
+    // the longest unbreakable token (a long URL), so a bare link widens the
+    // create-issue description pane past the dialog and images stretch with it.
+    render(<ContentEditor placeholder="Add description..." />);
+
+    const shell = screen.getByTestId("editor-content").parentElement;
+    expect(shell).toHaveClass("min-w-0");
+  });
+
   it("does not hijack clicks that land inside the ProseMirror node", () => {
     render(<ContentEditor placeholder="Add description..." />);
 
@@ -392,6 +402,24 @@ describe("ContentEditor", () => {
   // sessions). Without it the armed debounce fires after the switch and, since
   // onUpdate always resolves to the latest render's closure, files the old
   // document under the new destination (MUL-4864).
+  describe("clearContent", () => {
+    it("parks the caret at the start so a select-all send cannot leave a highlight", () => {
+      const ref = createRef<ContentEditorRef>();
+      render(<ContentEditor ref={ref} defaultValue="sent text" />);
+      const { clearContent } = (
+        editorRef.current as { commands: { clearContent: ReturnType<typeof vi.fn> } }
+      ).commands;
+
+      ref.current?.clearContent();
+
+      expect(clearContent).toHaveBeenCalledTimes(1);
+      expect(mockSetTextSelection).toHaveBeenCalledWith(0);
+      expect(clearContent.mock.invocationCallOrder[0]).toBeLessThan(
+        mockSetTextSelection.mock.invocationCallOrder[0]!,
+      );
+    });
+  });
+
   describe("flushPendingUpdate", () => {
     it("hands back the pending markdown and cancels the debounce so it cannot fire later", () => {
       vi.useFakeTimers();

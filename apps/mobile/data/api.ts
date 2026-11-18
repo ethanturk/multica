@@ -27,6 +27,7 @@ import type {
   CreateProjectRequest,
   CreateProjectResourceRequest,
   InboxItem,
+  InboxWorkspaceUnread,
   Issue,
   IssueLabelsResponse,
   Label,
@@ -63,6 +64,8 @@ import type {
 import {
   AppConfigSchema,
   EMPTY_APP_CONFIG,
+  EMPTY_REFRESH_SESSION_RESPONSE,
+  RefreshSessionResponseSchema,
   EMPTY_LIST_ISSUE_STATUSES_RESPONSE,
   EMPTY_LIST_ISSUES_RESPONSE,
   EMPTY_TIMELINE_ENTRIES,
@@ -72,7 +75,10 @@ import {
   TimelineEntriesSchema,
   WorkspaceSubscriptionSummarySchema,
 } from "@multica/core/api/schemas";
-import type { AppConfigResponse } from "@multica/core/api/schemas";
+import type {
+  AppConfigResponse,
+  RefreshSessionResponse,
+} from "@multica/core/api/schemas";
 import {
   ActiveTasksResponseSchema,
   AgentListSchema,
@@ -93,6 +99,7 @@ import {
   EMPTY_CHAT_SESSION_LIST,
   EMPTY_COMMENT,
   EMPTY_INBOX_LIST,
+  EMPTY_INBOX_UNREAD_SUMMARY,
   EMPTY_ISSUE_FALLBACK,
   EMPTY_LIST_LABELS_RESPONSE,
   EMPTY_LIST_PROJECT_RESOURCES_RESPONSE,
@@ -108,6 +115,7 @@ import {
   EMPTY_USER,
   EMPTY_WORKSPACE_LIST,
   InboxListSchema,
+  InboxUnreadSummarySchema,
   NotificationPreferenceResponseSchema,
   ListLabelsResponseSchema,
   ListProjectResourcesResponseSchema,
@@ -189,6 +197,13 @@ class ApiClient {
 
   setToken(token: string | null) {
     this.token = token;
+  }
+
+  /** The bearer token in use, or null when signed out. Session renewal reads
+   *  it to confirm the session it started from is still the live one, and the
+   *  WS client reads it so a reconnect uses the current credential. */
+  getToken(): string | null {
+    return this.token;
   }
 
   setOptions(options: ApiClientOptions) {
@@ -382,6 +397,21 @@ class ApiClient {
     });
   }
 
+  /**
+   * Ask the server to extend this session if it has entered its renewal
+   * window (MUL-7436). The server owns that decision — the app never reads
+   * `exp`, so a device with a skewed clock behaves exactly like one without.
+   */
+  async refreshSession(): Promise<RefreshSessionResponse> {
+    return this.fetchValidatedWith(
+      "/api/auth/refresh",
+      RefreshSessionResponseSchema,
+      EMPTY_REFRESH_SESSION_RESPONSE,
+      { method: "POST" },
+      { endpoint: "refreshSession" },
+    );
+  }
+
   async getMe(opts?: { signal?: AbortSignal }): Promise<User> {
     return this.fetchValidated(
       "/api/me",
@@ -476,6 +506,25 @@ class ApiClient {
     });
   }
 
+  /**
+   * Cross-workspace unread inbox counts, one entry per workspace with unread
+   * items. Backs the inbox tab badge — see lib/unread-counts.ts for why the
+   * badge reads this instead of counting `listInbox()` locally.
+   */
+  async getInboxUnreadSummary(opts?: {
+    signal?: AbortSignal;
+  }): Promise<InboxWorkspaceUnread[]> {
+    const raw = await this.fetch<unknown>("/api/inbox/unread-summary", {
+      signal: opts?.signal,
+    });
+    return parseWithFallback(
+      raw,
+      InboxUnreadSummarySchema,
+      EMPTY_INBOX_UNREAD_SUMMARY,
+      { endpoint: "getInboxUnreadSummary" },
+    );
+  }
+
   async markInboxRead(id: string): Promise<InboxItem> {
     return this.fetch<InboxItem>(`/api/inbox/${id}/read`, { method: "POST" });
   }
@@ -527,8 +576,9 @@ class ApiClient {
     });
   }
 
-  async listAgents(opts?: { signal?: AbortSignal }): Promise<Agent[]> {
-    const raw = await this.fetch<unknown>("/api/agents", {
+  async listAgents(opts?: { signal?: AbortSignal; includeArchived?: boolean }): Promise<Agent[]> {
+    const path = opts?.includeArchived ? "/api/agents?include_archived=true" : "/api/agents";
+    const raw = await this.fetch<unknown>(path, {
       signal: opts?.signal,
     });
     return parseWithFallback(raw, AgentListSchema, EMPTY_AGENT_LIST, {
@@ -596,6 +646,9 @@ class ApiClient {
       `/api/issues${qs ? `?${qs}` : ""}`,
       { signal: opts?.signal },
     );
+    if (params?.created_by_user_id && (!raw || typeof raw !== "object" || !("created_by_user_id" in raw) || raw.created_by_user_id !== params.created_by_user_id)) {
+      return this.listIssues({ ...params, created_by_user_id: undefined, creator_id: params.creator_id ?? params.created_by_user_id }, opts);
+    }
     return parseWithFallback(raw, ListIssuesResponseSchema, EMPTY_LIST_ISSUES_RESPONSE, {
       endpoint: "GET /api/issues",
     });
@@ -761,9 +814,19 @@ class ApiClient {
   }
 
   // DELETE /api/comments/:id — 204 No Content on success; this.fetch
-  // already short-circuits 204 → undefined.
-  async deleteComment(commentId: string): Promise<void> {
-    await this.fetch<void>(`/api/comments/${commentId}`, { method: "DELETE" });
+  // already short-circuits 204 → undefined. `keepReplies` calls the route
+  // only servers that keep a deleted comment's replies expose (#8296): if the
+  // request reaches an older server it fails instead of deleting the replies
+  // too. Pass it only when the server declared
+  // `comment_delete_keep_replies_supported`. Mirrors packages/core/api/client.ts.
+  async deleteComment(
+    commentId: string,
+    opts: { keepReplies?: boolean } = {},
+  ): Promise<void> {
+    const path = opts.keepReplies === true
+      ? `/api/comments/${commentId}/keep-replies`
+      : `/api/comments/${commentId}`;
+    await this.fetch<void>(path, { method: "DELETE" });
   }
 
   // POST /api/comments/:id/resolve — marks the thread root resolved; only
@@ -921,8 +984,12 @@ class ApiClient {
   // --- Projects ---
   async listProjects(opts?: {
     signal?: AbortSignal;
+    includeArchived?: boolean;
   }): Promise<ListProjectsResponse> {
-    const raw = await this.fetch<unknown>("/api/projects", {
+    const path = opts?.includeArchived
+      ? "/api/projects?include_archived=true"
+      : "/api/projects";
+    const raw = await this.fetch<unknown>(path, {
       signal: opts?.signal,
     });
     return parseWithFallback(
@@ -1098,7 +1165,7 @@ class ApiClient {
   async sendChatMessage(
     sessionId: string,
     content: string,
-    opts?: { attachmentIds?: string[] },
+    opts?: { attachmentIds?: string[]; queue?: boolean },
   ): Promise<SendChatMessageResponse> {
     // Strict parse — we need task_id + created_at to anchor the optimistic
     // StatusPill. Fallback would silently break the elapsed-time timer.
@@ -1107,7 +1174,16 @@ class ApiClient {
     // server-side `chat.go` back-fills `chat_message_id` on the listed
     // attachments after the message row is inserted (see
     // server/internal/handler/chat.go:410-456).
-    const body: { content: string; attachment_ids?: string[] } = { content };
+    //
+    // `steer` asks the server to add this message to the running reply. The
+    // server decides eligibility (plain text, direct chat, a started reply on
+    // a capable daemon) and queues otherwise; older servers ignore the field
+    // and queue. `queue: true` is the explicit next-turn send. Same contract
+    // as web's `packages/core/api/client.ts`.
+    const body: { content: string; steer: boolean; attachment_ids?: string[] } = {
+      content,
+      steer: opts?.queue !== true,
+    };
     if (opts?.attachmentIds && opts.attachmentIds.length > 0) {
       body.attachment_ids = opts.attachmentIds;
     }

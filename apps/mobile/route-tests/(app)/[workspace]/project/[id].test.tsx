@@ -4,6 +4,11 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
 import ProjectDetail from "@/app/(app)/[workspace]/project/[id]";
 
+// Screens transitively load data/api.ts, which needs a base URL at import.
+vi.hoisted(() => {
+  process.env.EXPO_PUBLIC_API_URL ??= "https://api.example.test";
+});
+
 const mocks = vi.hoisted(() => ({
   alertMock: vi.fn(),
   openUrl: vi.fn(),
@@ -40,6 +45,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("react-native", () => ({
+  Platform: { OS: "ios", select: (spec: Record<string, unknown>) => spec.ios ?? spec.default },
   ActivityIndicator: (props: Record<string, any>) =>
     React.createElement("ActivityIndicator", props),
   Alert: { alert: mocks.alertMock },
@@ -69,7 +75,8 @@ vi.mock("expo-router", () => ({
   useLocalSearchParams: () => ({ id: "project-1" }),
 }));
 
-vi.mock("@tanstack/react-query", () => ({
+vi.mock("@tanstack/react-query", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tanstack/react-query")>()),
   useQuery: (arg: { kind: string }) =>
     arg.kind === "detail" ? mocks.queryState.detail : mocks.queryState.pins,
   useQueryClient: () => ({
@@ -118,6 +125,11 @@ vi.mock("@/components/project/project-resources-section", () => ({
     mocks.resourcesProps.push(props);
     return React.createElement("ProjectResourcesSection", props);
   },
+}));
+
+// Delete visibility is permission-gated; canDeleteProject has its own tests.
+vi.mock("@multica/core/projects/deletion-permissions", () => ({
+  canDeleteProject: () => true,
 }));
 
 vi.mock("@/data/queries/projects", () => ({
@@ -425,7 +437,7 @@ describe("ProjectDetail", () => {
           : [node.props.children],
       )
       .filter((value): value is string => typeof value === "string");
-    expect(textValues).toContain("not found");
+    expect(textValues).toContain("Failed to load project: not found");
     (menuRenderer as ReactTestRenderer | null)?.unmount();
   });
 });

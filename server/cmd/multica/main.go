@@ -10,6 +10,7 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/cli"
 	"github.com/multica-ai/multica/server/internal/daemon/execenv"
+	"github.com/multica-ai/multica/server/pkg/agent"
 	"github.com/multica-ai/multica/server/pkg/detsteps"
 )
 
@@ -17,6 +18,8 @@ var (
 	version = "dev"
 	commit  = "unknown"
 	date    = "unknown"
+	// Separate full revision metadata from the existing display commit.
+	buildCommit = "unknown"
 )
 
 // debugFlag is bound to the persistent --debug flag and, when set, makes
@@ -47,9 +50,13 @@ func init() {
 
 	// Core commands
 	issueCmd.GroupID = groupCore
+	inboxCmd.GroupID = groupCore
+	issueStatusCatalogCmd.GroupID = groupCore
 	projectCmd.GroupID = groupCore
+	workflowCmd.GroupID = groupCore
 	labelCmd.GroupID = groupCore
 	propertyCmd.GroupID = groupCore
+	viewCmd.GroupID = groupCore
 	agentCmd.GroupID = groupCore
 	autopilotCmd.GroupID = groupCore
 	workspaceCmd.GroupID = groupCore
@@ -75,13 +82,18 @@ func init() {
 	versionCmd.GroupID = groupAdditional
 
 	rootCmd.AddCommand(issueCmd)
+	rootCmd.AddCommand(inboxCmd)
+	rootCmd.AddCommand(issueStatusCatalogCmd)
 	rootCmd.AddCommand(projectCmd)
+	rootCmd.AddCommand(workflowCmd)
 	rootCmd.AddCommand(labelCmd)
 	rootCmd.AddCommand(propertyCmd)
+	rootCmd.AddCommand(viewCmd)
 	rootCmd.AddCommand(agentCmd)
 	rootCmd.AddCommand(autopilotCmd)
 	rootCmd.AddCommand(workspaceCmd)
 	rootCmd.AddCommand(repoCmd)
+	rootCmd.AddCommand(environmentCmd)
 	rootCmd.AddCommand(skillCmd)
 	rootCmd.AddCommand(squadCmd)
 	rootCmd.AddCommand(chatCmd)
@@ -112,6 +124,10 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == agent.CursorHookHelperArg {
+		agent.RunCursorHookRelay(os.Stdin, os.Stdout, os.Getenv)
 		return
 	}
 	cli.CleanupStaleUpdateArtifacts()

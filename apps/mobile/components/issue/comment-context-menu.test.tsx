@@ -4,6 +4,11 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
 import { useCommentLongPress } from "./comment-context-menu";
 
+// Screens transitively load data/api.ts, which needs a base URL at import.
+vi.hoisted(() => {
+  process.env.EXPO_PUBLIC_API_URL ??= "https://api.example.test";
+});
+
 const mocks = vi.hoisted(() => ({
   alertMock: vi.fn(),
   routerPush: vi.fn(),
@@ -21,6 +26,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("react-native", () => ({
+  Platform: { OS: "ios", select: (spec: Record<string, unknown>) => spec.ios ?? spec.default },
   Alert: { alert: mocks.alertMock },
 }));
 
@@ -72,7 +78,16 @@ vi.mock("@/data/use-actor-name", () => ({
   }),
 }));
 
+vi.mock("@tanstack/react-query", () => ({
+  useQuery: () => ({ data: false }),
+}));
+
+vi.mock("@/data/queries/billing", () => ({
+  appConfigOptions: () => ({ queryKey: ["app-config"] }),
+}));
+
 vi.mock("@/data/mutations/issues", () => ({
+  commentDeleteKeepsReplies: () => false,
   useDeleteComment: () => ({ mutate: mocks.deleteMutate }),
   useResolveComment: () => ({ mutate: mocks.resolveMutate }),
   useToggleCommentReaction: () => ({ mutate: mocks.toggleMutate }),
@@ -153,10 +168,10 @@ describe("useCommentLongPress", () => {
       outerConfig.options.map((option: { label: string }) => option.label),
     ).toEqual([
       "Reply",
-      "React…",
+      "React...",
       "Copy",
       "Select Text",
-      "Copy Link",
+      "Copy link",
       "Resolve Thread",
       "Delete",
       "Cancel",
@@ -228,7 +243,7 @@ describe("useCommentLongPress", () => {
     const outerConfig = mocks.showPlatformActionSheet.mock.calls[0]?.[0];
     expect(
       outerConfig.options.map((option: { label: string }) => option.label),
-    ).toEqual(["Reply", "React…", "Cancel"]);
+    ).toEqual(["Reply", "React...", "Cancel"]);
 
     act(() => {
       outerConfig.options[1].onPress();
@@ -237,7 +252,7 @@ describe("useCommentLongPress", () => {
     const reactionConfig = mocks.showPlatformActionSheet.mock.calls[1]?.[0];
     expect(
       reactionConfig.options.map((option: { label: string }) => option.label),
-    ).toEqual(["👍", "👌", "❤️", "✅", "🎉", "More reactions…", "Cancel"]);
+    ).toEqual(["👍", "👌", "❤️", "✅", "🎉", "More reactions...", "Cancel"]);
 
     act(() => {
       reactionConfig.options[0].onPress();

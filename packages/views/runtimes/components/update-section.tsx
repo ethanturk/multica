@@ -6,7 +6,7 @@ import {
   ArrowUpCircle,
   Check,
   Lock,
-} from "lucide-react";
+} from "@multica/ui/icons";
 import { Button } from "@multica/ui/components/ui/button";
 import { api } from "@multica/core/api";
 import { fetchLatestCliVersion } from "@multica/core/runtimes";

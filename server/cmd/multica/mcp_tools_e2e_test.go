@@ -128,6 +128,9 @@ func buildMulticaBinary(t *testing.T) string {
 		bin += ".exe"
 	}
 	build := exec.Command("go", "build", "-o", bin, "github.com/multica-ai/multica/server/cmd/multica")
+	// TestMain moves the process into a scratch home; build from the package
+	// directory so module resolution works.
+	build.Dir = testLaunchDir
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build multica binary: %v\n%s", err, out)
 	}

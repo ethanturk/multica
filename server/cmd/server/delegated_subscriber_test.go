@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/handler"
+	"github.com/multica-ai/multica/server/internal/issuestatus"
 	"github.com/multica-ai/multica/server/internal/testutil"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -448,52 +449,123 @@ func TestUnsubscribeIsDurableAgainstAutoRules(t *testing.T) {
 	}
 }
 
-// TestDeliverToSubscriber_DelegatedTier pins the noise contract. The tier drops
+// TestDeliverDelegated pins the noise contract. The tier drops
 // churn and nothing else: a child FINISHING is real signal, one per piece of work
 // a reviewer has to act on. An earlier cut suppressed those in favour of a
 // synthesized "whole batch finished" roll-up; that machinery is gone (see the
 // MUL-5483 thread), and the tree-level signal comes from the parent's own status
 // transition, which this same rule delivers.
-func TestDeliverToSubscriber_DelegatedTier(t *testing.T) {
+//
+// Which statuses ARE handoffs is issueStatusIsHandoff's job and is covered by
+// TestIssueStatusIsHandoff; this table covers the routing on top of that answer.
+func TestDeliverDelegated(t *testing.T) {
 	cases := []struct {
-		name        string
-		reason      string
-		notifType   string
-		issueStatus string
-		want        bool
+		name      string
+		notifType string
+		handoff   bool
+		want      bool
 	}{
-		{"direct subscriber keeps every event", "creator", "status_changed", "in_progress", true},
-		{"direct subscriber keeps comments", "assignee", "new_comment", "todo", true},
+		{"delegated skips routine progress", "status_changed", false, false},
+		{"delegated skips assignee churn", "assignee_changed", false, false},
+		{"delegated skips date churn", "due_date_changed", false, false},
+		{"delegated skips non-status events even on a handoff", "due_date_changed", true, false},
 
-		{"delegated skips routine progress", "delegated", "status_changed", "in_progress", false},
-		{"delegated skips backlog parking", "delegated", "status_changed", "backlog", false},
-		{"delegated skips todo", "delegated", "status_changed", "todo", false},
-		{"delegated skips comment churn", "delegated", "new_comment", "in_progress", false},
-		{"delegated skips assignee churn", "delegated", "assignee_changed", "in_progress", false},
-		{"delegated skips date churn", "delegated", "due_date_changed", "in_progress", false},
+		{"delegated gets the handoff", "status_changed", true, true},
 
-		{"delegated gets the review handoff", "delegated", "status_changed", "in_review", true},
-		{"delegated gets completion", "delegated", "status_changed", "done", true},
-		{"delegated gets cancellation", "delegated", "status_changed", "cancelled", true},
-		{"delegated gets blocked", "delegated", "status_changed", "blocked", true},
-
-		{"delegated always gets direct mentions", "delegated", "mentioned", "in_progress", true},
-		{"delegated always gets failures", "delegated", "task_failed", "in_progress", true},
-		{"delegated always gets agent_blocked", "delegated", "agent_blocked", "in_progress", true},
+		{"delegated always gets direct mentions", "mentioned", false, true},
+		{"delegated always gets comments", "new_comment", false, true},
+		{"delegated always gets failures", "task_failed", false, true},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := deliverToSubscriber(tc.reason, tc.notifType, tc.issueStatus); got != tc.want {
-				t.Fatalf("deliverToSubscriber(%q, %q, %q) = %v, want %v",
-					tc.reason, tc.notifType, tc.issueStatus, got, tc.want)
+			if got := deliverDelegated(tc.notifType, tc.handoff); got != tc.want {
+				t.Fatalf("deliverDelegated(%q, %v) = %v, want %v",
+					tc.notifType, tc.handoff, got, tc.want)
 			}
 		})
 	}
 }
 
+// TestIssueStatusIsHandoff pins the predicate behind BOTH the delegated tier and
+// the stale task_failed dismissal (MUL-7379).
+//
+// The built-in rows reproduce, exactly, the two hand-kept allowlists this
+// replaced. The custom rows are the regression: before MUL-7240 every custom
+// status projected onto a built-in key, so a custom review gate notified
+// because it "was" in_review; collapsing to four categories left those keys raw
+// and silently stopped them.
+func TestIssueStatusIsHandoff(t *testing.T) {
+	ctx := context.Background()
+	queries := db.New(testPool)
+	workspaceID := util.MustParseUUID(testWorkspaceID)
+
+	custom := func(key, category string) string {
+		t.Helper()
+		suffixed := fmt.Sprintf("%s_%d", key, time.Now().UnixNano()%1_000_000)
+		entry, err := queries.CreateIssueStatusEntry(ctx, db.CreateIssueStatusEntryParams{
+			WorkspaceID: workspaceID,
+			Key:         suffixed,
+			Name:        suffixed,
+			Description: "",
+			Category:    category,
+			Color:       "#123456",
+		})
+		if err != nil {
+			t.Fatalf("create custom status %q in %q: %v", suffixed, category, err)
+		}
+		t.Cleanup(func() {
+			testPool.Exec(context.Background(), `DELETE FROM issue_status WHERE id = $1`, entry.ID)
+		})
+		return entry.Key
+	}
+
+	cases := []struct {
+		name   string
+		status string
+		want   bool
+	}{
+		// The seven built-ins: identical to the pre-MUL-7379 allowlists.
+		{"backlog is parked, nobody waits", issuestatus.Backlog, false},
+		{"todo is queued, nobody waits", issuestatus.Todo, false},
+		{"in_progress is the platform's own 'working' key", issuestatus.InProgress, false},
+		{"in_review hands over", issuestatus.InReview, true},
+		{"blocked hands over", issuestatus.Blocked, true},
+		{"done is terminal", issuestatus.Done, true},
+		{"cancelled is terminal", issuestatus.Cancelled, true},
+
+		// One custom status per lifecycle category.
+		{"custom unstarted is queued work", custom("later", issuestatus.CategoryUnstarted), false},
+		{"custom started is a review gate", custom("awaiting_response", issuestatus.CategoryStarted), true},
+		{"custom done is terminal", custom("shipped", issuestatus.CategoryDone), true},
+		{"custom closed is terminal", custom("wont_do", issuestatus.CategoryClosed), true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := issueStatusIsHandoff(ctx, queries, workspaceID, tc.status)
+			if err != nil {
+				t.Fatalf("issueStatusIsHandoff(%q): unexpected error: %v", tc.status, err)
+			}
+			if got != tc.want {
+				t.Fatalf("issueStatusIsHandoff(%q) = %v, want %v", tc.status, got, tc.want)
+			}
+		})
+	}
+
+	t.Run("a catalog miss is reported, never guessed", func(t *testing.T) {
+		got, err := issueStatusIsHandoff(ctx, queries, workspaceID, "status_that_was_never_created")
+		if err == nil {
+			t.Fatal("an unresolvable custom key must return an error so each caller picks its own failure direction")
+		}
+		if got {
+			t.Fatal("the error return must not also claim a handoff")
+		}
+	})
+}
+
 // TestDelegatedTier_ChildCompletionDeliversExactlyOnce is the case a unit test of
-// deliverToSubscriber alone cannot catch. status_changed bubbles from a child to
+// deliverDelegated alone cannot catch. status_changed bubbles from a child to
 // the parent's subscribers, and the common shape is a human who is BOTH a direct
 // subscriber of the parent and a delegate on the child. They must be told the
 // child finished, and told once — not twice via the bubble, and not zero times.
@@ -503,6 +575,7 @@ func TestDelegatedTier_ChildCompletionDeliversExactlyOnce(t *testing.T) {
 	bus := events.New()
 
 	agentID, runtimeID := firstFixtureAgent(t)
+	enableStatusChanges(t, testUserID)
 	parentID := createTestIssue(t, testWorkspaceID, testUserID)
 	t.Cleanup(func() { cleanupTestIssue(t, parentID) })
 
@@ -566,12 +639,130 @@ func TestDelegatedTier_ChildCompletionDeliversExactlyOnce(t *testing.T) {
 	}
 }
 
-// TestDeliverToSubscriber_UnknownReasonIsDirect: 'reason' is an open vocabulary
-// (a new rule can add one without a migration touching this file). An
-// unrecognized reason must fall back to FULL delivery — silently dropping a
-// user's notifications is the worse failure.
-func TestDeliverToSubscriber_UnknownReasonIsDirect(t *testing.T) {
-	if !deliverToSubscriber("some_future_reason", "new_comment", "in_progress") {
-		t.Fatal("an unrecognized subscription reason must default to full delivery")
+// TestDelegatedIssueCreated_NotifiesTheHumanOwner: an issue an agent files on a
+// human's behalf reaches that human's inbox when it is created, unless a parent
+// they already watch leads there (MUL-9314).
+func TestDelegatedIssueCreated_NotifiesTheHumanOwner(t *testing.T) {
+	ctx := context.Background()
+	queries := db.New(testPool)
+	agentID, runtimeID := firstFixtureAgent(t)
+
+	issueCreatedRows := func(issueID string) int {
+		t.Helper()
+		var n int
+		if err := testPool.QueryRow(ctx,
+			`SELECT COUNT(*) FROM inbox_item
+			 WHERE recipient_type = 'member' AND recipient_id = $1 AND issue_id = $2 AND type = 'issue_created'`,
+			testUserID, issueID,
+		).Scan(&n); err != nil {
+			t.Fatalf("count inbox: %v", err)
+		}
+		return n
 	}
+	// fileIn runs the agent create through both listener sets in main.go's
+	// order and returns the issue with the inbox:new events it published for
+	// the human.
+	fileIn := func(t *testing.T, originType string, parent pgtype.UUID, projectID string) (string, int) {
+		t.Helper()
+		bus := events.New()
+		registerSubscriberListeners(bus, testPool)
+		registerNotificationListeners(bus, queries)
+		inboxNew := 0
+		bus.Subscribe(protocol.EventInboxNew, func(e events.Event) {
+			item, _ := e.Payload.(map[string]any)["item"].(map[string]any)
+			if item["recipient_id"] == testUserID {
+				inboxNew++
+			}
+		})
+
+		task := createAgentTaskWithOriginator(t, agentID, runtimeID, util.MustParseUUID(testUserID))
+		issueID := createAgentOriginIssue(t, agentID, originType, task, parent)
+		t.Cleanup(func() {
+			testPool.Exec(context.Background(), `DELETE FROM inbox_item WHERE issue_id = $1`, issueID)
+		})
+		resp := handler.IssueResponse{
+			ID:          issueID,
+			WorkspaceID: testWorkspaceID,
+			Title:       "delegated subscriber test issue",
+			Status:      "todo",
+			Priority:    "medium",
+			CreatorType: "agent",
+			CreatorID:   agentID,
+		}
+		if parent.Valid {
+			parentID := util.UUIDToString(parent)
+			resp.ParentIssueID = &parentID
+		}
+		if projectID != "" {
+			if _, err := testPool.Exec(ctx, `UPDATE issue SET project_id = $1 WHERE id = $2`, projectID, issueID); err != nil {
+				t.Fatalf("set project: %v", err)
+			}
+			resp.ProjectID = &projectID
+		}
+		bus.Publish(events.Event{
+			Type:        protocol.EventIssueCreated,
+			WorkspaceID: testWorkspaceID,
+			ActorType:   "agent",
+			ActorID:     agentID,
+			Payload:     map[string]any{"issue": resp},
+		})
+		return issueID, inboxNew
+	}
+	file := func(t *testing.T, originType string, parent pgtype.UUID) string {
+		t.Helper()
+		issueID, _ := fileIn(t, originType, parent, "")
+		return issueID
+	}
+
+	t.Run("also watching the project notifies once", func(t *testing.T) {
+		projectID := createTestProject(t)
+		addProjectSubscribers(t, projectID, testUserID)
+		issueID, inboxNew := fileIn(t, "agent_create", pgtype.UUID{}, projectID)
+		if n := issueCreatedRows(issueID); n != 1 {
+			t.Fatalf("issue_created rows = %d, want 1", n)
+		}
+		if inboxNew != 1 {
+			t.Fatalf("inbox:new events = %d, want 1", inboxNew)
+		}
+	})
+
+	t.Run("top-level issue", func(t *testing.T) {
+		issueID := file(t, "agent_create", pgtype.UUID{})
+		if n := issueCreatedRows(issueID); n != 1 {
+			t.Fatalf("issue_created rows = %d, want 1", n)
+		}
+	})
+
+	t.Run("sub-issue under a parent the human does not watch", func(t *testing.T) {
+		parentID := createTestIssue(t, testWorkspaceID, testUserID)
+		t.Cleanup(func() { cleanupTestIssue(t, parentID) })
+		issueID := file(t, "agent_create", util.MustParseUUID(parentID))
+		if n := issueCreatedRows(issueID); n != 1 {
+			t.Fatalf("issue_created rows = %d, want 1", n)
+		}
+	})
+
+	t.Run("sub-issue under a watched parent stays quiet", func(t *testing.T) {
+		parentID := createTestIssue(t, testWorkspaceID, testUserID)
+		t.Cleanup(func() { cleanupTestIssue(t, parentID) })
+		if _, err := queries.AddIssueSubscriber(ctx, db.AddIssueSubscriberParams{
+			IssueID:  util.MustParseUUID(parentID),
+			UserType: "member",
+			UserID:   util.MustParseUUID(testUserID),
+			Reason:   "creator",
+		}); err != nil {
+			t.Fatalf("subscribe parent: %v", err)
+		}
+		issueID := file(t, "agent_create", util.MustParseUUID(parentID))
+		if n := issueCreatedRows(issueID); n != 0 {
+			t.Fatalf("issue_created rows = %d, want 0", n)
+		}
+	})
+
+	t.Run("quick create is not a delegated notification", func(t *testing.T) {
+		issueID := file(t, "quick_create", pgtype.UUID{})
+		if n := issueCreatedRows(issueID); n != 0 {
+			t.Fatalf("issue_created rows = %d, want 0", n)
+		}
+	})
 }

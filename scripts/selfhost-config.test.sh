@@ -59,6 +59,13 @@ require_config "$config" 'MULTICA_APP_URL: http://localhost:3100'
 require_config "$config" 'SMTP_FROM_EMAIL: multica@example.com'
 require_config "$config" 'MULTICA_DATABASE_STARTUP_TIMEOUT: 3m'
 require_config "$config" 'MULTICA_DATABASE_CONNECT_TIMEOUT: 5s'
+require_config "$config" 'MAINTENANCE_PORT: ""'
+maintenance_config="$(MAINTENANCE_PORT=6061 docker compose --env-file "$tmp_env" -f docker-compose.selfhost.yml config)"
+require_config "$maintenance_config" 'MAINTENANCE_PORT: "6061"'
+if grep -Eq '(published|target):.*6061' <<<"$maintenance_config"; then
+  echo "Maintenance loopback port must not be published"
+  exit 1
+fi
 require_config "$config" 'DATABASE_REPLICA_URL: postgres://reader:secret@replica.example.com:5432/multica?sslmode=require'
 require_config "$config" 'DATABASE_REPLICA_MAX_CONNS: "12"'
 require_config "$config" 'DATABASE_REPLICA_MIN_CONNS: "1"'
@@ -80,6 +87,32 @@ while IFS= read -r llm_var; do
     exit 1
   fi
 done < <(grep -oE '^MULTICA_LLM_[A-Z_]+' .env.example)
+
+# The same drift for integration encryption keys, keyed on the server rather
+# than on .env.example: each secretbox.LoadKey() gates an integration that
+# stays silently disabled when its key never reaches the container. Telegram's
+# key was once missing from both files, so a check that trusted the
+# documentation alone would not have caught it.
+secret_keys="$(
+  grep -rhoE --include='*.go' --exclude='*_test.go' 'secretbox\.LoadKey\("[A-Z0-9_]+"\)' server |
+    sed -E 's/.*"([A-Z0-9_]+)".*/\1/' | sort -u
+)" || true
+if [ -z "$secret_keys" ]; then
+  echo "Found no secretbox.LoadKey(\"...\") calls under server/; this check no longer"
+  echo "sees the integration keys and needs updating."
+  exit 1
+fi
+while IFS= read -r secret_key; do
+  if ! grep -Eq "^[[:space:]]+${secret_key}: \\\$\{${secret_key}:-" docker-compose.selfhost.yml; then
+    echo "$secret_key is loaded by the server but not mapped into the backend service"
+    echo "in docker-compose.selfhost.yml, so self-hosted deployments cannot enable it."
+    exit 1
+  fi
+  if ! grep -Eq "^${secret_key}=" .env.example; then
+    echo "$secret_key is loaded by the server but missing from .env.example."
+    exit 1
+  fi
+done <<<"$secret_keys"
 
 for script in scripts/dev.sh scripts/check.sh; do
   if ! grep -Fq '. scripts/local-env.sh' "$script"; then
@@ -227,6 +260,7 @@ process.stdin.on("end", () => {
   for (const service of ["backend", "frontend"]) {
     console.log(service + "=" + config.services[service].ports[0].published);
   }
+  console.log("postgres_password=" + config.services.postgres.environment.POSTGRES_PASSWORD);
 });
 ' >>"$STUB_PUBLISHED_RECORD"
   ;;
@@ -524,5 +558,54 @@ for shadowed_alias in BACKEND_PORT API_PORT SERVER_PORT; do
     "${shadowed_alias}=9600" '' >/dev/null
   require_consistent "env-file ${shadowed_alias} over the same shell variable" 9700
 done
+
+# ---------------------------------------------------------------------------
+# First run without an env file (regression for #10522)
+#
+# The recipe writes .env, including a random POSTGRES_PASSWORD, and then starts
+# Compose. Compose must receive that generated password. A database initialised
+# with any other value stops authenticating the backend the next time the
+# containers are recreated from the env file. run_recipe always seeds .env, so
+# this path needs its own driver.
+# ---------------------------------------------------------------------------
+
+# Args: <target> [worktree]. With `worktree`, a .env.worktree is present, the
+# way a contributor checkout looks after `make worktree-env`. The recipe still
+# writes .env and Compose still reads .env, so its password must win there too.
+run_first_recipe() {
+  local target=$1 layout=${2:-}
+
+  rm -f "$recipe_dir/.env" "$recipe_dir/.env.worktree"
+  if [ "$layout" = "worktree" ]; then
+    printf 'POSTGRES_PASSWORD=worktree-password\n' >"$recipe_dir/.env.worktree"
+  fi
+  : >"$record"
+  : >"$curl_log"
+
+  (
+    cd "$recipe_dir" || exit 1
+    env PATH="$stub_dir:$PATH" \
+      REAL_DOCKER="$real_docker" \
+      STUB_PUBLISHED_RECORD="$record" \
+      STUB_CURL_LOG="$curl_log" \
+      make "$target"
+  )
+}
+
+for first_run_target in selfhost selfhost-build; do
+  for first_run_layout in "" worktree; do
+    run_first_recipe "$first_run_target" "$first_run_layout" >/dev/null
+    generated_password="$(sed -n 's/^POSTGRES_PASSWORD=//p' "$recipe_dir/.env")"
+    received_password="$(grep '^postgres_password=' "$record" | tail -n 1 | cut -d= -f2- || true)"
+
+    if [ -z "$generated_password" ] || [ "$received_password" != "$generated_password" ]; then
+      echo "[$first_run_target first run${first_run_layout:+ with .env.$first_run_layout}] Compose did not receive the POSTGRES_PASSWORD written to .env"
+      echo "  written to .env: ${generated_password:-<none>}"
+      echo "  received by Compose: ${received_password:-<none>}"
+      exit 1
+    fi
+  done
+done
+rm -f "$recipe_dir/.env.worktree"
 
 echo "self-host env derivation ok"

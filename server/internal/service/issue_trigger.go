@@ -32,8 +32,9 @@ const (
 // see it. A nil func is treated as allow-all.
 //
 // IsSelfLoop reports whether promoting this issue out of backlog would be the
-// calling agent re-triggering its own running task. Only the status source
-// consults it. A nil func means "not a self-loop".
+// calling agent re-triggering its own running task for the target agent
+// (the assignee or squad leader). Only the status source consults it, after
+// resolving that target. A nil func means "not a self-loop".
 //
 // SuppressActiveSelfAssignment reports whether a direct agent assignment is a
 // trusted agent claiming ownership for itself while the target (issue, agent)
@@ -42,7 +43,7 @@ const (
 // target remain runnable. A nil func means "do not suppress".
 type IssueTriggerProbe struct {
 	CanAccessAgent               func(agent db.Agent) bool
-	IsSelfLoop                   func() bool
+	IsSelfLoop                   func(targetAgentID pgtype.UUID) bool
 	SuppressActiveSelfAssignment func(agentID pgtype.UUID) bool
 }
 
@@ -55,16 +56,22 @@ type IssueTriggerInput struct {
 	IsCreate        bool
 	AssigneeChanged bool
 	StatusChanged   bool
+	// EnteredHandoffStep marks a write that moved the issue into a project
+	// workflow column with a handler (MUL-7420). The step is new work even
+	// when its handler is the agent whose run made the move, so the
+	// self-assignment suppression does not apply.
+	EnteredHandoffStep bool
 }
 
 // IssueRunTrigger is the resolved decision shared by preview and the write
 // paths. AgentID is the agent that will actually run — the assignee for an
 // agent issue, the squad leader for a squad issue.
 type IssueRunTrigger struct {
-	IssueID      pgtype.UUID
-	AgentID      pgtype.UUID
-	AssigneeType string
-	Source       RunEnqueueSource
+	IssueID         pgtype.UUID
+	AgentID         pgtype.UUID
+	AssigneeType    string
+	Source          RunEnqueueSource
+	WorkflowHandoff bool
 }
 
 func allowAllAgents(db.Agent) bool { return true }
@@ -104,21 +111,24 @@ func (s *IssueService) WillEnqueueRun(ctx context.Context, in IssueTriggerInput,
 		canAccess = allowAllAgents
 	}
 
-	// The status source also requires LEAVING the backlog category, not merely
-	// changing the status key. Before custom statuses a key change out of
-	// `backlog` was always a category change, so the two were the same
-	// condition; now `backlog` → a custom status in the `backlog` category is a
-	// move within the parking lot, and starting a run on it would break the one
-	// promise backlog makes. (MUL-6463)
-	//
-	// Both sides of the transition are normalized to the canonical status they
-	// inherit, so a custom status in the `backlog` category parks exactly like
-	// Backlog and a custom status in the `todo` category starts a run exactly
-	// like Todo. Built-in keys resolve to themselves without a query, leaving
-	// this decision bit-identical for workspaces with no custom statuses —
-	// which is the whole set of them until an admin defines one. (MUL-6243)
+	// Only the fixed backlog key parks work. Leaving it for another unstarted
+	// or started status can enqueue a run; custom statuses do not inherit parking.
+	// Effective preserves built-in behavior and resolves custom terminal categories
+	// so moving to done/closed cannot start work.
 	currentStatus := issuestatus.Effective(ctx, s.Queries, issue.WorkspaceID, issue.Status)
 	prevStatus := issuestatus.Effective(ctx, s.Queries, issue.WorkspaceID, in.PrevStatus)
+
+	// Triage is stricter than the backlog parking lot: backlog defers a run,
+	// Triage refuses one outright (MUL-7189 §2.3). Deciding it here is what
+	// keeps the trigger PREVIEW honest — the queue door would refuse the insert
+	// either way, but silently, and the preview would have promised a run.
+	//
+	// Leaving Triage needs no case of its own. Triage is not a status, so accept
+	// clears this field and then takes the ordinary create / assign path; there
+	// is no "was in triage" transition for this predicate to recognise.
+	if issue.TriageState.Valid {
+		return IssueRunTrigger{}, false
+	}
 
 	var source RunEnqueueSource
 	switch {
@@ -131,9 +141,6 @@ func (s *IssueService) WillEnqueueRun(ctx context.Context, in IssueTriggerInput,
 	case in.StatusChanged && prevStatus == "backlog" &&
 		currentStatus != "backlog" &&
 		currentStatus != "done" && currentStatus != "cancelled":
-		if probe.IsSelfLoop != nil && probe.IsSelfLoop() {
-			return IssueRunTrigger{}, false
-		}
 		source = RunSourceStatus
 	default:
 		return IssueRunTrigger{}, false
@@ -148,11 +155,16 @@ func (s *IssueService) WillEnqueueRun(ctx context.Context, in IssueTriggerInput,
 		if !canAccess(agent) {
 			return IssueRunTrigger{}, false
 		}
-		if source == RunSourceAssign && !in.IsCreate && probe.SuppressActiveSelfAssignment != nil &&
+		if source == RunSourceStatus && probe.IsSelfLoop != nil && probe.IsSelfLoop(issue.AssigneeID) {
+			return IssueRunTrigger{}, false
+		}
+		if source == RunSourceAssign && !in.IsCreate && !in.EnteredHandoffStep && probe.SuppressActiveSelfAssignment != nil &&
 			probe.SuppressActiveSelfAssignment(issue.AssigneeID) {
 			return IssueRunTrigger{}, false
 		}
-		if source == RunSourceStatus && s.hasPendingRun(ctx, issue.ID, issue.AssigneeID) {
+		// A step entered under the agent's own run queues behind it; one
+		// already queued covers the new step too.
+		if (source == RunSourceStatus || in.EnteredHandoffStep) && s.hasPendingRun(ctx, issue.ID, issue.AssigneeID) {
 			return IssueRunTrigger{}, false
 		}
 		return IssueRunTrigger{
@@ -168,7 +180,7 @@ func (s *IssueService) WillEnqueueRun(ctx context.Context, in IssueTriggerInput,
 		// (leader briefing, roles, and member routing), so even when the acting
 		// agent is that squad's leader it is an intentional group handoff rather
 		// than a redundant direct self-claim. The status path below still uses
-		// the leader's pending-task guard.
+		// the leader's self-loop and pending-task guards.
 		squad, err := s.Queries.GetSquadInWorkspace(ctx, db.GetSquadInWorkspaceParams{
 			ID:          issue.AssigneeID,
 			WorkspaceID: issue.WorkspaceID,
@@ -187,14 +199,18 @@ func (s *IssueService) WillEnqueueRun(ctx context.Context, in IssueTriggerInput,
 		if !canAccess(leader) {
 			return IssueRunTrigger{}, false
 		}
+		if source == RunSourceStatus && probe.IsSelfLoop != nil && probe.IsSelfLoop(squad.LeaderID) {
+			return IssueRunTrigger{}, false
+		}
 		if source == RunSourceStatus && s.hasPendingRun(ctx, issue.ID, squad.LeaderID) {
 			return IssueRunTrigger{}, false
 		}
 		return IssueRunTrigger{
-			IssueID:      issue.ID,
-			AgentID:      squad.LeaderID,
-			AssigneeType: "squad",
-			Source:       source,
+			IssueID:         issue.ID,
+			AgentID:         squad.LeaderID,
+			AssigneeType:    "squad",
+			Source:          source,
+			WorkflowHandoff: in.EnteredHandoffStep,
 		}, true
 	}
 	return IssueRunTrigger{}, false

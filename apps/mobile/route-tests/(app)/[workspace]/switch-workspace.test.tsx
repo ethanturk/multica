@@ -4,6 +4,11 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
 import SwitchWorkspaceRoute from "@/app/(app)/[workspace]/switch-workspace";
 
+// Screens transitively load data/api.ts, which needs a base URL at import.
+vi.hoisted(() => {
+  process.env.EXPO_PUBLIC_API_URL ??= "https://api.example.test";
+});
+
 const mocks = vi.hoisted(() => ({
   alertMock: vi.fn(),
   dismiss: vi.fn(),
@@ -136,7 +141,7 @@ describe("SwitchWorkspaceRoute", () => {
     });
     expect(mocks.alertMock).toHaveBeenCalledWith(
       "Switch workspace",
-      'Switch to "Beta"?',
+      "Switch to Beta?",
       expect.any(Array),
     );
 

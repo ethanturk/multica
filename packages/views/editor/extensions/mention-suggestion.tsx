@@ -16,26 +16,30 @@ import { flattenIssueBuckets, issueKeys } from "@multica/core/issues/queries";
 import { issueStatusCategory } from "@multica/core/issues";
 import { useIssueStatuses } from "@multica/core/issue-statuses/hooks";
 import { workspaceKeys } from "@multica/core/workspace/queries";
+import { projectKeys } from "@multica/core/projects/queries";
 import { useAuthStore } from "@multica/core/auth";
 import { canAssignAgentToIssue } from "@multica/core/permissions";
 import { isAgentRuntimeBound } from "@multica/core/agents";
-import { api } from "@multica/core/api";
+import { searchIssues, searchProjects } from "@multica/core/search-index";
 import {
   isIssueDirectHit,
   isProjectDirectHit,
 } from "@multica/core/search/cancelled-rank";
 import { isImeComposing } from "@multica/core/utils";
+import { isMentionBoundaryAfter } from "@multica/core/markdown";
 import type {
   Issue,
   ListIssuesCache,
+  ListProjectsResponse,
   MemberWithUser,
   Agent,
   Squad,
 } from "@multica/core/types";
-import { ListTodo } from "lucide-react";
+import { ListTodo } from "@multica/ui/icons";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { StatusIcon } from "../../issues/components/status-icon";
 import { ProjectIcon } from "../../projects/components/project-icon";
+import { ArchivedProjectTag } from "../../projects/components/project-archive";
 import { useT } from "../../i18n";
 import { Badge } from "@multica/ui/components/ui/badge";
 import {
@@ -47,6 +51,7 @@ import { cn } from "@multica/ui/lib/utils";
 import type { IssueStatus, IssueStatusCategory, ProjectStatus } from "@multica/core/types";
 import { PROJECT_STATUS_CONFIG } from "@multica/core/projects/config";
 import type { SuggestionOptions } from "@tiptap/suggestion";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { PluginKey } from "@tiptap/pm/state";
 import {
   getRecencyMap,
@@ -64,9 +69,7 @@ import {
 import { isTriggerArmedAt } from "./suggestion-trigger-arming";
 import { blockedReasonLabel } from "../../issues/blocked-trigger-copy";
 
-// ---------------------------------------------------------------------------
 // Types
-// ---------------------------------------------------------------------------
 
 export interface MentionItem {
   id: string;
@@ -89,6 +92,8 @@ export interface MentionItem {
   icon?: string | null;
   /** Project status snapshot for recent/current project rendering */
   projectStatus?: ProjectStatus;
+  /** Archived projects stay mentionable; search ranks them last. */
+  projectArchived?: boolean;
   /** Present when the target should remain discoverable but cannot be selected. */
   disabledReason?: "agent_runtime_required";
 }
@@ -97,16 +102,15 @@ interface MentionListProps {
   items: MentionItem[];
   query: string;
   command: (item: MentionItem) => void;
-  includeProjectSearch?: boolean;
+  /** Chat context picker: fewer server issues, all server matches under "Search". */
+  contextSearch?: boolean;
 }
 
 export interface MentionListRef {
   onKeyDown: (props: { event: KeyboardEvent }) => boolean;
 }
 
-// ---------------------------------------------------------------------------
 // Group items by section
-// ---------------------------------------------------------------------------
 
 interface MentionGroup {
   label: string;
@@ -119,6 +123,7 @@ function groupItems(items: MentionItem[], query: string): MentionGroup[] {
   const search: MentionItem[] = [];
   const users: MentionItem[] = [];
   const issues: MentionItem[] = [];
+  const projects: MentionItem[] = [];
   const cancelled: MentionItem[] = [];
 
   for (const item of items) {
@@ -130,8 +135,10 @@ function groupItems(items: MentionItem[], query: string): MentionGroup[] {
       recent.push(item);
     } else if (item.group === "search") {
       search.push(item);
-    } else if (item.type === "issue" || item.type === "project") {
+    } else if (item.type === "issue") {
       issues.push(item);
+    } else if (item.type === "project") {
+      projects.push(item);
     } else {
       users.push(item);
     }
@@ -143,18 +150,19 @@ function groupItems(items: MentionItem[], query: string): MentionGroup[] {
   if (search.length > 0) groups.push({ label: "Search", items: search });
   if (users.length > 0) groups.push({ label: "Users", items: users });
   if (issues.length > 0) groups.push({ label: "Issues", items: issues });
+  if (projects.length > 0) groups.push({ label: "Projects", items: projects });
   // Always last: no cancelled row of any type may precede a live one.
   if (cancelled.length > 0) groups.push({ label: "Cancelled", items: cancelled });
   return groups;
 }
 
-// ---------------------------------------------------------------------------
 // MentionList — the popup rendered inside the editor
-// ---------------------------------------------------------------------------
 
 const MAX_ITEMS = 20;
+const RESERVED_PROJECT_SLOTS = 5;
 const SERVER_ISSUE_SEARCH_LIMIT = 20;
 const SERVER_CONTEXT_SEARCH_LIMIT = 8;
+const SERVER_PROJECT_SEARCH_LIMIT = 8;
 const SERVER_SEARCH_DEBOUNCE_MS = 150;
 
 function mentionItemKey(item: MentionItem): string {
@@ -203,7 +211,7 @@ function mergeMentionItems(
  */
 function isDemotedCancelled(item: MentionItem, query: string): boolean {
   if (isPinnedAboveTruncation(item, query)) return false;
-  if (item.type === "issue") return item.statusCategory === "cancelled";
+  if (item.type === "issue") return item.statusCategory === "closed";
   if (item.type === "project") return item.projectStatus === "cancelled";
   return false;
 }
@@ -260,10 +268,41 @@ function demoteCancelledItems(items: MentionItem[], query: string): MentionItem[
     : items;
 }
 
+/**
+ * Cuts the list to MAX_ITEMS without letting issues crowd out projects. Issue
+ * matches (cached plus server) merge ahead of project matches and alone can
+ * fill every slot, so the first few live projects keep a slot regardless of
+ * position. Cancelled projects get no reservation: they never take a live
+ * row's slot. The row the user has selected always stays, so a late project
+ * result cannot pull it out from under the highlight and make Enter insert a
+ * different row. Order is preserved.
+ */
+function truncateMentionItems(
+  items: MentionItem[],
+  query: string,
+  selectedKey: string | null,
+): MentionItem[] {
+  if (items.length <= MAX_ITEMS) return items;
+  const kept = new Set(
+    items
+      .filter((item) => item.type === "project" && !isDemotedCancelled(item, query))
+      .slice(0, RESERVED_PROJECT_SLOTS),
+  );
+  const selected = items.find((item) => mentionItemKey(item) === selectedKey);
+  if (selected) kept.add(selected);
+  let remaining = MAX_ITEMS - kept.size;
+  return items.filter((item) => {
+    if (kept.has(item)) return true;
+    if (remaining <= 0) return false;
+    remaining--;
+    return true;
+  });
+}
+
 export const MentionList = forwardRef<MentionListRef, MentionListProps>(
-  function MentionList({ items, query, command, includeProjectSearch = false }, ref) {
+  function MentionList({ items, query, command, contextSearch = false }, ref) {
     const { t } = useT("editor");
-    const { colorOf: statusColorOf } = useIssueStatuses(getCurrentWsId() ?? "");
+    const { colorOf: statusColorOf, iconOf: statusIconOf } = useIssueStatuses(getCurrentWsId() ?? "");
     // Selection is tracked by item identity, NOT by a positional index. The
     // list is re-bucketed by groupItems() and grows asynchronously (server
     // search results), so a slot index is not a stable target — the row under
@@ -302,40 +341,35 @@ export const MentionList = forwardRef<MentionListRef, MentionListProps>(
       const timer = setTimeout(() => {
         void (async () => {
           try {
-            if (includeProjectSearch) {
-              const [issues, projects] = await Promise.all([
-                api.searchIssues({
-                  q,
-                  limit: SERVER_CONTEXT_SEARCH_LIMIT,
-                  include_closed: true,
-                  signal: controller.signal,
-                }),
-                api.searchProjects({
-                  q,
-                  limit: SERVER_CONTEXT_SEARCH_LIMIT,
-                  include_closed: true,
-                  signal: controller.signal,
-                }),
-              ]);
-              if (!cancelled && !controller.signal.aborted) {
-                setServerItems([
-                  ...issues.issues.map((issue) => ({ ...issueToMention(issue), group: "search" as const })),
-                  ...projects.projects.map((project) => ({ ...projectToMention(project), group: "search" as const })),
-                ]);
-              }
-            } else {
-              const res = await api.searchIssues({
+            // One search failing must not discard the other's results.
+            const [issues, projects] = await Promise.allSettled([
+              searchIssues({
                 q,
-                limit: SERVER_ISSUE_SEARCH_LIMIT,
+                limit: contextSearch ? SERVER_CONTEXT_SEARCH_LIMIT : SERVER_ISSUE_SEARCH_LIMIT,
                 include_closed: true,
                 signal: controller.signal,
-              });
-              if (!cancelled && !controller.signal.aborted) {
-                setServerItems(res.issues.map(issueToMention));
-              }
+              }),
+              searchProjects({
+                q,
+                limit: SERVER_PROJECT_SEARCH_LIMIT,
+                include_closed: true,
+                include_archived: true,
+                signal: controller.signal,
+              }),
+            ]);
+            if (!cancelled && !controller.signal.aborted) {
+              const results = [
+                ...(issues.status === "fulfilled" ? issues.value.issues.map(issueToMention) : []),
+                ...(projects.status === "fulfilled" ? projects.value.projects.map(projectToMention) : []),
+              ];
+              setServerItems(
+                contextSearch
+                  ? results.map((item) => ({ ...item, group: "search" as const }))
+                  : results,
+              );
             }
           } catch {
-            // Aborted or network error: keep the synchronous cache results.
+            // Malformed response: keep the synchronous cache results.
           } finally {
             if (!cancelled && !controller.signal.aborted) {
               setSearchedQuery(q);
@@ -350,15 +384,19 @@ export const MentionList = forwardRef<MentionListRef, MentionListProps>(
         clearTimeout(timer);
         controller.abort();
       };
-    }, [includeProjectSearch, normalizedQuery]);
+    }, [contextSearch, normalizedQuery]);
 
     const displayItems = useMemo(() => {
       const currentServerItems = searchedQuery === normalizedQuery ? serverItems : [];
-      return demoteCancelledItems(
-        mergeMentionItems(items, currentServerItems),
+      return truncateMentionItems(
+        demoteCancelledItems(
+          mergeMentionItems(items, currentServerItems),
+          normalizedQuery,
+        ),
         normalizedQuery,
-      ).slice(0, MAX_ITEMS);
-    }, [items, normalizedQuery, searchedQuery, serverItems]);
+        selectedKey,
+      );
+    }, [items, normalizedQuery, searchedQuery, selectedKey, serverItems]);
 
     // The single index space for selection. groupItems() re-buckets displayItems
     // (current → recent → search → users → issues); orderedItems is exactly what
@@ -409,9 +447,14 @@ export const MentionList = forwardRef<MentionListRef, MentionListProps>(
         // see pickerNavigationDirection.
         const direction = pickerNavigationDirection(event);
         if (direction !== null) {
+          // With no rows, including while remote search is pending, the picker
+          // has nothing to navigate. Let the host editor own the key instead.
+          if (orderedItems.length === 0) return false;
           const selectableIndexes = orderedItems.flatMap((item, index) =>
             item.disabledReason ? [] : [index],
           );
+          // Rows exist but all are disabled: keep the picker inert rather than
+          // moving the caret behind the visible popup.
           if (selectableIndexes.length === 0) return true;
           const current = selectableIndexes.indexOf(selectedIndex);
           const delta =
@@ -427,6 +470,11 @@ export const MentionList = forwardRef<MentionListRef, MentionListProps>(
         // Enter is the canonical accept; plain Tab is an additive alias (see
         // isPickerAcceptKey). Shift/modifier+Tab fall through to focus nav.
         if (isPickerAcceptKey(event)) {
+          // An empty picker cannot accept anything, so preserve the editor's
+          // newline, submit shortcut, and focus-navigation behavior.
+          if (orderedItems.length === 0) return false;
+          // A non-empty list can still have no selectable row when every item
+          // is disabled. Keep those visible rows inert instead of falling through.
           if (selectedIndex < 0) return true;
           selectItem(orderedItems[selectedIndex]);
           return true;
@@ -457,6 +505,7 @@ export const MentionList = forwardRef<MentionListRef, MentionListProps>(
       if (label === "Search") return t(($) => $.mention.group_search);
       if (label === "Users") return t(($) => $.mention.group_users);
       if (label === "Issues") return t(($) => $.mention.group_issues);
+      if (label === "Projects") return t(($) => $.mention.group_projects);
       if (label === "Cancelled") return t(($) => $.mention.group_cancelled);
       return label;
     };
@@ -471,6 +520,7 @@ export const MentionList = forwardRef<MentionListRef, MentionListProps>(
           <MentionRow
             key={`${item.type}-${item.id}`}
             item={item}
+            statusIcon={item.type === "issue" && item.status ? statusIconOf(item.status) : null}
             statusColor={
               item.type === "issue" && item.status
                 ? statusColorOf(item.status)
@@ -492,6 +542,8 @@ export const MentionList = forwardRef<MentionListRef, MentionListProps>(
     // variant only differs in width / max-height / chrome.
     return (
       <div
+        data-mc="editor-menu"
+        data-kind="mention"
         className={cn(
           "flex flex-col overflow-y-auto overscroll-contain border bg-popover py-1",
           // Height budget: clamp to whichever is smaller — the design max or the
@@ -518,19 +570,19 @@ export const MentionList = forwardRef<MentionListRef, MentionListProps>(
   },
 );
 
-// ---------------------------------------------------------------------------
 // MentionRow — single item in the list
-// ---------------------------------------------------------------------------
 
 function MentionRow({
   item,
   statusColor,
+  statusIcon,
   selected,
   onSelect,
   buttonRef,
 }: {
   item: MentionItem;
   statusColor?: string | null;
+  statusIcon?: string | null;
   selected: boolean;
   onSelect: () => void;
   buttonRef: (el: HTMLButtonElement | null) => void;
@@ -541,7 +593,7 @@ function MentionRow({
     // Visually dim closed issues (done/cancelled) so they're distinguishable
     // from active ones in the suggestion list — they're still selectable.
     const isClosed =
-      item.statusCategory === "done" || item.statusCategory === "cancelled";
+      item.statusCategory === "done" || item.statusCategory === "closed";
     return (
       <button
         type="button"
@@ -557,6 +609,7 @@ function MentionRow({
               status={item.status}
               category={item.statusCategory}
               color={statusColor}
+              icon={statusIcon}
               className="h-3.5 w-3.5"
             />
           ) : (
@@ -601,6 +654,7 @@ function MentionRow({
             </span>
           )}
         </span>
+        {item.projectArchived && <ArchivedProjectTag />}
         {projectStatusCfg && (
           <span className={`${projectStatusCfg.dotColor} ml-auto size-1.5 shrink-0 rounded-full`} />
         )}
@@ -658,9 +712,7 @@ function MentionRow({
   );
 }
 
-// ---------------------------------------------------------------------------
 // Suggestion config factory
-// ---------------------------------------------------------------------------
 
 function issueToMention(
   i: Pick<Issue, "id" | "identifier" | "title" | "status"> & Partial<Pick<Issue, "status_category">>,
@@ -675,7 +727,14 @@ function issueToMention(
   };
 }
 
-function projectToMention(p: { id: string; title: string; description?: string | null; icon?: string | null; status?: ProjectStatus }): MentionItem {
+function projectToMention(p: {
+  id: string;
+  title: string;
+  description?: string | null;
+  icon?: string | null;
+  status?: ProjectStatus;
+  archived_at?: string | null;
+}): MentionItem {
   return {
     id: p.id,
     label: p.title,
@@ -683,7 +742,23 @@ function projectToMention(p: { id: string; title: string; description?: string |
     description: p.description ?? undefined,
     icon: p.icon ?? null,
     projectStatus: p.status,
+    projectArchived: !!p.archived_at,
   };
+}
+
+/**
+ * True when the `@` at `pos` starts a token instead of continuing one.
+ *
+ * The rule itself — which characters make an `@` part of the word it follows,
+ * and why CJK needs the exception — lives in @multica/core/markdown, shared
+ * with the mobile composer so the two clients cannot drift apart.
+ */
+function isMentionBoundary(doc: ProseMirrorNode, pos: number): boolean {
+  if (pos <= 0) return true;
+  // Two units wide, so a code point outside the BMP arrives whole; one would
+  // hand back a lone surrogate. Across a block boundary this is the separator,
+  // which is not a word character either.
+  return isMentionBoundaryAfter(doc.textBetween(Math.max(0, pos - 2), pos, "\n", "\n"));
 }
 
 function matchesMentionQuery(item: MentionItem, query: string): boolean {
@@ -807,16 +882,32 @@ export function createMentionSuggestion(
       )
       .map(issueToMention);
 
-    return [...allItem, ...userItems, ...issueItems];
+    // Archived projects are left to the server search, which ranks them last.
+    const cachedProjects =
+      qc.getQueryData<ListProjectsResponse>(projectKeys.list(wsId))?.projects ?? [];
+    const projectItems: MentionItem[] = cachedProjects
+      .filter(
+        (p) =>
+          !p.archived_at &&
+          (p.title.toLowerCase().includes(q) || matchesPinyin(p.title, q)),
+      )
+      .map(projectToMention);
+
+    return [...allItem, ...userItems, ...issueItems, ...projectItems];
   }
 
   return {
     pluginKey,
     allowSpaces: true,
+    // The boundary rule is isMentionBoundary's, not Tiptap's default of "a
+    // half-width space and nothing else" (see the note there).
+    allowedPrefixes: null,
     // Only open over an `@` the user actually typed. Tiptap matches on document
     // content alone, so without this a pasted, dropped, undone or server-loaded
     // `@` opens the picker just as readily (MUL-5429).
-    shouldShow: ({ editor, range }) => isTriggerArmedAt(editor, range.from),
+    shouldShow: ({ editor, range, transaction }) =>
+      isTriggerArmedAt(editor, range.from) &&
+      isMentionBoundary(transaction.doc, range.from),
     items: ({ query }) => {
       if (options.mode === "context") {
         const normalizedQuery = query.trim();
@@ -834,7 +925,7 @@ export function createMentionSuggestion(
         items: props.items,
         query: props.query,
         command: props.command,
-        includeProjectSearch: options.mode === "context",
+        contextSearch: options.mode === "context",
       }),
       onKeyDown: (ref, props) => ref?.onKeyDown(props) ?? false,
     }),

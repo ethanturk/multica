@@ -21,10 +21,12 @@ import (
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/cloudruntime"
+	"github.com/multica-ai/multica/server/internal/connectedapps"
 	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/dbreader"
 	"github.com/multica-ai/multica/server/internal/entitlement"
 	"github.com/multica-ai/multica/server/internal/events"
+	"github.com/multica-ai/multica/server/internal/inboxread"
 	"github.com/multica-ai/multica/server/internal/integrations/channel/engine"
 	composio "github.com/multica-ai/multica/server/internal/integrations/composio"
 	"github.com/multica-ai/multica/server/internal/integrations/dingtalk"
@@ -33,6 +35,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/integrations/slack"
 	"github.com/multica-ai/multica/server/internal/integrations/telegram"
 	"github.com/multica-ai/multica/server/internal/integrations/wecom"
+	"github.com/multica-ai/multica/server/internal/integrations/weixin"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/middleware"
@@ -40,6 +43,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/seatcapacity"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/storage"
+	"github.com/multica-ai/multica/server/internal/themestore"
 	"github.com/multica-ai/multica/server/internal/util"
 	"github.com/multica-ai/multica/server/internal/util/secretbox"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -76,6 +80,13 @@ type Config struct {
 	// invitation only. The public /api/config endpoint mirrors this flag so
 	// the UI can hide every "Create workspace" affordance — see #3433.
 	DisableWorkspaceCreation bool
+	// WorkspaceCreationAllowedEmails, when non-empty, restricts
+	// POST /api/workspaces to callers whose account email matches one of
+	// the entries (case-insensitive). Empty means every signed-in user may
+	// create workspaces. DisableWorkspaceCreation takes precedence. This only
+	// decides who may create a workspace; it grants no cross-workspace
+	// visibility or admin rights (#9400).
+	WorkspaceCreationAllowedEmails []string
 	// VCSIntegrationEnabled gates the self-hosted Git provider integration
 	// (Forgejo / Gitea / GitLab) at the deployment level, independent of whether
 	// MULTICA_VCS_SECRET_KEY is set. It is the product boundary: the feature is
@@ -110,12 +121,15 @@ type Config struct {
 	// without a header-stripping reverse proxy in front.
 	TrustedProxies []netip.Prefix
 	// CloudURL enables the SaaS-only multica-cloud connection when set. Empty
-	// keeps self-hosted deployments explicit: Cloud endpoints return 503 instead
+	// keeps self-hosted deployments explicit: Cloud endpoints return 403 instead
 	// of attempting to dial a hard-coded private service.
 	CloudURL                 string
 	CloudTimeout             time.Duration
 	AttachmentDownloadMode   string
 	AttachmentDownloadURLTTL time.Duration
+	// MaxPreviewSizeBytes bounds text-backed attachment previews independently
+	// of upload/download limits. Zero selects the default 2 MiB limit.
+	MaxPreviewSizeBytes int64
 	// AttachmentFrameAncestors are trusted browser origins allowed to embed
 	// attachment preview responses. In production this should mirror the
 	// frontend/CORS origin allowlist so split app/api self-hosted deployments
@@ -135,6 +149,8 @@ type Config struct {
 	//   - LLMBaseURL       -> MULTICA_LLM_BASE_URL (OpenAI or any compatible gateway)
 	//   - LLMDefaultModel  -> MULTICA_LLM_DEFAULT_MODEL (used when a request omits `model`)
 	//   - LLMMaxRetries    -> MULTICA_LLM_MAX_RETRIES (transport retry budget)
+	//   - LLMDisableThinking -> MULTICA_LLM_DISABLE_THINKING (gateway hint to
+	//     turn model reasoning off; see llm.Config.DisableThinking)
 	LLMAPIKey       string
 	LLMBaseURL      string
 	LLMDefaultModel string
@@ -144,11 +160,20 @@ type Config struct {
 	// and cmd/server additionally fails the boot on an out-of-range value before
 	// one reaches this struct. See llm.Config.MaxRetries for the full semantics.
 	LLMMaxRetries *llm.RetryOverride
+	// LLMDisableThinking is the parsed MULTICA_LLM_DISABLE_THINKING switch.
+	// cmd/server validates the raw value before the boot continues, so a
+	// non-boolean never reaches this struct.
+	LLMDisableThinking bool
 	// ServerVersion is the build version of the running API binary (the same
 	// value main.go stamps via -X main.version and reports on /metrics).
 	// Surfaced through /api/config so self-hosted operators can confirm which
 	// server build is deployed. Empty in dev builds.
 	ServerVersion string
+	// GitExtraCACerts is the PEM of the private CAs the operator added to the
+	// backend's trust store through SSL_CERT_DIR (see internal/gitca). It is
+	// handed to daemons with the workspace repos so their git can reach a
+	// repository host the backend already trusts. Empty when none are set.
+	GitExtraCACerts []byte
 }
 
 type cloudRuntimeProxy interface {
@@ -174,6 +199,12 @@ type DaemonPendingWorkNotifier interface {
 	NotifyPendingWork(runtimeID, kind string)
 }
 
+// DaemonTaskSupplementNotifier sends a content-free wakeup for one exact run.
+// The daemon still pulls and authenticates the durable supplement over HTTP.
+type DaemonTaskSupplementNotifier interface {
+	NotifyTaskSupplementAvailable(runtimeID, taskID string)
+}
+
 // RuntimeGoneNotifier invalidates a runtime that was deleted while its daemon
 // still has an authenticated WebSocket connection.
 type RuntimeGoneNotifier interface {
@@ -189,6 +220,7 @@ type RuntimeRecoveryNotifier interface {
 }
 
 type Handler struct {
+	InboxReads             *inboxread.Guard
 	Queries                *db.Queries
 	ReadSelector           *dbreader.Selector
 	DB                     dbExecutor
@@ -217,6 +249,10 @@ type Handler struct {
 	LocalSkillListStore   LocalSkillListStore
 	LocalSkillImportStore LocalSkillImportStore
 	FeatureFlags          *featureflag.Service
+	// ThemeStore serves the community theme registry. Nil only when
+	// MULTICA_THEME_REGISTRY_URL is invalid: its routes return 404 and
+	// /api/config omits it.
+	ThemeStore *themestore.Store
 	// IssueStatusCatalog reads the workspace status catalog. Defaults to
 	// Queries; a test can substitute a counting wrapper to assert HOW MANY
 	// catalog reads a request performs, which is the only property that
@@ -232,7 +268,8 @@ type Handler struct {
 	// heartbeat-carried requests (MUL-5444). Optional: when nil,
 	// requestDaemonPendingWork falls back to the local DaemonHub, which is the
 	// correct delivery scope for a single-node deployment.
-	DaemonPendingWork DaemonPendingWorkNotifier
+	DaemonPendingWork    DaemonPendingWorkNotifier
+	DaemonTaskSupplement DaemonTaskSupplementNotifier
 	// ModelCatalogCache serves the last known good model list for a runtime so
 	// the picker can render without waiting for a daemon round trip
 	// (stale-while-revalidate, MUL-5444). Nil-safe: every call site treats a nil
@@ -246,6 +283,7 @@ type Handler struct {
 	PATCache                     *auth.PATCache
 	DaemonTokenCache             *auth.DaemonTokenCache
 	MembershipCache              *auth.MembershipCache
+	QoderRateLimiter             WebhookRateLimiter
 	WebhookRateLimiter           WebhookRateLimiter
 	WebhookIPRateLimiter         WebhookRateLimiter
 	WebhookAbsoluteIPRateLimiter WebhookRateLimiter
@@ -256,7 +294,7 @@ type Handler struct {
 	googleOAuthHTTPClient *http.Client
 	// Lark integration. All three are nil when the Lark master key
 	// (MULTICA_LARK_SECRET_KEY) is unset; the corresponding HTTP
-	// handlers return 503 in that case so a misconfigured self-host
+	// handlers return 403 in that case so a misconfigured self-host
 	// deployment surfaces a clear error instead of silently using a
 	// zero key. Wired in cmd/server/router.go after handler.New.
 	LarkInstallations *lark.InstallationService
@@ -277,9 +315,12 @@ type Handler struct {
 	// entry points.
 	LarkAPIClient lark.APIClient
 	// Composio integration (MUL-3720). Nil when COMPOSIO_API_KEY is unset;
-	// the composio HTTP handlers return 503 in that case. Wired in
+	// the composio HTTP handlers return 403 in that case. Wired in
 	// cmd/server/router.go after handler.New.
 	Composio *composio.Service
+	// ConnectedApps serves agents' app calls through the MCP gateway (MUL-8516).
+	// Wired together with Composio; nil when Composio is.
+	ConnectedApps *connectedapps.Service
 	// ChannelSupervisor owns the per-installation supervisor goroutines
 	// that hold the §4.4 WS lease and drive each channel.Channel
 	// (MUL-3620 generalized the Feishu-only Hub into this channel-agnostic
@@ -305,6 +346,8 @@ type Handler struct {
 	// where the storage backend exists; main.go starts it as an independent
 	// worker goroutine. Nil when no storage backend is configured.
 	ChannelMediaReconciler *service.ChannelMediaReconciler
+	// LarkTyping owns the durable reaction cleanup worker, started under sweepCtx.
+	LarkTyping *lark.TypingIndicatorManager
 	// SlackInstall owns the bring-your-own-app Slack install lifecycle (register
 	// pasted tokens / list / revoke) and the at-rest encryption of each app's bot
 	// + app tokens (MUL-3666). Nil unless MULTICA_SLACK_SECRET_KEY is set.
@@ -325,16 +368,24 @@ type Handler struct {
 	SlackHistory ChatChannelHistoryReader
 	// WecomStore is the read/write handle over channel_installation rows scoped
 	// to channel_type='wecom'. Nil disables the wecom Web-UI endpoints (they
-	// return 503) and prevents boot from wiring the smart-bot supervisor.
+	// return 403) and prevents boot from wiring the smart-bot supervisor.
 	WecomStore *wecom.Store
 	// WecomCredentials unseals a wecom installation's smart-bot secret for the
 	// WebSocket subscribe frame. Nil disables the wecom integration.
 	WecomCredentials wecom.CredentialsResolver
+	// WecomInstall drives the scan-code install sessions (QR generate + poll).
+	// Nil unless MULTICA_WECOM_SECRET_KEY is set; Configured() is additionally
+	// false without a QR provider, in which case the endpoints return 503 but
+	// in-flight sessions still terminate cleanly.
+	WecomInstall *wecom.InstallService
+	// WecomInstallWorker drives those sessions. Built in cmd/server/router.go;
+	// main.go starts it as an independent worker.
+	WecomInstallWorker *wecom.InstallWorker
 	// WecomBindingTokens mints/redeems the user-binding tokens behind the
 	// "link your Multica account" prompt sent to first-time WeCom users
 	// (their aibot userid is a "T"-prefixed anonymized id with no relation
 	// to their real userid or email, so an explicit binding is required —
-	// see wecom/binding.go). Nil disables the redeem endpoint (returns 503)
+	// see wecom/binding.go). Nil disables the redeem endpoint (returns 403)
 	// and the OutboundReplier's binding-prompt path.
 	WecomBindingTokens WecomBindingRedeemer
 
@@ -354,6 +405,9 @@ type Handler struct {
 	// The process owner starts and joins it; the synchronous event bus only
 	// enqueues EventChatDone work.
 	TelegramOutbound *telegram.Outbound
+
+	WeixinInstall  *weixin.InstallService
+	WeixinOutbound *weixin.Outbound
 
 	// channelFileDelivery names the channel types that can, IN THIS
 	// DEPLOYMENT, carry a file the agent produced the last hop into the
@@ -386,7 +440,7 @@ type Handler struct {
 	LLM *llm.Client
 	// VCSSecretBox encrypts/decrypts per-workspace Git provider access tokens and
 	// webhook secrets at rest (Forgejo / Gitea / GitLab). Nil when
-	// MULTICA_VCS_SECRET_KEY is unset; the connect/webhook handlers return 503
+	// MULTICA_VCS_SECRET_KEY is unset; connect returns 403 and webhook returns 404
 	// in that case so a misconfigured self-host deployment surfaces a clear
 	// error rather than silently storing plaintext. Wired in
 	// cmd/server/router.go after New.
@@ -437,23 +491,27 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 	}
 
 	llmClient := llm.New(llm.Config{
-		APIKey:       cfg.LLMAPIKey,
-		BaseURL:      cfg.LLMBaseURL,
-		DefaultModel: cfg.LLMDefaultModel,
-		MaxRetries:   cfg.LLMMaxRetries,
+		APIKey:          cfg.LLMAPIKey,
+		BaseURL:         cfg.LLMBaseURL,
+		DefaultModel:    cfg.LLMDefaultModel,
+		MaxRetries:      cfg.LLMMaxRetries,
+		DisableThinking: cfg.LLMDisableThinking,
 	})
 	// Report the effective retry policy so an operator can confirm from the
 	// boot log alone what a misbehaving upstream will cost, instead of inferring
 	// it from an env var whose semantics used to be unguessable (MUL-6364).
 	// Read off the client, not off cfg, so the line cannot drift from what the
 	// SDK actually enforces. Counts and an enum only — never the key or the base
-	// URL, since a self-hosted gateway URL routinely embeds a token.
+	// URL, since a self-hosted gateway URL routinely embeds a token. The
+	// disable_thinking field rides along so the effective request shape is on
+	// the same line.
 	llmRetry := llmClient.RetryBudget()
 	slog.Info("llm retry policy",
 		"max_retries", llmRetry.MaxRetries,
 		"source", llmRetry.Source,
 		"request_timeout", llmRetry.RequestTimeout,
 		"enabled", llmClient.Enabled(),
+		"disable_thinking", llmClient.DisableThinking(),
 	)
 
 	taskSvc := service.NewTaskService(queries, txStarter, hub, bus, daemonHub)
@@ -468,6 +526,7 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 		ReadSelector:                 dbreader.NewPrimaryOnly(queries),
 		DB:                           executor,
 		TxStarter:                    txStarter,
+		InboxReads:                   inboxread.New(inboxread.ConfigFromEnv()),
 		Hub:                          hub,
 		DaemonHub:                    daemonHub,
 		DaemonProfileRefresh:         daemonProfileRefresh,
@@ -489,6 +548,7 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 		Storage:                      store,
 		CFSigner:                     cfSigner,
 		Analytics:                    analyticsClient,
+		QoderRateLimiter:             NewMemoryWebhookRateLimiter(WebhookRateLimit{Limit: 6, Window: time.Minute}),
 		WebhookRateLimiter:           NewMemoryWebhookRateLimiter(DefaultWebhookRateLimit()),
 		WebhookIPRateLimiter:         NewMemoryWebhookIPRateLimiter(DefaultWebhookIPRateLimit()),
 		WebhookAbsoluteIPRateLimiter: NewMemoryWebhookAbsoluteIPRateLimiter(DefaultWebhookAbsoluteIPRateLimit()),
@@ -517,6 +577,7 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 		slog.Warn("github: PR snapshot pipeline disabled (invalid App private key)", "err", err)
 	}
 	h.PRRefresh = ghsnapshot.NewManager(ghClient, queries, txStarter, h.broadcastPRSnapshotApplied)
+	taskSvc.PRSnapshotsEnabled = h.PRRefresh.Enabled()
 
 	return h
 }
@@ -570,6 +631,13 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // fallback for anything that has not been given a translation yet.
 func writeErrorCode(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg, "code": code})
+}
+
+// writeFeatureDisabled reports a deliberate deployment or feature gate as a
+// non-retryable refusal. A disabled capability is not a transient service
+// failure: returning 503 would invite retries and pollute availability alerts.
+func writeFeatureDisabled(w http.ResponseWriter, code, msg string) {
+	writeErrorCode(w, http.StatusForbidden, code, msg)
 }
 
 func writeRevisionConflict(w http.ResponseWriter, resourceType string, resourceID pgtype.UUID, expected, actual int64) {
@@ -767,29 +835,19 @@ func (h *Handler) NotifyRuntimeRecovered(_ context.Context, workspaceID string) 
 	h.PublishRuntimeRefresh(workspaceID, "system", "", "heartbeat_recovery")
 }
 
-// publishTask is publish() plus a TaskID hint so the realtime layer can route
-// the event to the per-task scope rather than the whole workspace.
-func (h *Handler) publishTask(eventType, workspaceID, actorType, actorID, taskID string, payload any) {
-	h.Bus.Publish(events.Event{
-		Type:        eventType,
-		WorkspaceID: workspaceID,
-		ActorType:   actorType,
-		ActorID:     actorID,
-		TaskID:      taskID,
-		Payload:     payload,
-	})
-}
-
-// publishChat is publish() plus a ChatSessionID hint so the realtime layer
-// can route the event to the per-chat-session scope.
+// publishChat is publish() plus the chat session routing hints. actorID must
+// be the session's creator: every chat endpoint gates on creator ownership
+// before publishing, and the realtime layer delivers the event to that user
+// only.
 func (h *Handler) publishChat(eventType, workspaceID, actorType, actorID, chatSessionID string, payload any) {
 	h.Bus.Publish(events.Event{
-		Type:          eventType,
-		WorkspaceID:   workspaceID,
-		ActorType:     actorType,
-		ActorID:       actorID,
-		ChatSessionID: chatSessionID,
-		Payload:       payload,
+		Type:               eventType,
+		WorkspaceID:        workspaceID,
+		ActorType:          actorType,
+		ActorID:            actorID,
+		ChatSessionID:      chatSessionID,
+		ChatSessionOwnerID: actorID,
+		Payload:            payload,
 	})
 }
 
@@ -974,6 +1032,9 @@ func (h *Handler) requireWorkspaceMember(w http.ResponseWriter, r *http.Request,
 
 	member, err := h.getWorkspaceMember(r.Context(), userID, workspaceID)
 	if err != nil {
+		if writeQueryCancellation(w, r, err) {
+			return db.Member{}, false
+		}
 		writeError(w, http.StatusNotFound, notFoundMsg)
 		return db.Member{}, false
 	}
@@ -1033,7 +1094,14 @@ func (h *Handler) loadIssueForUser(w http.ResponseWriter, r *http.Request, issue
 	// Try identifier format first (e.g., "JIA-42"). resolveIssueByIdentifier
 	// silently returns false for non-identifier strings, falling through to
 	// the UUID path below.
-	if issue, ok := h.resolveIssueByIdentifier(r.Context(), issueID, workspaceID); ok {
+	issue, found, err := h.resolveIssueByIdentifier(r.Context(), issueID, workspaceID)
+	if writeQueryCancellation(w, r, err) {
+		return db.Issue{}, false
+	}
+	if found {
+		if !h.requireProjectVisible(w, r, workspaceID, issue.ProjectID, http.StatusNotFound, "issue not found") {
+			return db.Issue{}, false
+		}
 		return issue, true
 	}
 
@@ -1049,12 +1117,20 @@ func (h *Handler) loadIssueForUser(w http.ResponseWriter, r *http.Request, issue
 		writeError(w, http.StatusBadRequest, "invalid workspace_id")
 		return db.Issue{}, false
 	}
-	issue, err := h.Queries.GetIssueInWorkspace(r.Context(), db.GetIssueInWorkspaceParams{
+	issue, err = h.Queries.GetIssueInWorkspace(r.Context(), db.GetIssueInWorkspaceParams{
 		ID:          issueUUID,
 		WorkspaceID: wsUUID,
 	})
 	if err != nil {
+		if writeQueryCancellation(w, r, err) {
+			return db.Issue{}, false
+		}
 		writeError(w, http.StatusNotFound, "issue not found")
+		return db.Issue{}, false
+	}
+	// MUL-8472: an issue in a private project the caller cannot see does not
+	// exist for them, on every route that loads it through here.
+	if !h.requireProjectVisible(w, r, workspaceID, issue.ProjectID, http.StatusNotFound, "issue not found") {
 		return db.Issue{}, false
 	}
 	return issue, true
@@ -1067,31 +1143,35 @@ func (h *Handler) loadIssueForUser(w http.ResponseWriter, r *http.Request, issue
 // resolved to the same issue number, so `FOO-134` and `TRS-134` were
 // interchangeable — which makes the identifier URL `/{ws}/issues/{key}`
 // unusable as a canonical link.
-func (h *Handler) resolveIssueByIdentifier(ctx context.Context, id, workspaceID string) (db.Issue, bool) {
+func (h *Handler) resolveIssueByIdentifier(ctx context.Context, id, workspaceID string) (db.Issue, bool, error) {
 	parts := splitIdentifier(id)
 	if parts == nil {
-		return db.Issue{}, false
+		return db.Issue{}, false, nil
 	}
 	if workspaceID == "" {
-		return db.Issue{}, false
+		return db.Issue{}, false, nil
 	}
 	wsUUID, err := util.ParseUUID(workspaceID)
 	if err != nil {
-		return db.Issue{}, false
+		return db.Issue{}, false, nil
 	}
 	// Case-insensitive: a hand-typed `trs-134` should open `TRS-134`.
-	prefix := h.getIssuePrefix(ctx, wsUUID)
+	workspace, err := h.Queries.GetWorkspace(ctx, wsUUID)
+	if err != nil {
+		return db.Issue{}, false, err
+	}
+	prefix := issuePrefixForWorkspace(workspace)
 	if prefix == "" || !strings.EqualFold(parts.prefix, prefix) {
-		return db.Issue{}, false
+		return db.Issue{}, false, nil
 	}
 	issue, err := h.Queries.GetIssueByNumber(ctx, db.GetIssueByNumberParams{
 		WorkspaceID: wsUUID,
 		Number:      parts.number,
 	})
 	if err != nil {
-		return db.Issue{}, false
+		return db.Issue{}, false, err
 	}
-	return issue, true
+	return issue, true, nil
 }
 
 type identifierParts struct {
@@ -1184,6 +1264,9 @@ func (h *Handler) loadAgentForUser(w http.ResponseWriter, r *http.Request, agent
 		WorkspaceID: wsUUID,
 	})
 	if err != nil {
+		if writeQueryCancellation(w, r, err) {
+			return db.Agent{}, false
+		}
 		writeError(w, http.StatusNotFound, "agent not found")
 		return db.Agent{}, false
 	}
@@ -1226,6 +1309,11 @@ func (h *Handler) loadInboxItemForUser(w http.ResponseWriter, r *http.Request, i
 
 	if item.RecipientType != "member" || uuidToString(item.RecipientID) != userID {
 		writeError(w, http.StatusNotFound, "inbox item not found")
+		return db.InboxItem{}, false
+	}
+	// An item on an issue in a private project the caller cannot see (never
+	// granted, or revoked since it was delivered) answers like a missing one.
+	if !h.requireIssueIDVisible(w, r, workspaceID, item.IssueID, http.StatusNotFound, "inbox item not found") {
 		return db.InboxItem{}, false
 	}
 	return item, true

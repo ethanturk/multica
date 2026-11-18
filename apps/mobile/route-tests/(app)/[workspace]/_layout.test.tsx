@@ -6,6 +6,11 @@ import WorkspaceLayout, {
   unstable_settings,
 } from "@/app/(app)/[workspace]/_layout";
 
+// Screens transitively load data/api.ts, which needs a base URL at import.
+vi.hoisted(() => {
+  process.env.EXPO_PUBLIC_API_URL ??= "https://api.example.test";
+});
+
 const mocks = vi.hoisted(() => ({
   stackScreens: [] as Record<string, any>[],
   redirects: [] as Record<string, any>[],

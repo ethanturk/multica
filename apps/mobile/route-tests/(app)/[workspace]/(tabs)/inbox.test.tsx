@@ -4,6 +4,11 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
 import Inbox from "@/app/(app)/[workspace]/(tabs)/inbox";
 
+// Screens transitively load data/api.ts, which needs a base URL at import.
+vi.hoisted(() => {
+  process.env.EXPO_PUBLIC_API_URL ??= "https://api.example.test";
+});
+
 function MockView(props: Record<string, any>) {
   return React.createElement("View", props);
 }
@@ -47,7 +52,8 @@ vi.mock("@expo/vector-icons", () => ({
     React.createElement("Ionicons", props),
 }));
 
-vi.mock("@tanstack/react-query", () => ({
+vi.mock("@tanstack/react-query", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tanstack/react-query")>()),
   useQuery: () => mocks.queryState,
 }));
 
@@ -122,7 +128,8 @@ vi.mock("@/lib/action-sheet", () => ({
   showPlatformActionSheet: mocks.showPlatformActionSheet,
 }));
 
-vi.mock("@/lib/inbox-display", () => ({
+vi.mock("@/lib/inbox-display", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/inbox-display")>()),
   deduplicateInboxItems: (items: unknown[]) => items,
 }));
 
@@ -201,7 +208,7 @@ describe("Inbox", () => {
     const textValues = renderer!.root
       .findAllByType("Text")
       .flatMap((node) => (Array.isArray(node.props.children) ? node.props.children : [node.props.children]));
-    expect(textValues).toContain("Inbox zero");
+    expect(textValues).toContain("You're all caught up");
   });
 
   it("renders rows and handles navigation and menu actions", () => {

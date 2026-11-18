@@ -1683,6 +1683,9 @@ func TestStage8PromoteScriptAppendsDiagnosticsAndInvokesBundleGenerator(t *testi
 		"MULTICA_REPO_ROOT="+repoRoot,
 		"MULTICA_BIN="+fakeMulticaPath,
 	)
+	// TestMain moves the process into a scratch home; the script path is
+	// relative to this package directory.
+	cmd.Dir = testLaunchDir
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("stage8-promote.sh failed: %v\n%s", err, out)

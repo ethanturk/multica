@@ -36,6 +36,9 @@ import {
   projectDetailOptions,
   projectResourcesOptions,
 } from "@/data/queries/projects";
+import { canDeleteProject } from "@multica/core/projects/deletion-permissions";
+import { agentListOptions } from "@/data/queries/agents";
+import { memberListOptions } from "@/data/queries/members";
 import { issueKeys } from "@/data/queries/issue-keys";
 import { useDeleteProject } from "@/data/mutations/projects";
 import { pinListOptions } from "@/data/queries/pins";
@@ -43,6 +46,7 @@ import { useCreatePin, useDeletePin } from "@/data/mutations/pins";
 import { useAuthStore } from "@/data/auth-store";
 import { useProjectRealtime } from "@/data/realtime/use-project-realtime";
 import { useWorkspaceStore } from "@/data/workspace-store";
+import { useT } from "@/lib/i18n";
 import { showPlatformActionSheet } from "@/lib/action-sheet";
 
 export default function ProjectDetail() {
@@ -75,6 +79,10 @@ export default function ProjectDetail() {
   const projectMissing = !project || project.id === "";
 
   const userId = useAuthStore((s) => s.user?.id ?? null);
+  const { data: members = [] } = useQuery(memberListOptions(wsId));
+  const { data: agents = [] } = useQuery(agentListOptions(wsId, { includeArchived: true }));
+  const role = members.find((m) => m.user_id === userId)?.role ?? null;
+  const canDelete = !!project && canDeleteProject(project, userId, role, agents);
   const { data: pins } = useQuery(pinListOptions(wsId, userId));
   const isPinned =
     !!project &&
@@ -83,6 +91,7 @@ export default function ProjectDetail() {
     );
   const createPin = useCreatePin();
   const deletePin = useDeletePin();
+  const { t } = useT("projects");
 
   const onPressMore = () => {
     if (!project) return;
@@ -91,7 +100,7 @@ export default function ProjectDetail() {
       title: project.title,
       options: [
         {
-          label: isPinned ? "Unpin" : "Pin",
+          label: isPinned ? t("menu.unpin") : t("menu.pin"),
           onPress: () =>
             isPinned
               ? deletePin.mutate({ itemType: "project", itemId: project.id })
@@ -101,41 +110,43 @@ export default function ProjectDetail() {
                 }),
         },
         {
-          label: "Edit details",
+          label: t("menu.edit_details"),
           onPress: () => {
-            if (wsSlug) {
-              router.push(`/${wsSlug}/project/${id}/edit`);
-            }
+            if (wsSlug) router.push(`/${wsSlug}/project/${id}/edit`);
           },
         },
         ...(wsUrl
           ? [
               {
-                label: "Open on web",
+                label: t("menu.open_web"),
                 onPress: () => {
                   Linking.openURL(`${wsUrl}/${wsSlug}/projects/${id}`);
                 },
               },
             ]
           : []),
-        {
-          label: "Delete",
-          style: "destructive" as const,
-          onPress: onDelete,
-        },
-        { label: "Cancel", style: "cancel" },
+        ...(canDelete
+          ? [
+              {
+                label: t("common:actions.delete"),
+                style: "destructive" as const,
+                onPress: onDelete,
+              },
+            ]
+          : []),
+        { label: t("common:actions.cancel"), style: "cancel" as const },
       ],
     });
   };
 
   const onDelete = () => {
     Alert.alert(
-      "Delete project?",
-      "This cannot be undone. Issues in this project will become unassigned from any project.",
+      t("delete.title"),
+      t("delete.message"),
       [
-        { text: "Cancel", style: "cancel" },
+        { text: t("common:actions.cancel"), style: "cancel" },
         {
-          text: "Delete",
+          text: t("common:actions.delete"),
           style: "destructive",
           onPress: () => {
             deleteProject.mutate(undefined, {
@@ -151,14 +162,14 @@ export default function ProjectDetail() {
     <SafeAreaView className="flex-1 bg-background" edges={["bottom"]}>
       <Stack.Screen
         options={{
-          title: project?.title || "Project",
-          headerBackTitle: "Back",
+          title: project?.title || t("navigation:routes.project"),
+          headerBackTitle: t("common:actions.back"),
           headerRight: project
             ? () => (
                 <IconButton
                   name="ellipsis-horizontal"
                   onPress={onPressMore}
-                  accessibilityLabel="Project actions"
+                  accessibilityLabel={t("menu.project_actions")}
                 />
               )
             : undefined,
@@ -171,13 +182,15 @@ export default function ProjectDetail() {
       ) : detail.error || projectMissing ? (
         <View className="flex-1 items-center justify-center px-6 gap-3">
           <Text className="text-sm text-destructive text-center">
-            Failed to load project:{" "}
-            {detail.error instanceof Error
-              ? detail.error.message
-              : "not found"}
+            {t("errors.load_failed", {
+              message:
+                detail.error instanceof Error
+                  ? detail.error.message
+                  : "not found",
+            })}
           </Text>
           <Button variant="outline" onPress={() => detail.refetch()}>
-            <Text>Retry</Text>
+            <Text>{t("common:actions.retry")}</Text>
           </Button>
         </View>
       ) : (

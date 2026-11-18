@@ -61,12 +61,12 @@ describe("android scaffold", () => {
       "android:sync:staging":
         "dotenv -e .env.staging -- cross-env APP_ENV=staging expo prebuild --clean --platform android --no-install",
       "android:sync:prod":
-        "dotenv -e .env.production -- cross-env APP_ENV=production expo prebuild --clean --platform android --no-install",
+        "dotenv -e .env.production.local -e .env.production -- cross-env APP_ENV=production expo prebuild --clean --platform android --no-install",
       android: "pnpm android:sync && expo run:android",
       "android:staging":
         "pnpm android:sync:staging && dotenv -e .env.staging -- cross-env APP_ENV=staging expo run:android",
       "android:prod":
-        "pnpm android:sync:prod && dotenv -e .env.production -- cross-env APP_ENV=production expo run:android",
+        "pnpm android:sync:prod && dotenv -e .env.production.local -e .env.production -- cross-env APP_ENV=production expo run:android",
     });
 
     expect(workspacePackage.scripts).toMatchObject({

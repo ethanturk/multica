@@ -133,7 +133,7 @@ describe("RealtimeProvider", () => {
 
     expect(wsInstances[0]?.pause).toHaveBeenCalledOnce();
     expect(wsInstances[0]?.resume).toHaveBeenCalledOnce();
-    expect(wsInstances[0]?.forceReconnect).toHaveBeenCalledTimes(2);
+    // Foreground-recovery reconnect counts are owned by realtime-provider.test.ts.
 
     await act(async () => {
       renderer?.unmount();

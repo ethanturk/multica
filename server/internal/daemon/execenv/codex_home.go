@@ -293,8 +293,9 @@ func prepareCodexHomeWithOpts(codexHome string, opts CodexHomeOptions, logger *s
 		// so the fail-closed policy just computed above would only exist in
 		// memory while the effective config silently stays loose. Abort rather
 		// than launch Codex with an unenforced sandbox: on fresh Prepare this
-		// fails the task; on Reuse the caller leaves env.CodexHome unset, which
-		// configureCodexTaskShellEnvironment then refuses to start (MUL-4957).
+		// fails the task; on Reuse the caller declines the reuse and falls back
+		// to Prepare, which re-runs this check against a fresh home and fails
+		// the task if the managed block still cannot be written (MUL-4957).
 		return fmt.Errorf("ensure codex sandbox config: %w", err)
 	}
 
@@ -302,7 +303,7 @@ func prepareCodexHomeWithOpts(codexHome string, opts CodexHomeOptions, logger *s
 	// so the parent thread's `turn/completed` is not interpreted as task
 	// completion while spawned subagents are still running. See
 	// codex_multi_agent.go for the full rationale and escape hatch.
-	if err := ensureCodexMultiAgentConfig(filepath.Join(codexHome, "config.toml"), logger); err != nil {
+	if err := ensureCodexMultiAgentConfig(filepath.Join(codexHome, "config.toml"), opts.CodexVersion, logger); err != nil {
 		logger.Warn("execenv: codex-home ensure multi-agent config failed", "error", err)
 	}
 

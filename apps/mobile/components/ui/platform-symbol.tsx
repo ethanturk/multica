@@ -1,13 +1,13 @@
 import { Ionicons } from "@expo/vector-icons";
 import { Image as ExpoImage } from "expo-image";
-import { Platform } from "react-native";
+import { Platform, type ColorValue } from "react-native";
 import type { PlatformSymbolName } from "@/lib/platform-symbols";
 import { resolvePlatformSymbol } from "@/lib/platform-symbols";
 
 type PlatformSymbolProps = {
   name: PlatformSymbolName;
   size: number;
-  tintColor: string;
+  tintColor: ColorValue;
 };
 
 export function PlatformSymbol({
@@ -19,8 +19,7 @@ export function PlatformSymbol({
     return (
       <ExpoImage
         source={`sf:${name}`}
-        tintColor={tintColor}
-        style={{ width: size, height: size }}
+        style={{ width: size, height: size, color: tintColor }}
       />
     );
   }

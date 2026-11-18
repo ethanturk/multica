@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -70,8 +72,7 @@ const (
 	DefaultMaxConcurrentTasks             = 20
 	DefaultGCInterval                     = 2 * time.Hour
 	DefaultGCTTL                          = 24 * time.Hour      // 1 day — AI-coding issues rarely stay open long
-	DefaultGCCompletedTaskTTLCloud        = 14 * 24 * time.Hour // 14 days — Multica Cloud bounds completed issue-task env retention by default; see defaultGCCompletedTaskTTL
-	DefaultGCCompletedTaskTTLSelfHost     = 0                   // disabled — self-host keeps every completed env until its issue goes terminal, unless an operator opts in
+	DefaultGCCompletedTaskTTL             = 14 * 24 * time.Hour // 14 days — bound completed issue-task env retention on every server; see the MULTICA_GC_COMPLETED_TASK_TTL comment in LoadConfig
 	DefaultGCOrphanTTL                    = 72 * time.Hour      // 3 days — orphans with no meta (crashes, pre-GC leftovers)
 	DefaultGCArtifactTTL                  = 12 * time.Hour      // 12h — drop regenerable artifacts once a task has been completed this long
 	DefaultGCCodexSessionTTL              = 14 * 24 * time.Hour // 14 days — reclaim per-issue Codex session stores untouched this long
@@ -130,17 +131,17 @@ type Config struct {
 	DeviceName                     string
 	RuntimeName                    string
 	CLIVersion                     string                // multica CLI version (e.g. "0.1.13")
+	CLICommit                      string                // full build revision embedded in the running CLI; empty/unknown if unavailable
 	LaunchedBy                     string                // "desktop" when spawned by the Electron app, empty for standalone
 	Profile                        string                // profile name (empty = default)
-	Agents                         map[string]AgentEntry // keyed by provider: claude, codebuddy, codex, copilot, opencode, codearts, deveco, openclaw, hermes, pi, cursor, kimi, reasonix, dsh, kiro, antigravity, dirge, qoder, qoderclicn, traecli, grok, qwen, qwenpaw, mcode, dim, zeroclaw (plus built-in runtime identities from agent.BuiltinRuntimes, e.g. omp)
+	Agents                         map[string]AgentEntry // keyed by provider: claude, codebuddy, codex, copilot, opencode, codearts, deveco, openclaw, hermes, pi, cursor, kimi, reasonix, dsh, kiro, antigravity, dirge, qoder, qoderclicn, traecli, grok, qwen, qwenpaw, droid, amp, mcode, muse, devin, dim, zeroclaw, museapp (plus built-in runtime identities from agent.BuiltinRuntimes, e.g. omp)
 	WorkspacesRoot                 string                // base path for execution envs (default: ~/multica_workspaces)
-	KeepEnvAfterTask               bool                  // preserve env after task for debugging
 	HealthPort                     int                   // local HTTP port for health checks (default: 19514)
 	MaxConcurrentTasks             int                   // max tasks running in parallel (default: 20)
 	GCEnabled                      bool                  // enable periodic workspace garbage collection (default: true)
 	GCInterval                     time.Duration         // how often the GC loop runs (default: 2h)
 	GCTTL                          time.Duration         // clean dirs whose issue is done/cancelled and updated_at < now()-TTL (default: 24h)
-	GCCompletedTaskTTL             time.Duration         // fully clean inactive issue-task envs completed at least this long ago, regardless of parent issue status (default: 14d on Multica Cloud, 0/disabled elsewhere; local_directory envs are never fully removed)
+	GCCompletedTaskTTL             time.Duration         // fully clean inactive issue-task envs; local_directory envs expire only codex-home, preserving daemon logs/output and externally stored sessions (default: 14d; 0 disables)
 	GCOrphanTTL                    time.Duration         // clean orphan dirs with no meta, or dirs whose issue gc-check returns 404, once they exceed this age (default: 72h). The 404 path uses the same TTL — a scoped-down token can't instantly wipe live workspaces.
 	GCArtifactTTL                  time.Duration         // once a task has been completed for at least this long, drop regenerable artifacts: pattern-matched build outputs when the parent record keeps the directory (an open issue), and the exact daemon-managed Codex cache for every task kind (default: 12h, set 0 to disable both)
 	GCArtifactPatterns             []string              // basename patterns whose subtrees are removed during artifact cleanup (default: node_modules, .next, .turbo)
@@ -178,6 +179,8 @@ type Config struct {
 	CodexArgs                   []string
 	CodebuddyArgs               []string
 	QwenArgs                    []string
+	DroidArgs                   []string
+	AmpArgs                     []string
 	QwenpawArgs                 []string
 
 	// ProfileCommandOverrides maps a custom runtime profile_id -> the absolute
@@ -222,6 +225,8 @@ type Overrides struct {
 	// AgentTimeout is a pointer so an explicit `--agent-timeout 0` (no cap) is
 	// distinguishable from "flag not passed". nil = use env/default.
 	AgentTimeout                   *time.Duration
+	AgentIdleWatchdog              *time.Duration
+	AgentToolWatchdog              *time.Duration
 	CodexSemanticInactivityTimeout time.Duration
 	CodexHandshakeTimeout          time.Duration
 	MaxConcurrentTasks             int
@@ -306,7 +311,7 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	// can re-run the same discovery on a live daemon (MUL-5439).
 	agents := probeAgentCLIs()
 	if len(agents) == 0 && !overrides.AllowNoAgents {
-		return Config{}, fmt.Errorf("no agent CLI found: install claude, codebuddy, codearts, codex, copilot, opencode, deveco, openclaw, hermes, pi, omp, cursor-agent, kimi, reasonix, dsh, kiro-cli, agy, dirge, qodercli, qoderclicn, traecli, grok, qwen, qwenpaw, mcode, dim, or zeroclaw and ensure it is on PATH")
+		return Config{}, fmt.Errorf("no agent CLI found: install claude, codebuddy, codearts, codex, copilot, opencode, deveco, openclaw, hermes, pi, omp, cursor-agent, kimi, reasonix, dsh, kiro-cli, agy, dirge, qodercli, qoderclicn, traecli, grok, qwen, qwenpaw, droid, amp, mcode, muse, devin, dim, zeroclaw, or zcode and ensure it is on PATH")
 	}
 
 	claudeArgs, err := shellArgsFromEnv("MULTICA_CLAUDE_ARGS")
@@ -322,6 +327,14 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		return Config{}, err
 	}
 	qwenArgs, err := shellArgsFromEnv("MULTICA_QWEN_ARGS")
+	if err != nil {
+		return Config{}, err
+	}
+	ampArgs, err := shellArgsFromEnv("MULTICA_AMP_ARGS")
+	if err != nil {
+		return Config{}, err
+	}
+	droidArgs, err := shellArgsFromEnv("MULTICA_DROID_ARGS")
 	if err != nil {
 		return Config{}, err
 	}
@@ -378,6 +391,9 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if overrides.AgentIdleWatchdog != nil {
+		agentIdleWatchdog = *overrides.AgentIdleWatchdog
+	}
 	// MULTICA_OPENCODE_IDLE_WATCHDOG narrows the no-message window for
 	// OpenCode's streamed model responses. Zero removes the provider-specific
 	// override and falls back to MULTICA_AGENT_IDLE_WATCHDOG; positive values
@@ -415,6 +431,9 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	agentToolWatchdog, err := durationFromEnv("MULTICA_AGENT_TOOL_WATCHDOG", agentIdleWatchdog)
 	if err != nil {
 		return Config{}, err
+	}
+	if overrides.AgentToolWatchdog != nil {
+		agentToolWatchdog = *overrides.AgentToolWatchdog
 	}
 
 	// Codex runs a semantic-inactivity timer of its own inside the app-server
@@ -580,9 +599,6 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		healthPort = overrides.HealthPort
 	}
 
-	// Keep env after task: env > default (false)
-	keepEnv := os.Getenv("MULTICA_KEEP_ENV_AFTER_TASK") == "true" || os.Getenv("MULTICA_KEEP_ENV_AFTER_TASK") == "1"
-
 	// GC config: env > defaults
 	gcEnabled := true
 	if v := os.Getenv("MULTICA_GC_ENABLED"); v == "false" || v == "0" {
@@ -596,7 +612,18 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	gcCompletedTaskTTL, err := durationFromEnv("MULTICA_GC_COMPLETED_TASK_TTL", defaultGCCompletedTaskTTL(serverBaseURL))
+	// Full removal of a completed task environment is irreversible: it takes
+	// the checkout, .git (including work an agent left uncommitted), output/
+	// and logs/ with it. The default is bounded on every server, self-host
+	// included, because unbounded retention fills the disk of any long-lived
+	// daemon whose issues sit open (in review, awaiting response, backlog) and
+	// nobody is watching it. 14d is deliberately generous: past that much idle
+	// time main has usually moved far enough that a fresh checkout beats a
+	// stale worktree. Operators who want the old keep-until-terminal behavior
+	// set MULTICA_GC_COMPLETED_TASK_TTL=0.
+	// Local-directory tasks keep their daemon logs and output; this TTL removes
+	// only their Codex home, and only when session history is stored elsewhere.
+	gcCompletedTaskTTL, err := durationFromEnv("MULTICA_GC_COMPLETED_TASK_TTL", DefaultGCCompletedTaskTTL)
 	if err != nil {
 		return Config{}, err
 	}
@@ -691,7 +718,6 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		Profile:                         profile,
 		Agents:                          agents,
 		WorkspacesRoot:                  workspacesRoot,
-		KeepEnvAfterTask:                keepEnv,
 		GCEnabled:                       gcEnabled,
 		GCInterval:                      gcInterval,
 		GCTTL:                           gcTTL,
@@ -726,6 +752,8 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		CodexArgs:                       codexArgs,
 		CodebuddyArgs:                   codebuddyArgs,
 		QwenArgs:                        qwenArgs,
+		DroidArgs:                       droidArgs,
+		AmpArgs:                         ampArgs,
 		QwenpawArgs:                     qwenpawArgs,
 		ProfileCommandOverrides:         profileCommandOverrides,
 		DetTools:                        detTools,
@@ -754,38 +782,14 @@ const officialCloudHost = "api.multica.ai"
 // infrastructure we operate but not on someone else's: auto-update (cloud
 // users run a server that publishes the matching CLI release, so opt-in
 // self-update is safe, while self-host users may run a fork or pin to an
-// older server) and the completed-task retention TTL (see
-// defaultGCCompletedTaskTTL). Matching is host-only and case-insensitive —
-// port and path are ignored.
+// older server). Matching is host-only and case-insensitive — port and path
+// are ignored.
 func isOfficialCloudServer(baseURL string) bool {
 	u, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil {
 		return false
 	}
 	return strings.EqualFold(u.Hostname(), officialCloudHost)
-}
-
-// defaultGCCompletedTaskTTL picks the completed-task retention default from the
-// deployment kind, the same way the auto-update default is picked.
-//
-// Full removal of a completed task environment is irreversible: it takes the
-// checkout, .git (including work an agent left uncommitted), output/ and logs/
-// with it. On Multica Cloud that trade is ours to make — we operate the nodes,
-// a full disk is our incident rather than a user's, and unbounded retention has
-// no operator watching it. On self-host the same default would turn a routine
-// daemon upgrade into a silent deletion of data the operator never agreed to
-// give up, so it stays disabled until they set MULTICA_GC_COMPLETED_TASK_TTL
-// themselves. Either side can override in either direction; cloud disables it
-// again with an explicit 0.
-//
-// Non-production cloud origins (staging, previews) fall to the self-host value
-// along with everything else officialCloudHost excludes, and opt in explicitly
-// if they want the bound.
-func defaultGCCompletedTaskTTL(serverBaseURL string) time.Duration {
-	if isOfficialCloudServer(serverBaseURL) {
-		return DefaultGCCompletedTaskTTLCloud
-	}
-	return DefaultGCCompletedTaskTTLSelfHost
 }
 
 // NormalizeServerBaseURL converts a WebSocket or HTTP URL to a base HTTP URL.
@@ -1045,27 +1049,301 @@ func isExecutableFile(path string) bool {
 // doesn't require editing this list by hand.
 var defaultAgentCommandNames = append([]string{
 	"claude", "codex", "opencode", "codearts", "deveco", "openclaw", "hermes",
-	"pi", "cursor-agent", "copilot", "kimi", "reasonix", "dsh", "kiro-cli", "codebuddy", "agy", "dirge", "qodercli", "qoderclicn", "traecli", "grok", "qwen", "qwenpaw", "mcode", "dim", "zeroclaw",
+	"pi", "cursor-agent", "copilot", "kimi", "reasonix", "dsh", "kiro-cli", "codebuddy", "agy", "dirge", "qodercli", "qoderclicn", "traecli", "grok", "qwen", "qwenpaw", "droid", "amp", "mcode", "muse", "devin", "dim", "zeroclaw", "zcode",
 }, agent.BuiltinRuntimeCommands()...)
+
+// zcodeDesktopAppBundlePaths discovers the CLI in default Desktop installs.
+var zcodeDesktopAppBundlePaths = func() []string {
+	if runtime.GOOS == "linux" {
+		return []string{"/opt/ZCode/zcode"}
+	}
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	const bundle = "ZCode.app/Contents/Resources/glm/zcode.cjs"
+	paths := []string{filepath.Join("/Applications", bundle)}
+	if home, err := os.UserHomeDir(); err == nil {
+		paths = append(paths, filepath.Join(home, "Applications", bundle))
+	}
+	return paths
+}
 
 // codexDesktopAppBundlePaths returns candidate macOS app-bundle locations for
 // the bundled Codex CLI. OpenAI relocated the Desktop app from Codex.app to
-// ChatGPT.app (#5205). Candidates are ordered by install location first
-// (system /Applications before user ~/Applications); within each location the
-// new ChatGPT.app path is tried before the legacy Codex.app path, so updated
-// installs win while older installs still resolve.
+// ChatGPT.app (#5205), then nested the CLI under Resources/codex-cli/bin
+// (#8941). Candidates are ordered by install location first (system
+// /Applications before user ~/Applications). Within each location the current
+// ChatGPT.app nested path is tried before the flat Resources/codex path, which
+// is tried before the legacy Codex.app path, so the newest install wins while
+// older installs still resolve.
 var codexDesktopAppBundlePaths = func() []string {
 	paths := []string{
+		"/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
 		"/Applications/ChatGPT.app/Contents/Resources/codex",
 		"/Applications/Codex.app/Contents/Resources/codex",
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		paths = append(paths,
+			filepath.Join(home, "Applications", "ChatGPT.app", "Contents", "Resources", "codex-cli", "bin", "codex"),
 			filepath.Join(home, "Applications", "ChatGPT.app", "Contents", "Resources", "codex"),
 			filepath.Join(home, "Applications", "Codex.app", "Contents", "Resources", "codex"),
 		)
 	}
 	return paths
+}
+
+// dshDesktopAppBundlePaths returns candidate locations for the DSH CLI that
+// DeepSeek Harness Desktop manages. The app never installs `dsh` onto PATH, so
+// a GUI-launched daemon misses it on exec.LookPath and the login-shell fallback
+// cannot rescue it either — a user's rc files have no reason to know that path.
+//
+// Only DEFAULT locations are covered, and nothing here reads an install receipt
+// or the registry, so an install put somewhere else still needs
+// MULTICA_DSH_PATH. This is a convenience for the common case, never a contract
+// — which is why a miss falls through to "dsh not found" rather than to a guess.
+var dshDesktopAppBundlePaths = func() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = ""
+	}
+	return dshDesktopBundlePathsFor(runtime.GOOS, os.Getenv, home)
+}
+
+// dshDesktopBundlePathsFor builds the candidate list for one platform.
+//
+// Taking goos/env/home as arguments, rather than reading runtime.GOOS and
+// os.Getenv inline, is what makes the Windows layout assertable from any host.
+// The alternative leaves the Windows branch testable only on Windows, which in
+// this package has meant untested.
+//
+// Generated shims come first on BOTH platforms, and that order is the point: a
+// shim runs the Desktop app's own Electron binary as node, by absolute path, so
+// it needs nothing on PATH. The macOS app-bundle script below is the same CLI
+// entered through `#!/usr/bin/env node`, so it only works on a machine that
+// happens to have node installed — a last resort, not a first choice.
+func dshDesktopBundlePathsFor(goos string, env func(string) string, home string) []string {
+	paths := dshDesktopShimCandidates(dshDesktopAppDataDir(goos, env, home), dshDesktopShimNames(goos))
+	if goos == "darwin" {
+		// The CLI entry point inside the app bundle, tried last. System-wide
+		// /Applications before the per-user ~/Applications, matching
+		// codexDesktopAppBundlePaths.
+		const bundle = "DSH Desktop.app/Contents/Resources/app.asar.unpacked/node_modules/@deepseek-ai/dsh/lib/bin.js"
+		paths = append(paths, filepath.Join("/Applications", bundle))
+		if home != "" {
+			paths = append(paths, filepath.Join(home, "Applications", bundle))
+		}
+	}
+	return paths
+}
+
+// dshDesktopAppDataDir returns the per-user directory DSH Desktop keeps its
+// state in, which is also where it generates the CLI shims.
+//
+// Roaming application data on Windows, NOT the install directory: the app
+// installs to Program Files or %LOCALAPPDATA%\Programs, but the CLI it drives
+// lives beside its other per-user state. That also makes one lookup cover both
+// install modes, since a per-machine install still generates these shims into
+// each user's own roaming directory.
+//
+// %APPDATA% is preferred over composing from home because it is redirected on
+// managed and roaming-profile machines; the home-relative form is the last
+// resort for a daemon started with a stripped environment.
+func dshDesktopAppDataDir(goos string, env func(string) string, home string) string {
+	const app = "DSH Desktop"
+	switch goos {
+	case "darwin":
+		if home == "" {
+			return ""
+		}
+		return filepath.Join(home, "Library", "Application Support", app)
+	case "windows":
+		if appData := strings.TrimSpace(env("APPDATA")); appData != "" {
+			return filepath.Join(appData, app)
+		}
+		if home != "" {
+			return filepath.Join(home, "AppData", "Roaming", app)
+		}
+	}
+	return ""
+}
+
+// dshDesktopShimNames are the launchable file names a generated shim directory
+// can hold, most likely first.
+//
+// The macOS app-bundle entry point — lib/bin.js — deliberately has no Windows
+// counterpart. It is a Node script macOS starts through its shebang; Windows
+// has no shebang, exec.LookPath rejects a .js unless PATHEXT says otherwise,
+// and CreateProcess cannot start one either. Listing it there would register a
+// runtime that fails on every spawn, which is the failure executableCandidate
+// exists to prevent.
+func dshDesktopShimNames(goos string) []string {
+	if goos == "windows" {
+		return []string{"dsh.exe", "dsh.cmd", "dsh.bat"}
+	}
+	return []string{"dsh"}
+}
+
+// dshDesktopShimTiers are the directories under the app-data root whose
+// subdirectories are generated CLI payloads, in preference order.
+//
+// host-commands wins because that is the layout whose shim was confirmed to
+// run: it sets DSH_HOME and invokes the Desktop executable by absolute path.
+// The cli payload is the other shape, kept as a fallback for a Desktop version
+// that does not generate host-commands — on at least one Windows install its
+// shim exits 9009 (cmd.exe's "command not found") because what it forwards to
+// is not there. Ranking it second is what stops a broken-but-present shim being
+// chosen over a working one; nothing here executes a candidate, so order is the
+// only lever available.
+//
+// profiled marks the tier that keys its payloads by DSH profile
+// (host-commands/<profile>/generations). The profile set is the user's, so that
+// level is enumerated rather than assumed.
+var dshDesktopShimTiers = []struct {
+	dir      string
+	profiled bool
+}{
+	{dir: "host-commands", profiled: true},
+	{dir: "cli"},
+}
+
+// dshBinDir is one generated command directory plus the keys that order it.
+type dshBinDir struct {
+	path    string
+	name    string
+	modTime time.Time
+}
+
+// dshDesktopBinDirsIn collects the bin directories under root, unsorted.
+//
+// DSH Desktop lays its generated command directories out in two shapes, and a
+// host can be on either depending on which version generated them:
+//
+//	<root>/bin            — flat
+//	<root>/<id>/bin       — one payload directory per generation
+//
+// The payload id is a content hash, sometimes with a generation uuid appended,
+// so it is enumerated rather than composed. Only directories holding a bin are
+// accepted, so a stray file or a half-extracted download is skipped rather than
+// turned into a candidate.
+//
+// The flat directory carries a zero timestamp, which sorts it last: a host that
+// has both shapes is one where the generational layout is the newer of the two.
+func dshDesktopBinDirsIn(root string) []dshBinDir {
+	if root == "" {
+		return nil
+	}
+	var dirs []dshBinDir
+	if entries, err := os.ReadDir(root); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() || entry.Name() == "bin" {
+				continue
+			}
+			binDir := filepath.Join(root, entry.Name(), "bin")
+			if !isExistingDir(binDir) {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			dirs = append(dirs, dshBinDir{path: binDir, name: entry.Name(), modTime: info.ModTime()})
+		}
+	}
+	if flat := filepath.Join(root, "bin"); isExistingDir(flat) {
+		dirs = append(dirs, dshBinDir{path: flat, name: ""})
+	}
+	return dirs
+}
+
+// sortDshBinDirs orders generated directories newest first.
+//
+// This is what protects a host mid-upgrade: a new payload is written and the
+// previous one can be left in place, and the newest is the one the app is
+// actually driving. The name breaks ties, because two payloads written in the
+// same filesystem timestamp tick must still produce one stable answer rather
+// than whatever ReadDir returned — and because the answer feeds PATH and
+// process launches, an order that changes between rounds is a daemon that picks
+// a different CLI each time.
+func sortDshBinDirs(dirs []dshBinDir) {
+	sort.SliceStable(dirs, func(i, j int) bool {
+		if !dirs[i].modTime.Equal(dirs[j].modTime) {
+			return dirs[i].modTime.After(dirs[j].modTime)
+		}
+		return dirs[i].name > dirs[j].name
+	})
+}
+
+// dshDesktopBinDirs returns the bin directories under root, newest first.
+func dshDesktopBinDirs(root string) []string {
+	dirs := dshDesktopBinDirsIn(root)
+	sortDshBinDirs(dirs)
+	paths := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		paths = append(paths, dir.path)
+	}
+	return paths
+}
+
+// isExistingDir reports whether path is a directory that exists.
+func isExistingDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+// dshDesktopShimCandidates expands the generated CLI payloads under appData
+// into launchable candidate paths.
+//
+// Tier order is applied first and payload age second, so a working shim in the
+// preferred tier always outranks a newer one in the fallback tier. Within a
+// tier every root is pooled before sorting, so the newest generation wins even
+// when it belongs to a different DSH profile than the one ReadDir happened to
+// return first.
+func dshDesktopShimCandidates(appData string, names []string) []string {
+	if appData == "" || len(names) == 0 {
+		return nil
+	}
+	var paths []string
+	for _, spec := range dshDesktopShimTiers {
+		var tierDirs []dshBinDir
+		for _, root := range dshDesktopPayloadRoots(filepath.Join(appData, spec.dir), spec.profiled) {
+			tierDirs = append(tierDirs, dshDesktopBinDirsIn(root)...)
+		}
+		sortDshBinDirs(tierDirs)
+		for _, dir := range tierDirs {
+			for _, name := range names {
+				paths = append(paths, filepath.Join(dir.path, name))
+			}
+		}
+	}
+	return paths
+}
+
+// dshDesktopPayloadRoots resolves one tier to the directories whose contents
+// dshDesktopBinDirsIn enumerates.
+//
+// A profiled tier keys its payloads by DSH profile and puts them under a
+// `generations` directory (host-commands/<profile>/generations). The profile
+// names belong to the user, so that level is enumerated; an unprofiled tier
+// holds its payloads directly.
+func dshDesktopPayloadRoots(dir string, profiled bool) []string {
+	if !profiled {
+		return []string{dir}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var roots []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		generations := filepath.Join(dir, entry.Name(), "generations")
+		if isExistingDir(generations) {
+			roots = append(roots, generations)
+		}
+	}
+	return roots
 }
 
 // loginShellResolveTimeout caps how long the daemon will wait for the user's
@@ -1085,7 +1363,9 @@ const loginShellResolveTimeout = 3 * time.Second
 // once this delay elapses, so the total daemon-startup penalty caused by a
 // pathological rc file is bounded by `timeout + waitDelay`, not by however
 // long the user's background processes happen to run.
-const loginShellResolveWaitDelay = 2 * time.Second
+//
+// A var so tests can prove the ceiling holds without waiting it out.
+var loginShellResolveWaitDelay = 2 * time.Second
 
 // supportedLoginShells limits which interpreters we will invoke via
 // `<shell> -ilc <script>`. Sticking to POSIX-compatible shells means the

@@ -4,6 +4,11 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
 import IssueDetail from "@/app/(app)/[workspace]/issue/[id]";
 
+// Screens transitively load data/api.ts, which needs a base URL at import.
+vi.hoisted(() => {
+  process.env.EXPO_PUBLIC_API_URL ??= "https://api.example.test";
+});
+
 const mocks = vi.hoisted(() => ({
   alertMock: vi.fn(),
   openUrl: vi.fn(),
@@ -50,6 +55,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("react-native", () => ({
+  Platform: { OS: "ios", select: (spec: Record<string, unknown>) => spec.ios ?? spec.default },
   ActivityIndicator: (props: Record<string, any>) =>
     React.createElement("ActivityIndicator", props),
   Alert: { alert: mocks.alertMock },
@@ -444,6 +450,6 @@ describe("IssueDetail", () => {
           : [node.props.children],
       )
       .filter((value): value is string => typeof value === "string");
-    expect(textValues).toContain("not found");
+    expect(textValues).toContain("Failed to load issues: not found");
   });
 });

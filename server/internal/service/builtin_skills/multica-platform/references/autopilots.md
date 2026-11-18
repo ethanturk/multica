@@ -29,6 +29,8 @@ Execution modes:
 multica autopilot list --output json
 multica autopilot get <autopilot-id> --output json
 multica autopilot create --title "<title>" --description "<task prompt>" --agent <agent-name-or-id> --mode create_issue|run_only --output json
+multica autopilot create --title "<title>" --description "<task prompt>" --squad <squad-name-or-id> --mode create_issue|run_only --output json
+multica autopilot update <autopilot-id> --squad <squad-name-or-id> --output json
 multica autopilot update <autopilot-id> --status active|paused --output json
 multica autopilot runs <autopilot-id> --output json
 multica autopilot trigger-add <autopilot-id> --kind schedule --cron "0 9 * * *" --timezone Asia/Shanghai --output json
@@ -36,6 +38,14 @@ multica autopilot trigger-add <autopilot-id> --kind webhook --label "ci" --outpu
 multica autopilot trigger <autopilot-id> --output json
 multica autopilot trigger-rotate-url <autopilot-id> <trigger-id> --yes --output json
 ```
+
+The assignee flags `--agent`, `--squad`, and `--squad-id` are mutually exclusive.
+On `update`, any of them retargets the autopilot (`--agent` moves a squad
+autopilot back to a single agent); leave them all out to keep the current
+assignee.
+
+A CLI that answers `unknown flag: --squad` predates squad assignees: assign the
+squad in the web app, or ask the user to update the CLI.
 
 Do not run `trigger`, `delete`, `trigger-delete`, or `trigger-rotate-url` to
 test — those are real side effects. Use `trigger` only when the user explicitly
@@ -47,6 +57,11 @@ URL; the old URL stops being valid immediately.
 offline, quota exhausted, a duplicate already in flight — dispatched nothing, and
 its `failure_reason` says which. Do not report a manual run as done without
 seeing one of those two statuses.
+
+The default `multica autopilot list` table includes `LAST_STATUS`. Treat a
+healthy-looking `STATUS=active` row with `LAST_STATUS=failed` as a failing
+autopilot; inspect `multica autopilot runs <id> --output json` for the failure
+reason.
 
 A schedule trigger without `--timezone` runs in **UTC**. Name the zone whenever
 a human confirmed a wall-clock time, or they will confirm a morning job and

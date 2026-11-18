@@ -4,6 +4,11 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
 import ProfileSettingsScreen from "@/app/(app)/[workspace]/more/settings/profile";
 
+// Screens transitively load data/api.ts, which needs a base URL at import.
+vi.hoisted(() => {
+  process.env.EXPO_PUBLIC_API_URL ??= "https://api.example.test";
+});
+
 const mocks = vi.hoisted(() => ({
   alertMock: vi.fn(),
   requestCameraPermissionsAsync: vi.fn(),
@@ -267,7 +272,7 @@ describe("ProfileSettingsScreen", () => {
       await renderer!.root.findByType("Button").props.onPress();
     });
     expect(mocks.alertMock).toHaveBeenCalledWith(
-      "Save failed",
+      "Failed to save profile.",
       "save exploded",
     );
   });
