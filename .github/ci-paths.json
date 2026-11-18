@@ -30,6 +30,8 @@
   ],
   "backend": [
     "server/**",
+    "dettools/**",
+    "scripts/stage8-promote.sh",
     "packages/core/runtimes/cli-version.ts",
     "packages/core/types/inbox.ts",
     ".multica/environments.toml",

@@ -105,7 +105,7 @@ function StatusBadge({ status }: { status: string }) {
   return (
     <span
       className={
-        "inline-flex items-center rounded px-1.5 py-0.5 font-mono text-caption " +
+        "inline-flex items-center rounded-sm px-1.5 py-0.5 font-mono text-caption " +
         (ok ? "bg-emerald-500/15 text-emerald-600" : "bg-destructive/15 text-destructive")
       }
     >
@@ -258,7 +258,7 @@ export function DeterministicToolsPage() {
                   test.reset();
                 }}
                 className={
-                  "flex items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-body hover:bg-accent " +
+                  "flex items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-left text-body hover:bg-accent " +
                   (draft.id === t.id ? "bg-accent" : "")
                 }
               >

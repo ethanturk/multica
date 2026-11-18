@@ -19,7 +19,7 @@
     "@multica/ui": "workspace:*",
     "@multica/views": "workspace:*",
     "@tanstack/react-query": "catalog:",
-    "dotenv": "^17.4.1",
+    "dotenv": "catalog:",
     "fumadocs-core": "catalog:",
     "fumadocs-mdx": "catalog:",
     "next": "catalog:",
