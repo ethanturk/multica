@@ -2734,7 +2734,9 @@ func TestCompleteTask_CodingTeamWatchdogMarksIssueDone(t *testing.T) {
 
 	ctx := context.Background()
 	agentID := createHandlerTestAgent(t, "Coding Team Watchdog", nil)
-	runtimeID := handlerTestRuntimeID(t)
+	// Daemon task access requires the task's runtime to belong to the calling
+	// daemon, so bind the task to a runtime of "legit-daemon".
+	runtimeID := dbfx.Runtime(t, "coding-team-watchdog runtime", testutil.Cols{"daemon_id": "legit-daemon"})
 
 	var issueID string
 	if err := testPool.QueryRow(ctx, `
